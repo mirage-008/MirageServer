@@ -1,5 +1,5 @@
 <script setup>
-import { watch, ref, onMounted, onBeforeUpdate, computed } from "vue";
+import { watch, ref, onMounted } from "vue";
 import Toast from "../Toast.vue";
 import { useDisScroll } from "/src/utils.js";
 
@@ -18,9 +18,7 @@ watch(toastShow, () => {
 });
 
 const inputBlocking = ref(false);
-
 const setName = ref("");
-
 const setNameOccupied = ref(false);
 const wrongSetName = ref(false);
 
@@ -29,10 +27,10 @@ watch(
   (newV) => {
     setNameOccupied.value = false;
     wrongSetName.value = false;
-    setName.value = setName.value
-      .toLowerCase()
-      .replace(/[^-0-9a-z]/gi, "-")
-      .replace(/--*/g, "-");
+    const normalized = newV.toLowerCase().replace(/[^-0-9a-z]/gi, "-").replace(/--*/g, "-");
+    if (normalized != newV) {
+      setName.value = normalized;
+    }
   }
 );
 
@@ -58,20 +56,22 @@ function createTagName() {
     })
     .then(function (response) {
       if (response.data["status"] == "success") {
-        emit("added-tag");
+        emit("added-tag", response.data["data"]);
         emit("close");
       } else if (response.data["status"] == "error-occupied") {
         setNameOccupied.value = true;
       } else {
-        toastMsg.value = "创建标签失败:" + response.data["status"].substring[6];
+        toastMsg.value = "创建标签失败:" + response.data["status"].substring(6);
         toastShow.value = true;
       }
     })
     .catch(function (error) {
       toastMsg.value = "创建标签失败:" + error;
       toastShow.value = true;
+    })
+    .finally(function () {
+      inputBlocking.value = false;
     });
-  inputBlocking.value = false;
 }
 </script>
 
@@ -88,7 +88,7 @@ function createTagName() {
       <header class="flex items-center justify-between space-x-4 mb-5 mr-8">
         <div class="font-semibold text-lg truncate">创建标签</div>
       </header>
-      <form @submit.prevent="$emit('confirm')">
+      <form @submit.prevent="createTagName">
         <p class="text-gray-700 mb-6">
           「<strong>标签</strong>」在被创建后可由管理员在控制台或对应标签管理员在登录时设置给节点
         </p>
@@ -123,7 +123,6 @@ function createTagName() {
           </button>
           <button
             :disabled="inputBlocking"
-            @click="createTagName"
             class="btn border-0 bg-blue-500 hover:bg-blue-900 disabled:bg-blue-500/60 text-white disabled:text-white/60 h-9 min-h-fit"
             type="submit"
           >
@@ -153,6 +152,10 @@ function createTagName() {
       </button>
     </div>
   </div>
+
+  <Teleport to=".toast-container">
+    <Toast :show="toastShow" :msg="toastMsg" @close="toastShow = false"></Toast>
+  </Teleport>
 </template>
 
 <style scoped>

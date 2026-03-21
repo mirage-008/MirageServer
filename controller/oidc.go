@@ -320,7 +320,20 @@ func (h *Mirage) findOrCreateNewUserForOIDCCallback(
 ) (*User, error) {
 	user, err := h.GetUser(userName, orgName, provider)
 	if errors.Is(err, ErrUserNotFound) || errors.Is(err, ErrOrgNotFound) {
-		user, err = h.CreateUser(userName, userDisName, orgName, provider)
+		invite, invitedOrg, inviteErr := h.resolvePendingInviteForIdentity(userName)
+		if inviteErr != nil {
+			log.Error().
+				Caller().
+				Err(inviteErr).
+				Str("user", userName).
+				Msg("could not resolve pending invite for user")
+			return nil, inviteErr
+		}
+		if invite != nil && invitedOrg != nil {
+			user, err = h.CreateUserFromInvite(invite, invitedOrg, userName, userDisName)
+		} else {
+			user, err = h.CreateUser(userName, userDisName, orgName, provider)
+		}
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -334,6 +347,14 @@ func (h *Mirage) findOrCreateNewUserForOIDCCallback(
 			Err(err).
 			Str("user", userName).
 			Msg("could not find or create user")
+		return nil, err
+	}
+	if _, err := h.AcceptPendingMachineSharesForUser(user); err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Str("user", userName).
+			Msg("could not accept pending machine shares for user")
 		return nil, err
 	}
 	return user, nil

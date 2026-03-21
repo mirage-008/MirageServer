@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -21,7 +22,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
-	"tailscale.com/control/controlclient"
+	"tailscale.com/control/ts2021"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
@@ -53,8 +54,11 @@ type Mirage struct {
 
 	noisePrivateKey *key.MachinePrivate
 	//	DERPMap         *tailcfg.DERPMap
-	DERPNCs    map[string]*controlclient.NoiseClient
-	DERPseqnum map[string]int
+	DERPNCs         map[string]*ts2021.Client
+	DERPseqnum      map[string]int
+	derpMapMu       sync.RWMutex
+	remoteDERPMap   *tailcfg.DERPMap
+	remoteDERPMapAt time.Time
 
 	aclPolicy *ACLPolicy
 	aclRules  []tailcfg.FilterRule
@@ -113,7 +117,7 @@ func NewMirage(cfg *Config, db *gorm.DB) (*Mirage, error) {
 		cancel: cancel,
 
 		noisePrivateKey: noisePrivateKey,
-		DERPNCs:         make(map[string]*controlclient.NoiseClient),
+		DERPNCs:         make(map[string]*ts2021.Client),
 		DERPseqnum:      make(map[string]int),
 		aclRules:        tailcfg.FilterAllowAll, // default allowall
 
@@ -360,7 +364,13 @@ func (h *Mirage) initRouter(router *mux.Router) {
 	console_router.HandleFunc("/api/tcd/offers", h.CAPIGetTCDOffers).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/netsettings", h.getNetSettingAPI).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/keys", h.CAPIGetKeys).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/acls/meta", h.CAPIGetACLMeta).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/acls/tags", h.CAPIGetTags).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/acls/groups", h.CAPIGetGroups).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/acls/hosts", h.CAPIGetHosts).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/acls/rules", h.CAPIGetRules).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/acls/ssh", h.CAPIGetSSH).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/acls/auto-approvers", h.CAPIGetAutoApprovers).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/subscription", h.CAPIGetSubscription).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/derp/query", h.CAPIQueryDERP).Methods(http.MethodGet)
 
@@ -369,8 +379,15 @@ func (h *Mirage) initRouter(router *mux.Router) {
 	console_router.HandleFunc("/api/machines", h.ConsoleMachinesUpdateAPI).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/machine/remove", h.ConsoleRemoveMachineAPI).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/netsetting/updatekeyexpiry", h.ConsoleUpdateKeyExpiryAPI).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/netsetting/updatefilesharing", h.ConsoleUpdateFileSharingAPI).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/keys", h.CAPIPostKeys).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/acls/tags", h.CAPIPostTags).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/acls/groups", h.CAPIPostGroups).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/acls/hosts", h.CAPIPostHosts).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/acls/rules", h.CAPIPostRules).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/acls/ssh", h.CAPIPostSSH).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/acls/auto-approvers/routes", h.CAPIPostAutoApproverRoutes).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/acls/auto-approvers/exit-node", h.CAPIPostAutoApproverExitNode).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/dns", h.CAPIPostDNS).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/tcd", h.CAPIPostTCD).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/derp/add", h.CAPIAddDERP).Methods(http.MethodPost)
@@ -379,6 +396,12 @@ func (h *Mirage) initRouter(router *mux.Router) {
 	// DELETE(删除类)API
 	console_router.PathPrefix("/api/keys/").HandlerFunc(h.CAPIDelKeys).Methods(http.MethodDelete)
 	console_router.PathPrefix("/api/acls/tags/").HandlerFunc(h.CAPIDelTags).Methods(http.MethodDelete)
+	console_router.PathPrefix("/api/acls/groups/").HandlerFunc(h.CAPIDelGroups).Methods(http.MethodDelete)
+	console_router.PathPrefix("/api/acls/hosts/").HandlerFunc(h.CAPIDelHosts).Methods(http.MethodDelete)
+	console_router.PathPrefix("/api/acls/rules/").HandlerFunc(h.CAPIDelRules).Methods(http.MethodDelete)
+	console_router.PathPrefix("/api/acls/ssh/").HandlerFunc(h.CAPIDelSSH).Methods(http.MethodDelete)
+	console_router.PathPrefix("/api/acls/auto-approvers/routes/").HandlerFunc(h.CAPIDelAutoApproverRoute).Methods(http.MethodDelete)
+	console_router.PathPrefix("/api/acls/auto-approvers/exit-node/").HandlerFunc(h.CAPIDelAutoApproverExitNode).Methods(http.MethodDelete)
 	console_router.PathPrefix("/api/derp/{id}").HandlerFunc(h.CAPIDelNaviNode).Methods(http.MethodDelete)
 
 	// TODO: 登出及页面转至VUE，要考虑logout是否有必要发消息给服务端
@@ -434,11 +457,15 @@ func (h *Mirage) Serve(ctrlChn chan CtrlMsg) error {
 	// over our main Addr. It also serves the legacy Tailcale API
 	router := mux.NewRouter()
 
-	_, err = server.InitDexServer(h.ctx, *h.cfg.DexConfig, router) //cgao6: 这里是dex的初始化
-	if err != nil {
-		return err
+	if h.cfg.HasDexOIDCProvider() {
+		_, err = server.InitDexServer(h.ctx, *h.cfg.DexConfig, router) //cgao6: 这里是dex的初始化
+		if err != nil {
+			return err
+		}
+		defer h.cfg.DexConfig.Storage.Close()
+	} else {
+		log.Info().Msg("No Dex/OIDC providers configured, skipping embedded Dex startup")
 	}
-	defer h.cfg.DexConfig.Storage.Close()
 
 	h.initRouter(router)
 
@@ -487,7 +514,7 @@ func (h *Mirage) Serve(ctrlChn chan CtrlMsg) error {
 				}
 				// Close network listeners
 				err = httpListener.Close()
-				if err != nil {
+				if err != nil && !errors.Is(err, net.ErrClosed) {
 					log.Error().Err(err).Msg("Failed to close http listener")
 				}
 
@@ -508,6 +535,9 @@ func (h *Mirage) Serve(ctrlChn chan CtrlMsg) error {
 				return
 			case "update-config":
 				log.Info().Msg("Received update-config message, updating config")
+				if h.cfg == nil || msg.SysCfg == nil || normalizeDERPMapURL(h.cfg.DERPURL) != normalizeDERPMapURL(msg.SysCfg.DERPURL) {
+					h.resetRemoteDERPMapCache()
+				}
 				h.cfg = msg.SysCfg
 			case "set-last-update":
 				log.Info().Msg("Received set-last-update message, updating last update time")

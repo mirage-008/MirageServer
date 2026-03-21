@@ -359,7 +359,7 @@ func (c *Cockpit) CAPIPostTenants(
 			targetTenant.Name = reqData.NewValue.Name
 		}
 		switch reqData.NewValue.Provider {
-		case "Microsoft", "Github", "Google", "Apple", "WXScan":
+		case "Microsoft", "Github", "Gitea", "Google", "Apple", "WXScan", "Aggregator":
 			targetTenant.Provider = reqData.NewValue.Provider
 		default:
 			c.doAPIResponse(w, "目标租户更新失败:不支持的Provider", nil)

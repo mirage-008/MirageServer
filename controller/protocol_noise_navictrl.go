@@ -12,30 +12,33 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"tailscale.com/control/controlclient"
+	"tailscale.com/control/ts2021"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsdial"
 	"tailscale.com/types/key"
+	"tailscale.com/util/eventbus"
 	"tailscale.com/util/singleflight"
 )
 
 // 生成连接司南的Noise客户端
-func (m *Mirage) GetNaviNoiseClient(naviPub key.MachinePublic, naviHostname string, naviDERPPort int) (*controlclient.NoiseClient, error) {
-	dialer := &tsdial.Dialer{Logf: log.Logger.Printf}
-	var sfGroup singleflight.Group[struct{}, *controlclient.NoiseClient]
-	nc, err, _ := sfGroup.Do(struct{}{}, func() (*controlclient.NoiseClient, error) {
+func (m *Mirage) GetNaviNoiseClient(naviPub key.MachinePublic, naviHostname string, naviDERPPort int) (*ts2021.Client, error) {
+	var sfGroup singleflight.Group[struct{}, *ts2021.Client]
+	nc, err, _ := sfGroup.Do(struct{}{}, func() (*ts2021.Client, error) {
 		log.Trace().Caller().Msg("creating new noise client")
-		var nc *controlclient.NoiseClient
-		netMon, err := netmon.New(log.Logger.Trace().Msgf)
+		var nc *ts2021.Client
+		bus := eventbus.New()
+		netMon, err := netmon.New(bus, log.Logger.Trace().Msgf)
 		if err != nil {
-			log.Printf("Could not create netMon: %v", err)
-			netMon = nil
+			return nil, fmt.Errorf("create netMon: %w", err)
 		}
+		dialer := tsdial.NewDialer(netMon)
+		dialer.Logf = log.Logger.Printf
+		dialer.SetBus(bus)
 		urlPort := ""
 		if naviDERPPort != 0 {
 			urlPort = ":" + strconv.Itoa(naviDERPPort)
 		}
-		nc, err = controlclient.NewNoiseClient(controlclient.NoiseOpts{
+		nc, err = ts2021.NewClient(ts2021.ClientOpts{
 			PrivKey:      *m.noisePrivateKey,
 			ServerPubKey: naviPub,
 			ServerURL:    "https://" + naviHostname + urlPort,
@@ -132,7 +135,7 @@ func (m *Mirage) getOrgNodesKey(orgID int64) ([]string, error) {
 	if orgID == 0 {
 		machines, err = m.ListMachines()
 	} else {
-		machines, err = m.ListMachinesByOrgID(orgID)
+		machines, err = m.ListVisibleMachinesByOrgID(orgID)
 	}
 	if err != nil {
 		log.Error().

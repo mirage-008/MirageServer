@@ -19,6 +19,43 @@ const keyExpiryInputValue = ref(180);
 const keyExpirySubDis = ref(false);
 const keyExpiryAddDis = ref(false);
 const keyExpirySaveDis = ref(false);
+const fileSharingEnabled = ref(true);
+const fileSharingInputValue = ref(true);
+const fileSharingSaveDis = ref(true);
+
+function updateFileSharingBtns() {
+  fileSharingSaveDis.value = fileSharingInputValue.value == fileSharingEnabled.value;
+}
+
+function resetFileSharingInput() {
+  fileSharingInputValue.value = fileSharingEnabled.value;
+  updateFileSharingBtns();
+}
+
+function updateFileSharing() {
+  axios
+    .post("/admin/api/netsetting/updatefilesharing", {
+      fileSharing: fileSharingInputValue.value,
+    })
+    .then(function (response) {
+      if (response.data["status"] == "success") {
+        fileSharingEnabled.value = response.data["data"];
+        fileSharingInputValue.value = response.data["data"];
+        updateFileSharingBtns();
+        toastMsg.value = fileSharingEnabled.value
+          ? "已开启文件共享 / Taildrop！"
+          : "已关闭文件共享 / Taildrop！";
+        toastShow.value = true;
+      } else {
+        toastMsg.value = "失败：" + response.data["status"].substring(6);
+        toastShow.value = true;
+      }
+    })
+    .catch(function (error) {
+      toastMsg.value = "失败：" + error;
+      toastShow.value = true;
+    });
+}
 
 function updateKeyExpiryBtns() {
   if (Number(keyExpiryInputValue.value) > 1) {
@@ -70,7 +107,10 @@ onMounted(() => {
       if (response.data["status"] == "success") {
         MaxKeyExpiry.value = response.data["data"]["maxKeyDurationDays"];
         keyExpiryInputValue.value = response.data["data"]["maxKeyDurationDays"];
+        fileSharingEnabled.value = response.data["data"]["fileSharing"];
+        fileSharingInputValue.value = response.data["data"]["fileSharing"];
         updateKeyExpiryBtns();
+        updateFileSharingBtns();
       } else {
         toastMsg.value = "失败：" + response.data["status"].substring(6);
         toastShow.value = true;
@@ -137,6 +177,46 @@ function updateKeyExpiry() {
                 >
               </div></span
             >
+          </div>
+        </div>
+        <div>
+          <header class="max-w-2xl">
+            <h3 class="text-xl font-semibold tracking-tight">文件共享 / Taildrop</h3>
+            <p class="mt-1 text-gray-600">
+              控制组织中的节点是否暴露文件共享能力。关闭后，新下发的节点配置将不再包含 Taildrop 能力。
+            </p>
+          </header>
+          <div class="mt-4">
+            <div class="flex items-center">
+              <input
+                v-model="fileSharingInputValue"
+                id="file-sharing-enabled"
+                type="checkbox"
+                class="toggle mr-3"
+              />
+              <label class="font-medium cursor-pointer" for="file-sharing-enabled">
+                启用文件共享 / Taildrop
+              </label>
+            </div>
+            <p class="text-sm text-gray-500 mt-2">
+              该设置按组织生效，并通过节点 capability 控制文件收发功能是否可用。
+            </p>
+            <div class="mt-4">
+              <button
+                @click="updateFileSharing"
+                class="btn border-0 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-600/60 text-white disabled:text-white/60 h-9 min-h-fit"
+                :disabled="fileSharingSaveDis"
+              >
+                保存
+              </button>
+              <button
+                @click="resetFileSharingInput"
+                class="btn border border-stone-300 hover:border-stone-300 disabled:border-stone-300 bg-base-200 hover:bg-base-300 disabled:bg-base-200/60 text-black disabled:text-black/30 h-9 min-h-fit ml-3"
+                :disabled="fileSharingSaveDis"
+              >
+                重置
+              </button>
+            </div>
           </div>
         </div>
         <div>

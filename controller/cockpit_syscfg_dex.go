@@ -6,6 +6,7 @@ import (
 
 	gosundheit "github.com/AppsFlyer/go-sundheit"
 	"github.com/dexidp/dex/connector/apple"
+	"github.com/dexidp/dex/connector/gitea"
 	"github.com/dexidp/dex/connector/github"
 	"github.com/dexidp/dex/connector/google"
 	"github.com/dexidp/dex/connector/microsoft"
@@ -30,6 +31,14 @@ func (s *SysConfig) toDexConfig() (*server.Config, error) {
 	githubCfg := &github.Config{
 		ClientID:      s.GithubCfg.ClientID,
 		ClientSecret:  s.GithubCfg.ClientSecret,
+		RedirectURI:   "https://" + s.ServerURL + "/issuer/callback",
+		LoadAllGroups: true,
+		UseLoginAsID:  true,
+	}
+	giteaCfg := &gitea.Config{
+		BaseURL:       s.GiteaCfg.BaseURL,
+		ClientID:      s.GiteaCfg.ClientID,
+		ClientSecret:  s.GiteaCfg.ClientSecret,
 		RedirectURI:   "https://" + s.ServerURL + "/issuer/callback",
 		LoadAllGroups: true,
 		UseLoginAsID:  true,
@@ -67,7 +76,7 @@ func (s *SysConfig) toDexConfig() (*server.Config, error) {
 		},
 	}})
 
-	storageConnectors := make([]dexStorage.Connector, 4)
+	storageConnectors := make([]dexStorage.Connector, 5)
 	for i, c := range []Connector{{
 		ID:     "Microsoft",
 		Name:   "Microsoft",
@@ -78,6 +87,11 @@ func (s *SysConfig) toDexConfig() (*server.Config, error) {
 		Name:   "Github",
 		Type:   "github",
 		Config: githubCfg,
+	}, {
+		ID:     "Gitea",
+		Name:   "Gitea",
+		Type:   "gitea",
+		Config: giteaCfg,
 	}, {
 		ID:     "Google",
 		Name:   "Google",

@@ -11,6 +11,15 @@ import (
 	"tailscale.com/types/key"
 )
 
+type legacyNaviRegisterAuth struct {
+	Provider  string `json:"Provider"`
+	LoginName string `json:"LoginName"`
+}
+
+type legacyNaviRegisterRequest struct {
+	Auth *legacyNaviRegisterAuth `json:"Auth"`
+}
+
 // // NoiseRegistrationHandler handles the actual registration process of a machine.
 func (t *noiseServer) NoiseRegistrationHandler(
 	writer http.ResponseWriter,
@@ -36,11 +45,21 @@ func (t *noiseServer) NoiseRegistrationHandler(
 
 		return
 	}
+	legacyRegisterRequest := legacyNaviRegisterRequest{}
+	if err := json.Unmarshal(body, &legacyRegisterRequest); err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Cannot parse legacy Mirage register request")
+		http.Error(writer, "Internal error", http.StatusInternalServerError)
+
+		return
+	}
 
 	t.nodeKey = registerRequest.NodeKey
 
-	if registerRequest.Auth.Provider == "Mirage" {
-		t.mirage.handleRegisterNavi(writer, req, registerRequest, t.conn.Peer())
+	if legacyRegisterRequest.Auth != nil && legacyRegisterRequest.Auth.Provider == "Mirage" {
+		t.mirage.handleRegisterNavi(writer, req, registerRequest, t.conn.Peer(), legacyRegisterRequest.Auth.LoginName)
 		return
 	}
 
@@ -59,12 +78,13 @@ func (m *Mirage) handleRegisterNavi(
 	req *http.Request,
 	registerRequest tailcfg.RegisterRequest,
 	naviKey key.MachinePublic,
+	naviLoginName string,
 ) {
 	log.Trace().Msgf("Noise registration handler for Navi %s", req.RemoteAddr)
 
-	node := m.GetNaviNode(registerRequest.Auth.LoginName)
+	node := m.GetNaviNode(naviLoginName)
 	if node == nil {
-		log.Warn().Caller().Msgf("Navi node %s not found", registerRequest.Auth.LoginName)
+		log.Warn().Caller().Msgf("Navi node %s not found", naviLoginName)
 		http.Error(writer, "Navi node not found", http.StatusNotFound)
 		return
 	}
@@ -72,7 +92,7 @@ func (m *Mirage) handleRegisterNavi(
 		node.NaviKey = MachinePublicKeyStripPrefix(naviKey)
 		node := m.UpdateNaviNode(node)
 		if node == nil {
-			log.Warn().Caller().Msgf("Navi node %s update failed", registerRequest.Auth.LoginName)
+			log.Warn().Caller().Msgf("Navi node %s update failed", naviLoginName)
 			http.Error(writer, "Internal error", http.StatusInternalServerError)
 			return
 		}
@@ -124,7 +144,7 @@ func (m *Mirage) handleRegisterNavi(
 
 		log.Info().
 			Str("func", "handleNaviRegister").
-			Str("derpID", registerRequest.Auth.LoginName).
+			Str("derpID", naviLoginName).
 			Msg("Successfully register Navi node")
 
 		return

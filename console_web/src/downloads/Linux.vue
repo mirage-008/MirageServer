@@ -69,11 +69,11 @@ const props = defineProps({
         >
           sudo dnf install mirage
         </div>
-        <p class="pb-2">使用yum/dnf的情况下，安装完成后还需要添加并启用服务</p>
+        <p class="pb-2">如服务未自动启动，可手动启用 miraged 服务</p>
         <div
           class="rounded-md border border-stone-200 gap-2 bg-stone-50 p-2 overflow-x-auto whitespace-nowrap"
         >
-          sudo systemctl enable --now tailscaled
+          sudo systemctl enable --now miraged
         </div>
         <li>接下来您就可以使用蜃境Linux版本命令了，例如使用下面命令登录接入</li>
         <div
@@ -150,12 +150,16 @@ const props = defineProps({
         </div>
         <li>使用</li>
         <div class="pb-2">
-          加压缩之后可以根据个人情况选择性将 mirage、miraged 复制/移动到
+          解压之后可按需将 mirage 复制到
+          <div class="rounded-md border border-stone-200 bg-stone-50 px-1 inline-block">
+            /usr/bin
+          </div>
+          、将 miraged 复制到
           <div class="rounded-md border border-stone-200 bg-stone-50 px-1 inline-block">
             /usr/sbin
           </div>
-          之类的路径，并可使用解压缩出的 systemd
-          目录配置服务以使其可成为服务方便开机运行和管理
+          ，并使用解压出的 systemd 目录中的 miraged.service 与 miraged.defaults
+          配置后台服务。
         </div>
       </ol>
     </div>

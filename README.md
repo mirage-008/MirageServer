@@ -6,17 +6,72 @@
 **注意** 此版本可能与Headscale、Tailscale官方版本均有不兼容的情况，如需与官方版本并用需要考虑进行兼容性测试。    
       
       
-# 使用方法    
-   
-**免配启动**    
-编译后，直接运行程序即可   
-* 默认超管控制台监听:```8081端口```，如需避免冲突进行修改只需运行前配置环境变量，例如 ```export MIRAGE_SYS_ADDR="127.0.0.1:18081"```   
-* 首次启动因为没有适当配置，控制器服务不会启动，需登录超管控制台（即通过前述的端口的```/cockpit```路径）绑定超级管理员（使用WebAuthn方式，建议使用苹果设备或yubikey，现代浏览器的密钥管理系统应该能支持但是并不建议）    
-* 要使控制器能启动的基本配置需要在cockpit上配置服务域名，要具备实际使用价值则需要再多配置任一种或几种支持的第三方身份服务商    
-* 最新版本已经弃用了原本的URL读取外部DERP列表的方式，为了连通性可用性，建议在正式用户/租户登入前配置至少一条司南信息
-    
-     
-# 完成功能进度(ToDo List)：    
+# 使用方法
+
+## 直接运行
+编译后直接运行程序即可。当前启动模型是：
+
+* 进程启动后**先只启动超管 cockpit**，默认监听 ```8081``` 端口；如需避免冲突，可在启动前设置环境变量，例如 ```export MIRAGE_SYS_ADDR="127.0.0.1:18081"```
+* cockpit 入口为 ```/cockpit```，例如 ```http://127.0.0.1:8081/cockpit/```
+* 首次启动因为还没有有效系统配置，**控制器服务不会自动启动**；需要先进入 cockpit 完成超级管理员绑定（WebAuthn）和基础配置
+* cockpit 中基础配置有效后，控制器服务才会启动；默认控制器监听地址为 ```8080```
+* 要使控制器具备实际使用价值，至少需要在 cockpit 上配置服务域名；如需完整用户登录体验，通常还需要继续配置一种或多种第三方身份服务商
+* 最新版本已经弃用了原本的 URL 读取外部 DERP 列表方式；为了连通性和可用性，建议在正式用户/租户登入前配置至少一条司南信息
+
+## 本地 Podman 部署（已验证可启动 cockpit）
+仓库根目录现已提供顶层 `Containerfile`，可直接在本地 Podman 中构建 MirageServer：
+
+```bash
+cd /home/hao/A-1/MirageServer
+podman build -t mirageserver-local -f ./Containerfile .
+mkdir -p /tmp/mirageserver-data
+podman run -d \
+  --name mirageserver-local \
+  -p 18081:8081 \
+  -p 18080:8080 \
+  -v /tmp/mirageserver-data:/var/lib/mirageserver \
+  localhost/mirageserver-local:latest
+```
+
+当前已验证：
+
+* 容器可以正常启动，日志会输出 `Cockpit is ready on :8081`
+* `http://127.0.0.1:18081/cockpit/` 可返回 `200 OK`
+* 在尚未通过 cockpit 完成基础配置并启动服务前，`18080` 控制器端口不会响应
+* 挂载目录中会生成并保留 `db.sqlite`，容器删除后重建仍可复用该数据目录
+
+建议的本地持久化约定：
+
+* `db.sqlite`：必须持久化，否则超管绑定和系统配置会在容器重建后丢失
+* `download/`：如果要测试客户端发布/下载链路，也建议一并持久化
+
+当前 Podman 本地测试的边界：
+
+* 适合验证 cockpit、首次绑定、基础配置、服务启动、数据库持久化
+* **不等于完整线上认证回归**；当前用户侧登录、Dex/OIDC 回调、下载发布 URL 等多处仍依赖 ```https://<ServerURL>```、真实域名和 `Secure` Cookie
+* 因此纯本地 HTTP 容器测试更适合作为部署烟测，而不是完整生产登录链路验证
+
+## Windows 客户端安装器现状
+Windows 客户端安装器资产已经存在于 `MirageNavi` 仓库中，当前主链路是：
+
+* `mirageclient-win/build-installer.ps1`
+* `mirageclient-win/MirageSetup.iss`
+* `mirageclient-win/service_install.go`
+
+当前已确认：
+
+* 现有脚本会先生成 Windows 资源，再执行 `GOOS=windows GOARCH=amd64 go build`，最后调用 Inno Setup 生成安装器
+* 在当前 Linux 主机上，已可交叉编译出 Windows `Mirage.exe`
+* 但最终 `setup.exe` 仍依赖 Windows 原生工具链（至少需要 PowerShell + `ISCC.exe`），因此最终安装器打包应在 Windows 主机或 Windows CI runner 上完成
+
+## ACL 能力现状
+当前 MirageServer 的 **ACL 后端能力** 与 **Web UI 已暴露能力** 不是一回事：
+
+* 后端 policy 结构已经支持 `groups`、`hosts`、`tagOwners`、`acls`、`tests`、`autoApprovers`、`ssh`
+* 当前 Web UI / 管理 API 里真正完成并可直接操作的，主要还是**标签管理**
+* 因此阅读下方功能进度时，应理解为：ACL 页签已经存在，但不代表 ACL 全部策略能力都已经完成可视化配置
+
+# 完成功能进度(ToDo List)：
 - [x] 系统零配置文件启动，页面初始化功能   
 - [x] 超管驾驶舱   
     - [x] 超管绑定/登录/登出     
@@ -63,11 +118,12 @@
     - [ ] 更多种类角色划分编辑
     - [ ] 用户设备筛查
     - [ ] 用户冻结
-- [x] ACL页签      
-    - [x] 标签管理    
+- [x] ACL页签（当前主要完成标签管理，非完整 ACL 可视化管理）
+    - [x] 标签管理
     - [ ] 群组管理
     - [ ] 别名管理？
-    - [ ] ACL规则条目编辑    
+    - [ ] ACL规则条目编辑
+    - [ ] 其他后端已支持能力的 UI 暴露（如 auto-approvers / ssh / tests 等）
 - [x] DNS页签      
     - [x] 基本信息展示      
     - [x] 启/停用MagicDNS     

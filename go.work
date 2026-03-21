@@ -1,7 +1,6 @@
-go 1.20
+go 1.26
 
 use (
 	.
 	./dex
-	./MirageClient
 )

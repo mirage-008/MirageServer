@@ -1,9 +1,7 @@
 <script setup>
-import { watch, ref, onMounted, onBeforeUpdate, computed } from "vue";
+import { watch, ref, onMounted } from "vue";
 import Toast from "../Toast.vue";
 import SetTag from "./SetTag.vue";
-
-const devmode = ref(true);
 
 const toastShow = ref(false);
 const toastMsg = ref("");
@@ -16,48 +14,50 @@ watch(toastShow, () => {
 });
 
 const setTagShow = ref(false);
+const tagOwners = ref([]);
+
 function showSetTag() {
   setTagShow.value = true;
 }
 
-const tagOwners = ref([]);
-
-function createTagDone() {
-  axios
+function reloadTags() {
+  return axios
     .get("/admin/api/acls/tags")
     .then(function (response) {
-      // 处理成功情况
       if (response.data["status"] == "success") {
-        tagOwners.value = response.data["data"]["tagOwners"];
-      } else {
-        toastMsg.value = "获取标签失败:" + response.data["status"].substring[6];
-        toastShow.value = true;
+        tagOwners.value = response.data["data"]["tagOwners"] || [];
+        return tagOwners.value;
       }
+      throw response.data["status"].substring(6);
     })
     .catch(function (error) {
-      // 处理错误情况
       toastMsg.value = "获取标签失败:" + error;
       toastShow.value = true;
+      throw error;
     });
 }
 
+function createTagDone(tagData) {
+  const createdTagName = tagData?.tagName ? "tag:" + tagData.tagName : "";
+  reloadTags().catch(function () {
+    if (
+      createdTagName != "" &&
+      !tagOwners.value.some(function (tag) {
+        return tag.tagName == createdTagName;
+      })
+    ) {
+      tagOwners.value = tagOwners.value.concat([
+        {
+          tagName: createdTagName,
+          owners: tagData?.owners || [],
+        },
+      ]);
+    }
+  });
+}
+
 onMounted(() => {
-  axios
-    .get("/admin/api/acls/tags")
-    .then(function (response) {
-      // 处理成功情况
-      if (response.data["status"] == "success") {
-        tagOwners.value = response.data["data"]["tagOwners"];
-      } else {
-        toastMsg.value = "获取标签失败:" + response.data["status"].substring[6];
-        toastShow.value = true;
-      }
-    })
-    .catch(function (error) {
-      // 处理错误情况
-      toastMsg.value = "获取标签失败:" + error;
-      toastShow.value = true;
-    });
+  reloadTags().catch(function () {});
 });
 
 const wantRemoveTag = ref("");
@@ -82,12 +82,11 @@ function doRemoveTag() {
         tagOwners.value = tmpTagOwners;
         DeleteTagShow.value = false;
       } else {
-        toastMsg.value = "删除标签失败:" + response.data["status"].substring[6];
+        toastMsg.value = "删除标签失败:" + response.data["status"].substring(6);
         toastShow.value = true;
       }
     })
     .catch(function (error) {
-      // 处理错误情况
       toastMsg.value = "删除标签失败:" + error;
       toastShow.value = true;
     });

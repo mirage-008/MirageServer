@@ -2,13 +2,13 @@ package controller
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
-
-	"errors"
 
 	"github.com/rs/zerolog/log"
 )
@@ -41,9 +41,14 @@ func (c *Cockpit) BuildLinuxClient() {
 			c.markLinuxLastBuildFail()
 			return
 		}
-		lines := strings.Split(out.String(), "\n")
+		localHash, err := firstGitRemoteHash(out.String())
+		if err != nil {
+			log.Error().Caller().Err(err).Msg("解析本地Linux源码仓库Hash失败")
+			c.markLinuxLastBuildFail()
+			return
+		}
 		out.Reset()
-		localHash := lines[0][:39]
+		stderr.Reset()
 		// 获取远程Hash
 		cmd = exec.Command("git", "ls-remote", repoURL)
 		cmd.Stdout = &out
@@ -54,8 +59,12 @@ func (c *Cockpit) BuildLinuxClient() {
 			c.markLinuxLastBuildFail()
 			return
 		}
-		lines = strings.Split(out.String(), "\n")
-		repoHash = lines[0][:39]
+		repoHash, err = firstGitRemoteHash(out.String())
+		if err != nil {
+			log.Error().Caller().Err(err).Msg("解析远程Linux源码仓库Hash失败")
+			c.markLinuxLastBuildFail()
+			return
+		}
 
 		if localHash != repoHash {
 			c.markLinuxInBuilding(sysCfg) //进入构建状态
@@ -112,8 +121,12 @@ func (c *Cockpit) BuildLinuxClient() {
 		c.markLinuxLastBuildFail()
 		return
 	}
-	lines := strings.Split(out.String(), "\n")
-	shortVersion := strings.Split(lines[len(lines)-3], "=")[1]
+	shortVersion, err := detectMirageDistVersion("src/linux/dist")
+	if err != nil {
+		log.Error().Caller().Err(err).Msg("Linux客户端构建成功，但读取构建版本失败")
+		c.markLinuxLastBuildFail()
+		return
+	}
 	log.Info().Msg("Linux客户端构建成功! 版本号：" + shortVersion)
 
 	// 检查发布路径情况
@@ -182,19 +195,19 @@ func gitCloneRepo(repo, target string) error {
 }
 
 func ReleaseDeb(srvURL string) error {
-	_, err := os.Stat("download/deb")
-	if err != nil {
-		err = os.Mkdir("download/deb", os.ModePerm)
-		if err != nil {
-			log.Error().Caller().Err(err).Msg("deb发布文件夹创建失败")
-			return err
-		}
+	if err := os.MkdirAll("download/deb", os.ModePerm); err != nil {
+		log.Error().Caller().Err(err).Msg("deb发布文件夹创建失败")
+		return err
+	}
+	if err := moveDistArtifacts("src/linux/dist/*.deb", "download/deb"); err != nil {
+		return err
 	}
 
-	cmd := exec.Command("sh", "-c", "mv src/linux/dist/*.deb download/deb/")
 	var stderr bytes.Buffer
+	cmd := exec.Command("sh", "-c", "dpkg-scanpackages deb /dev/null | gzip -9c > deb/Packages.gz")
+	cmd.Dir = "download"
 	cmd.Stderr = &stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	if err != nil {
 		return errors.New(stderr.String())
 	}
@@ -226,24 +239,17 @@ deb https://%s/download deb`
 }
 
 func ReleaseRpm(srvURL string) error {
-	_, err := os.Stat("download/rpm")
-	if err != nil {
-		err = os.Mkdir("download/rpm", os.ModePerm)
-		if err != nil {
-			log.Error().Caller().Err(err).Msg("rpm发布文件夹创建失败")
-			return err
-		}
+	if err := os.MkdirAll("download/rpm", os.ModePerm); err != nil {
+		log.Error().Caller().Err(err).Msg("rpm发布文件夹创建失败")
+		return err
 	}
-	cmd := exec.Command("sh", "-c", "mv src/linux/dist/*.rpm download/rpm/")
+	if err := moveDistArtifacts("src/linux/dist/*.rpm", "download/rpm"); err != nil {
+		return err
+	}
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	if err != nil {
-		return errors.New(stderr.String())
-	}
 
 	// 执行packages构建 - 默认在ubuntu下执行，使用createrepo_c
-	cmd = exec.Command("lsb_release", "-d")
+	cmd := exec.Command("lsb_release", "-d")
 	output, _ := cmd.CombinedOutput()
 
 	if strings.Contains(string(output), "Ubuntu") {
@@ -253,8 +259,7 @@ func ReleaseRpm(srvURL string) error {
 	}
 	cmd.Dir = "download"
 	cmd.Stderr = &stderr
-	err = cmd.Run()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		return errors.New(stderr.String())
 	}
 
@@ -281,20 +286,66 @@ gpgcheck=0`
 }
 
 func ReleaseTgz() error {
-	_, err := os.Stat("download/tgz")
-	if err != nil {
-		err = os.Mkdir("download/tgz", os.ModePerm)
-		if err != nil {
-			log.Error().Caller().Err(err).Msg("tgz发布文件夹创建失败")
-			return err
+	if err := os.MkdirAll("download/tgz", os.ModePerm); err != nil {
+		log.Error().Caller().Err(err).Msg("tgz发布文件夹创建失败")
+		return err
+	}
+	if err := moveDistArtifacts("src/linux/dist/*.tgz", "download/tgz"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func firstGitRemoteHash(output string) (string, error) {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			return fields[0], nil
 		}
 	}
-	cmd := exec.Command("sh", "-c", "mv src/linux/dist/*.tgz download/tgz/")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err = cmd.Run()
+	return "", errors.New("未找到git远程哈希")
+}
+
+func detectMirageDistVersion(distDir string) (string, error) {
+	patterns := []string{"mirage_*.deb", "mirage_*.rpm", "mirage_*.tgz"}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(filepath.Join(distDir, pattern))
+		if err != nil {
+			return "", err
+		}
+		if len(matches) == 0 {
+			continue
+		}
+		return versionFromArtifactName(filepath.Base(matches[0]))
+	}
+	return "", errors.New("未找到Mirage构建产物")
+}
+
+func versionFromArtifactName(name string) (string, error) {
+	if !strings.HasPrefix(name, "mirage_") {
+		return "", fmt.Errorf("未知产物文件名: %s", name)
+	}
+	rest := strings.TrimPrefix(name, "mirage_")
+	idx := strings.Index(rest, "_")
+	if idx <= 0 {
+		return "", fmt.Errorf("无法从产物文件名解析版本: %s", name)
+	}
+	return rest[:idx], nil
+}
+
+func moveDistArtifacts(pattern, dstDir string) error {
+	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		return errors.New(stderr.String())
+		return err
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("未找到构建产物: %s", pattern)
+	}
+	for _, src := range matches {
+		dst := filepath.Join(dstDir, filepath.Base(src))
+		if err := os.Rename(src, dst); err != nil {
+			return err
+		}
 	}
 	return nil
 }

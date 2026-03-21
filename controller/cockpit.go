@@ -70,6 +70,47 @@ func (user *MirageSuperAdmin) WebAuthnCredentials() []webauthn.Credential {
 	return []webauthn.Credential{webauthn.Credential(user.cred)}
 }
 
+func cockpitRPID(r *http.Request) string {
+	host := r.Host
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		return parsedHost
+	}
+	return host
+}
+
+func cockpitRPOrigins(r *http.Request) []string {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return []string{origin}
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return []string{fmt.Sprintf("%s://%s", scheme, r.Host)}
+}
+
+func cockpitCookie(r *http.Request, value string, expires time.Time, maxAge int) *http.Cookie {
+	host := cockpitRPID(r)
+	cookie := &http.Cookie{
+		Name:     "mirage_cockpit_auth",
+		Value:    value,
+		Path:     "/",
+		Secure:   r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if expires.After(time.Time{}) {
+		cookie.Expires = expires
+	}
+	if maxAge != 0 {
+		cookie.MaxAge = maxAge
+	}
+	if host != "" && host != "localhost" && net.ParseIP(host) == nil {
+		cookie.Domain = host
+	}
+	return cookie
+}
+
 // NewCockpit 创建一个新的Cockpit实例
 // @sysAddr 监听地址
 // @ctrlChn 对外控制通道
@@ -132,6 +173,13 @@ func (c *Cockpit) GetSysCfg() *SysConfig {
 	err := c.db.Find(&cfg).Error
 	if err != nil || cfg == nil || len(cfg) == 0 {
 		return nil
+	}
+	if cfg[0].DerpUrl == "" {
+		cfg[0].DerpUrl = defaultRemoteDERPMapURL
+		err = c.db.Save(&cfg[0]).Error
+		if err != nil {
+			log.Fatal().Msg(err.Error())
+		}
 	}
 	if cfg[0].NaviDeployKey == "" {
 		pri, pub, err := genSSHKeypair()
@@ -259,6 +307,11 @@ func (c *Cockpit) RegisterAdmin(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	adminUser := c.superAdmin
+	if adminUser == nil {
+		adminUser = &MirageSuperAdmin{}
+	}
+
 	if r.URL.Query().Get("phase") == "response" { // 注册响应
 		response, err := protocol.ParseCredentialCreationResponseBody(r.Body)
 		if err != nil {
@@ -273,7 +326,7 @@ func (c *Cockpit) RegisterAdmin(
 		}
 		session := sessionInt.(*webauthn.SessionData)
 
-		credential, err := c.author.CreateCredential(c.superAdmin, *session, response)
+		credential, err := c.author.CreateCredential(adminUser, *session, response)
 		if err != nil {
 			c.doAPIResponse(w, "创建超管凭证失败", nil)
 			return
@@ -293,6 +346,7 @@ func (c *Cockpit) RegisterAdmin(
 				newSysCfg = &SysConfig{
 					DexSecret: dexSecret,
 					ServerKey: string(machineKeyStr),
+					DerpUrl:   defaultRemoteDERPMapURL,
 				}
 				c.db.Save(newSysCfg)
 				newSysCfg = c.GetSysCfg()
@@ -344,19 +398,19 @@ func (c *Cockpit) RegisterAdmin(
 		return
 	} else { // 注册请求
 		//if c.author == nil {
-			wconfig := &webauthn.Config{
-				RPDisplayName: "蜃境网络",                        // Display Name for your site
-				RPID:          r.Host,                        // Generally the FQDN for your site
-				RPOrigins:     r.Header["Origin"], //[]string{"https://" + serverURL}, // The origin URLs allowed for WebAuthn requests
-			}
-			webAuthor, err := webauthn.New(wconfig)
-			if err != nil {
-				c.doAPIResponse(w, "创建WebAuthn验证器失败", nil)
-				return
-			}
-			c.author = webAuthor
+		wconfig := &webauthn.Config{
+			RPDisplayName: "蜃境网络", // Display Name for your site
+			RPID:          cockpitRPID(r),
+			RPOrigins:     cockpitRPOrigins(r),
+		}
+		webAuthor, err := webauthn.New(wconfig)
+		if err != nil {
+			c.doAPIResponse(w, "创建WebAuthn验证器失败", nil)
+			return
+		}
+		c.author = webAuthor
 		//}
-		options, webAuthSession, err := c.author.BeginRegistration(c.superAdmin)
+		options, webAuthSession, err := c.author.BeginRegistration(adminUser)
 		c.authCache.Set("MirageSuperAdmin", webAuthSession, 5*time.Minute)
 		if err != nil {
 			c.doAPIResponse(w, "启动超管注册失败", nil)
@@ -390,31 +444,21 @@ func (c *Cockpit) Login(
 		// 登录成功，生成 authCode 并返回给客户端
 		authCode := c.GenAuthCode()
 		c.authCache.Set("AuthCode", authCode, 5*time.Hour)
-		authCookie := &http.Cookie{
-			Name:     "mirage_cockpit_auth",
-			Value:    authCode,
-			Domain:   r.URL.Host,
-			Path:     "/",
-			Secure:   true,
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-			Expires:  time.Now().Add(1 * time.Hour),
-		}
-		http.SetCookie(w, authCookie)
+		http.SetCookie(w, cockpitCookie(r, authCode, time.Now().Add(1*time.Hour), 0))
 		c.doAPIResponse(w, "", "ok")
 	} else { // 登录请求
 		//if c.author == nil {
-			wconfig := &webauthn.Config{
-				RPDisplayName: "蜃境网络",                        // Display Name for your site
-				RPID:          r.Host,                        // Generally the FQDN for your site
-				RPOrigins:     r.Header["Origin"], //[]string{"https://" + serverURL}, // The origin URLs allowed for WebAuthn requests
-			}
-			webAuthor, err := webauthn.New(wconfig)
-			if err != nil {
-				c.doAPIResponse(w, "创建WebAuthn验证器失败", nil)
-				return
-			}
-			c.author = webAuthor
+		wconfig := &webauthn.Config{
+			RPDisplayName: "蜃境网络", // Display Name for your site
+			RPID:          cockpitRPID(r),
+			RPOrigins:     cockpitRPOrigins(r),
+		}
+		webAuthor, err := webauthn.New(wconfig)
+		if err != nil {
+			c.doAPIResponse(w, "创建WebAuthn验证器失败", nil)
+			return
+		}
+		c.author = webAuthor
 		//}
 		options, session, err := c.author.BeginLogin(c.superAdmin)
 		if err != nil {
@@ -432,17 +476,7 @@ func (c *Cockpit) Logout(
 	r *http.Request,
 ) {
 	c.authCache.Delete("AuthCode")
-	authCookie := &http.Cookie{
-		Name:     "mirage_cockpit_auth",
-		Value:    "",
-		Domain:   r.URL.Host,
-		Path:     "/",
-		Secure:   true,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-	}
-	http.SetCookie(w, authCookie)
+	http.SetCookie(w, cockpitCookie(r, "", time.Time{}, -1))
 	c.doAPIResponse(w, "", "ok")
 }
 
@@ -661,24 +695,27 @@ func (c *Cockpit) SetSettingGeneral(
 			c.doAPIResponse(w, "更新系统配置失败", nil)
 			return
 		}
-		/*
-			case "set-derpurl":
-				derpURL, ok := reqData["DERPURL"].(string)
-				if !ok {
-					c.doAPIResponse(w, "用户请求DERPURL解析失败", nil)
-					return
-				}
-				sysCfg := c.GetSysCfg()
-				if sysCfg == nil {
-					c.doAPIResponse(w, "获取系统配置失败", nil)
-					return
-				}
-				sysCfg.DerpUrl = derpURL
-				if err := c.db.Save(sysCfg).Error; err != nil {
-					c.doAPIResponse(w, "更新系统配置失败", nil)
-					return
-				}
-		*/
+	case "set-derpurl":
+		derpURL, ok := reqData["DERPURL"].(string)
+		if !ok {
+			c.doAPIResponse(w, "用户请求DERPURL解析失败", nil)
+			return
+		}
+		derpURL, err := validateDERPMapURL(derpURL)
+		if err != nil {
+			c.doAPIResponse(w, "DERPURL无效: "+err.Error(), nil)
+			return
+		}
+		sysCfg := c.GetSysCfg()
+		if sysCfg == nil {
+			c.doAPIResponse(w, "获取系统配置失败", nil)
+			return
+		}
+		sysCfg.DerpUrl = derpURL
+		if err := c.db.Save(sysCfg).Error; err != nil {
+			c.doAPIResponse(w, "更新系统配置失败", nil)
+			return
+		}
 	case "set-routeaccessduemachine":
 		SubnetAccessDueMachine, ok := reqData["SubnetAccessDueMachine"].(bool)
 		if !ok {
@@ -729,6 +766,27 @@ func (c *Cockpit) SetSettingGeneral(
 			return
 		}
 		sysCfg.WXScanURL = wxScanURL
+		if err := c.db.Save(sysCfg).Error; err != nil {
+			c.doAPIResponse(w, "更新系统配置失败", nil)
+			return
+		}
+	case "set-aggregate":
+		aggInt, ok := reqData["Aggregate"].(map[string]interface{})
+		if !ok {
+			c.doAPIResponse(w, "用户请求Aggregate解析失败", nil)
+			return
+		}
+		aggCfg, err := aggregateLoginConfigFromMap(aggInt)
+		if err != nil {
+			c.doAPIResponse(w, err.Error(), nil)
+			return
+		}
+		sysCfg := c.GetSysCfg()
+		if sysCfg == nil {
+			c.doAPIResponse(w, "获取系统配置失败", nil)
+			return
+		}
+		sysCfg.AggregateCfg = aggCfg
 		if err := c.db.Save(sysCfg).Error; err != nil {
 			c.doAPIResponse(w, "更新系统配置失败", nil)
 			return
@@ -815,6 +873,27 @@ func (c *Cockpit) SetSettingGeneral(
 			return
 		}
 		sysCfg.GithubCfg = GHCfg
+		if err := c.db.Save(sysCfg).Error; err != nil {
+			c.doAPIResponse(w, "更新系统配置失败", nil)
+			return
+		}
+	case "set-gitea":
+		giteaInt, ok := reqData["Gitea"].(map[string]interface{})
+		if !ok {
+			c.doAPIResponse(w, "用户请求Gitea解析失败", nil)
+			return
+		}
+		giteaCfg := GiteaCfg{
+			BaseURL:      giteaInt["base_url"].(string),
+			ClientID:     giteaInt["client_id"].(string),
+			ClientSecret: giteaInt["client_secret"].(string),
+		}
+		sysCfg := c.GetSysCfg()
+		if sysCfg == nil {
+			c.doAPIResponse(w, "获取系统配置失败", nil)
+			return
+		}
+		sysCfg.GiteaCfg = giteaCfg
 		if err := c.db.Save(sysCfg).Error; err != nil {
 			c.doAPIResponse(w, "更新系统配置失败", nil)
 			return

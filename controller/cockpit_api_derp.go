@@ -39,24 +39,22 @@ func (c *Cockpit) CAPIQueryDERP(
 	}{}
 	naviRegions := c.ListNaviRegions()
 	for _, naviRegion := range naviRegions {
-		if naviRegion.OrgID == 0 {
-			naviNodes := c.ListNaviNodes(naviRegion.ID)
-			for index := range naviNodes { // 清除掉敏感信息
-				if naviNodes[index].NaviKey != "" && naviNodes[index].Arch == "external" {
-					naviNodes[index].Arch = "unknown"
-				}
-				naviNodes[index].NaviKey = ""
-				naviNodes[index].SSHPwd = ""
-				naviNodes[index].DNSKey = ""
+		naviNodes := c.ListNaviNodes(naviRegion.ID)
+		for index := range naviNodes { // 清除掉敏感信息
+			if naviNodes[index].NaviKey != "" && naviNodes[index].Arch == "external" {
+				naviNodes[index].Arch = "unknown"
 			}
-			resData = append(resData, struct {
-				Region NaviRegion `json:"Region"`
-				Nodes  []NaviNode `json:"Nodes"`
-			}{
-				Region: naviRegion,
-				Nodes:  naviNodes,
-			})
+			naviNodes[index].NaviKey = ""
+			naviNodes[index].SSHPwd = ""
+			naviNodes[index].DNSKey = ""
 		}
+		resData = append(resData, struct {
+			Region NaviRegion `json:"Region"`
+			Nodes  []NaviNode `json:"Nodes"`
+		}{
+			Region: naviRegion,
+			Nodes:  naviNodes,
+		})
 	}
 	c.doAPIResponse(w, "", resData)
 }

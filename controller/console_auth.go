@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -60,6 +61,13 @@ func (h *Mirage) doLogin(w http.ResponseWriter, r *http.Request) {
 			stateCodeItem.provider = provider
 		}
 	}
+	if provider == "Aggregator" {
+		aggregateType := strings.TrimSpace(r.FormValue("aggregate_type"))
+		if aggregateType == "" {
+			aggregateType = h.cfg.AggregateLogin.FirstLoginType()
+		}
+		stateCodeItem.aggregateType = aggregateType
+	}
 	h.stateCodeCache.Set(stateCode, stateCodeItem, time.Until(time.Now().AddDate(0, 1, 0)))
 	stateCodeCookie := &http.Cookie{
 		Name:     "mirage-authstate2",
@@ -73,19 +81,49 @@ func (h *Mirage) doLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, stateCodeCookie)
 
 	switch provider {
-	case "Github", "Microsoft", "Google", "Apple", "Ali":
+	case "Github", "Gitea", "Microsoft", "Google", "Apple", "Ali":
+		if !h.cfg.HasDexOIDCProvider() {
+			h.ErrMessage(w, r, http.StatusServiceUnavailable, "当前未配置可用的 OIDC 登录提供方")
+			return
+		}
 		h.doDexLogin(w, r, stateCode, provider)
 	case "WXScan":
+		if h.cfg.wxScanURL == "" {
+			h.ErrMessage(w, r, http.StatusServiceUnavailable, "当前未配置可用的微信登录入口")
+			return
+		}
 		h.doWXScanLogin(w, r, stateCode)
+	case "Aggregator":
+		if !h.cfg.AggregateLogin.Configured() {
+			h.ErrMessage(w, r, http.StatusServiceUnavailable, "当前未配置可用的聚合登录入口")
+			return
+		}
+		aggregateType := strings.TrimSpace(stateCodeItem.aggregateType)
+		if aggregateType == "" || !h.cfg.AggregateLogin.SupportsLoginType(aggregateType) {
+			h.ErrMessage(w, r, http.StatusBadRequest, "聚合登录类型无效")
+			return
+		}
+		h.doAggregateLogin(w, r, stateCode, aggregateType)
+	default:
+		h.ErrMessage(w, r, http.StatusBadRequest, "不支持的登录提供方")
 	}
 }
 
 func (h *Mirage) doDexLogin(w http.ResponseWriter, r *http.Request, stateCode, provider string) {
-	if h.cfg.OIDC.Issuer != "" {
-		err := h.initOIDC()
-		if err != nil {
-			log.Warn().Err(err).Msg("failed to set up OIDC provider, falling back to CLI based authentication")
-		}
+	if !h.cfg.HasDexOIDCProvider() {
+		h.ErrMessage(w, r, http.StatusServiceUnavailable, "当前未配置可用的 OIDC 登录提供方")
+		return
+	}
+
+	err := h.initOIDC()
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to set up OIDC provider")
+		h.ErrMessage(w, r, http.StatusBadGateway, "OIDC 登录服务当前不可用")
+		return
+	}
+	if h.oauth2Config == nil {
+		h.ErrMessage(w, r, http.StatusServiceUnavailable, "OIDC 登录尚未初始化")
+		return
 	}
 
 	extras := make([]oauth2.AuthCodeOption, 0, len(h.cfg.OIDC.ExtraParams))
@@ -152,6 +190,193 @@ func (h *Mirage) doWXScanLogin(w http.ResponseWriter, r *http.Request, stateCode
 			Err(err).
 			Msg("Failed to write response")
 	}
+}
+
+func aggregateLoginRequestURL(baseURL string, params url.Values) (string, error) {
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+
+	query := parsedURL.Query()
+	for key, values := range params {
+		if len(values) == 0 {
+			continue
+		}
+		query.Set(key, values[0])
+	}
+	parsedURL.RawQuery = query.Encode()
+
+	return parsedURL.String(), nil
+}
+
+func aggregateResponseSuccess(resData map[string]interface{}) bool {
+	code, ok := resData["code"]
+	if !ok {
+		return false
+	}
+
+	switch typed := code.(type) {
+	case float64:
+		return typed == 0
+	case string:
+		return typed == "0"
+	default:
+		return false
+	}
+}
+
+func aggregateResponseString(resData map[string]interface{}, key string) string {
+	value, ok := resData[key]
+	if !ok || value == nil {
+		return ""
+	}
+
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
+}
+
+func aggregateResponseMessage(resData map[string]interface{}) string {
+	if msg := aggregateResponseString(resData, "msg"); msg != "" {
+		return msg
+	}
+	if msg := aggregateResponseString(resData, "message"); msg != "" {
+		return msg
+	}
+
+	return "上游返回失败"
+}
+
+func aggregateRequestJSON(targetURL string) (map[string]interface{}, error) {
+	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return nil, err
+	}
+
+	resData := make(map[string]interface{})
+	if err := json.Unmarshal(body, &resData); err != nil {
+		preview := strings.TrimSpace(string(body))
+		if len(preview) > 512 {
+			preview = preview[:512]
+		}
+		log.Warn().
+			Str("url", targetURL).
+			Int("status", resp.StatusCode).
+			Str("content_type", resp.Header.Get("Content-Type")).
+			Str("body_preview", preview).
+			Err(err).
+			Msg("aggregate response was not valid json")
+		return nil, fmt.Errorf("decode aggregate response from %s failed: status=%d content-type=%q: %w", targetURL, resp.StatusCode, resp.Header.Get("Content-Type"), err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return resData, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	return resData, nil
+}
+
+func aggregateIdentityFromResponse(loginType string, resData map[string]interface{}) (string, string, string, error) {
+	responseType := aggregateResponseString(resData, "type")
+	if responseType != "" && responseType != loginType {
+		return "", "", "", fmt.Errorf("返回的登录类型不匹配")
+	}
+
+	socialUID := aggregateResponseString(resData, "social_uid")
+	if socialUID == "" {
+		return "", "", "", fmt.Errorf("未返回有效用户标识")
+	}
+
+	userName := loginType + ":" + socialUID
+	userDisName := aggregateResponseString(resData, "nickname")
+	if userDisName == "" {
+		userDisName = userName
+	}
+
+	return userName, userDisName, userName + ".Aggregator", nil
+}
+
+func (h *Mirage) doAggregateLogin(w http.ResponseWriter, r *http.Request, stateCode, loginType string) {
+	redirectURI, err := aggregateLoginRequestURL(
+		fmt.Sprintf("https://%s/a/oauth_response", h.cfg.ServerURL),
+		url.Values{"state": []string{stateCode}},
+	)
+	if err != nil {
+		h.ErrMessage(w, r, http.StatusBadGateway, "聚合登录回调地址生成失败")
+		return
+	}
+
+	connectURL, err := h.cfg.AggregateLogin.ConnectURL()
+	if err != nil {
+		h.ErrMessage(w, r, http.StatusBadGateway, "聚合登录请求地址生成失败")
+		return
+	}
+
+	loginURL, err := aggregateLoginRequestURL(connectURL, url.Values{
+		"act":          []string{"login"},
+		"appid":        []string{h.cfg.AggregateLogin.AppID},
+		"appkey":       []string{h.cfg.AggregateLogin.AppKey},
+		"type":         []string{loginType},
+		"redirect_uri": []string{redirectURI},
+	})
+	if err != nil {
+		h.ErrMessage(w, r, http.StatusBadGateway, "聚合登录请求地址生成失败")
+		return
+	}
+
+	resData, err := aggregateRequestJSON(loginURL)
+	if err != nil {
+		log.Warn().Err(err).Msg("aggregate login start request failed")
+		h.ErrMessage(w, r, http.StatusBadGateway, "聚合登录服务当前不可用")
+		return
+	}
+	if !aggregateResponseSuccess(resData) {
+		h.ErrMessage(w, r, http.StatusBadGateway, "聚合登录发起失败:"+aggregateResponseMessage(resData))
+		return
+	}
+
+	targetURL := aggregateResponseString(resData, "url")
+	if targetURL == "" {
+		h.ErrMessage(w, r, http.StatusBadGateway, "聚合登录发起失败:未返回跳转地址")
+		return
+	}
+
+	http.Redirect(w, r, targetURL, http.StatusFound)
+}
+
+func (h *Mirage) aggregateCallback(code, loginType string) (map[string]interface{}, error) {
+	connectURL, err := h.cfg.AggregateLogin.ConnectURL()
+	if err != nil {
+		return nil, err
+	}
+
+	callbackURL, err := aggregateLoginRequestURL(connectURL, url.Values{
+		"act":    []string{"callback"},
+		"appid":  []string{h.cfg.AggregateLogin.AppID},
+		"appkey": []string{h.cfg.AggregateLogin.AppKey},
+		"type":   []string{loginType},
+		"code":   []string{code},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return aggregateRequestJSON(callbackURL)
 }
 
 func (h *Mirage) loginMidware(next http.Handler) http.Handler {
@@ -500,7 +725,7 @@ func (h *Mirage) oauthResponse(
 	userDisName := ""
 	orgName := ""
 	switch qStateItem.provider {
-	case "Microsoft", "Google", "Github", "Apple", "Ali":
+	case "Microsoft", "Google", "Github", "Gitea", "Apple", "Ali":
 		oauth2Token, err := h.oauth2Config.Exchange(r.Context(), code)
 		if err != nil {
 			h.ErrMessage(w, r, 403, "三方登录认证错误")
@@ -523,7 +748,13 @@ func (h *Mirage) oauthResponse(
 		}
 		//userName, userDisName, err = getUserName(w, claims, h.cfg.OIDC.StripEmaildomain)
 		userName = claims.Email
+		if userName == "" {
+			userName = claims.Username
+		}
 		userDisName = claims.Name
+		if userDisName == "" {
+			userDisName = userName
+		}
 		if err != nil {
 			h.ErrMessage(w, r, 500, "三方登录用户信息解析出错")
 			return
@@ -537,6 +768,7 @@ func (h *Mirage) oauthResponse(
 		} else if len(claims.Groups) == 1 { // 对Github而言，至少有一个个人组织，是Groups中的最末一项
 			orgName = claims.Groups[0]
 		} else { // 渲染组织选择页面
+			orgName = claims.Groups[0]
 			if qStateItem.provider == "Github" { // 除Github之外其他情况有待讨论
 				orgSelectT := template.Must(template.New("orgSelector").Parse(OrgSelectTemplate))
 
@@ -577,6 +809,39 @@ func (h *Mirage) oauthResponse(
 				return
 			}
 		}
+	case "Aggregator":
+		if !h.cfg.AggregateLogin.Configured() {
+			h.ErrMessage(w, r, http.StatusServiceUnavailable, "当前未配置可用的聚合登录入口")
+			return
+		}
+
+		expectedType := strings.TrimSpace(qStateItem.aggregateType)
+		callbackType := strings.TrimSpace(r.URL.Query().Get("type"))
+		if expectedType == "" || callbackType == "" || callbackType != expectedType {
+			h.ErrMessage(w, r, http.StatusForbidden, "聚合登录返回的登录类型无效")
+			return
+		}
+
+		resData, err := h.aggregateCallback(code, expectedType)
+		if err != nil {
+			log.Warn().Err(err).Msg("aggregate login callback request failed")
+			h.ErrMessage(w, r, http.StatusBadGateway, "聚合登录服务当前不可用")
+			return
+		}
+		if !aggregateResponseSuccess(resData) {
+			h.ErrMessage(w, r, http.StatusForbidden, "聚合登录认证失败:"+aggregateResponseMessage(resData))
+			return
+		}
+
+		userName, userDisName, orgName, err = aggregateIdentityFromResponse(callbackType, resData)
+		if err != nil {
+			h.ErrMessage(w, r, http.StatusForbidden, "聚合登录认证解析用户错误:"+err.Error())
+			return
+		}
+
+		qStateItem.userName = userName
+		qStateItem.userDisName = userDisName
+		h.stateCodeCache.Set(qState, qStateItem, time.Until(qStateExpiration))
 	case "WXScan":
 		url := h.cfg.wxScanURL + "/verify"
 		message := map[string]string{"code": code}
@@ -691,12 +956,13 @@ func (h *Mirage) finishOauthResponse(
 }
 
 type StateCacheItem struct {
-	nextURL     string
-	provider    string
-	uid         tailcfg.UserID
-	userName    string
-	userDisName string
-	machineKey  key.MachinePublic
+	nextURL       string
+	provider      string
+	aggregateType string
+	uid           tailcfg.UserID
+	userName      string
+	userDisName   string
+	machineKey    key.MachinePublic
 }
 
 type ControlCacheItem struct {

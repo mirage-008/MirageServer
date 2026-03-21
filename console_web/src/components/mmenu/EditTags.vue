@@ -1,6 +1,7 @@
 <script setup>
-import { watch, ref, onMounted, nextTick, onBeforeUpdate, computed } from "vue";
+import { watch, ref, onMounted, nextTick, computed } from "vue";
 import { useDisScroll } from "/src/utils.js";
+import SetTag from "../aclpart/SetTag.vue";
 
 const emit = defineEmits(["update-done", "update-fail", "close"]);
 
@@ -11,38 +12,67 @@ const inputBlocking = ref(false);
 const props = defineProps({
   id: String,
   currentMachine: Object,
-  tagOwners: Array,
+  tagOwners: {
+    type: Array,
+    default: () => [],
+  },
   givenName: String,
+  refreshTagOwners: Function,
 });
 
+const tagMenu = ref(null);
 const allTags = ref([]);
 const addedTags = ref([]);
+const setTagShow = ref(false);
 const containInvalidTags = computed(() => {
   return addedTags.value.some((tag) => !allTags.value.includes(tag));
 });
 const activeBtn = ref(null);
-const tagMenuLeft = ref(0);
-const tagMenuTop = ref(0);
+const tagMenuLeft = ref(12);
+const tagMenuTop = ref(12);
 const tagMenuShow = ref(false);
+const availableTagOwners = computed(() => {
+  return props.tagOwners || [];
+});
+
+function syncAvailableTags(tagOwners) {
+  allTags.value = (tagOwners || []).map((tag) => tag.tagName);
+}
+
+function syncSelectedTags() {
+  addedTags.value = props.currentMachine?.allowedTags ? props.currentMachine.allowedTags.slice() : [];
+}
+
+function clampMenuPosition(rawLeft, rawTop) {
+  const menuWidth = tagMenu.value?.clientWidth || 256;
+  const menuHeight =
+    tagMenu.value?.clientHeight || Math.min(320, Math.max(availableTagOwners.value.length, 1) * 44);
+  const maxLeft = Math.max(window.innerWidth - menuWidth - 12, 12);
+  const maxTop = Math.max(window.innerHeight - menuHeight - 12, 12);
+  tagMenuLeft.value = Math.min(Math.max(rawLeft, 12), maxLeft);
+  tagMenuTop.value = Math.min(Math.max(rawTop, 12), maxTop);
+}
+
 function adjustTagMenuPosition() {
   if (activeBtn.value != null) {
-    tagMenuLeft.value = activeBtn.value?.getBoundingClientRect().left;
-    tagMenuTop.value =
-      activeBtn.value?.getBoundingClientRect().top - 8 - 40 * props.tagOwners.length;
+    const rect = activeBtn.value.getBoundingClientRect();
+    clampMenuPosition(rect.left, rect.bottom + 8);
   }
 }
+
 function openTagMenu(event) {
   activeBtn.value = event.target;
   while (activeBtn.value?.tagName != "BUTTON" && activeBtn.value?.tagName != "button") {
     activeBtn.value = activeBtn.value?.parentNode;
   }
-  adjustTagMenuPosition();
   tagMenuShow.value = true;
   nextTick(() => {
+    adjustTagMenuPosition();
     window.addEventListener("scroll", adjustTagMenuPosition, true);
     window.addEventListener("resize", adjustTagMenuPosition, true);
   });
 }
+
 function closeTagMenu() {
   activeBtn.value = null;
   tagMenuShow.value = false;
@@ -51,6 +81,12 @@ function closeTagMenu() {
     window.removeEventListener("resize", adjustTagMenuPosition, true);
   });
 }
+
+function showSetTag() {
+  closeTagMenu();
+  setTagShow.value = true;
+}
+
 function addTag(tag) {
   closeTagMenu();
   if (addedTags.value.includes(tag)) {
@@ -59,16 +95,50 @@ function addTag(tag) {
     addedTags.value.push(tag);
   }
 }
+
+function handleTagCreated(tagData) {
+  const createdTagName = tagData?.tagName ? `tag:${tagData.tagName}` : "";
+  const refresh = props.refreshTagOwners;
+
+  if (typeof refresh == "function") {
+    refresh()
+      .then(function (tags) {
+        syncAvailableTags(tags);
+        if (createdTagName && !addedTags.value.includes(createdTagName)) {
+          addedTags.value.push(createdTagName);
+        }
+      })
+      .catch(function (error) {
+        emit("update-fail", "获取标签失败！" + error);
+      });
+    return;
+  }
+
+  if (createdTagName && !allTags.value.includes(createdTagName)) {
+    allTags.value.push(createdTagName);
+  }
+  if (createdTagName && !addedTags.value.includes(createdTagName)) {
+    addedTags.value.push(createdTagName);
+  }
+}
+
 onMounted(() => {
-  addedTags.value = [];
-  if (props.currentMachine.allowedTags != null) {
-    addedTags.value = addedTags.value.concat(props.currentMachine.allowedTags);
-  }
-  allTags.value = [];
-  for (let i = 0; i < props.tagOwners.length; i++) {
-    allTags.value.push(props.tagOwners[i].tagName);
-  }
+  syncSelectedTags();
+  syncAvailableTags(props.tagOwners);
 });
+
+watch(
+  () => props.tagOwners,
+  (tagOwners) => {
+    syncAvailableTags(tagOwners);
+    if (tagMenuShow.value) {
+      nextTick(() => {
+        adjustTagMenuPosition();
+      });
+    }
+  },
+  { deep: true }
+);
 
 function updateTags() {
   inputBlocking.value = true;
@@ -92,16 +162,14 @@ function updateTags() {
     })
     .catch(function (error) {
       emit("update-fail", error);
+    })
+    .finally(function () {
+      inputBlocking.value = false;
     });
-  inputBlocking.value = false;
 }
+
 function isInvalidTag(tag) {
-  for (var i in props.tagOwners) {
-    if (props.tagOwners[i].tagName == tag) {
-      return false;
-    }
-  }
-  return true;
+  return !allTags.value.includes(tag);
 }
 </script>
 
@@ -118,12 +186,12 @@ function isInvalidTag(tag) {
       <header class="flex items-center justify-between space-x-4 mb-5 mr-8">
         <div class="font-semibold text-lg truncate">修改设备 {{ givenName }} 标签</div>
       </header>
-      <form @submit.prevent="$emit('confirm')">
+      <form @submit.prevent="updateTags">
         <p class="text-gray-700 mb-6">
           标签可帮您实现不基于设备的创建者，而基于它的用途 (比如：<code
             class="bg-gray-200 text-xs rounded px-1"
             >server</code
-          >)管理设备， 它们可以被用在ACL中控制访问
+          >)管理设备，它们可以被用在 ACL 中控制访问。
         </p>
         <div
           v-if="addedTags.length == 0"
@@ -137,7 +205,7 @@ function isInvalidTag(tag) {
           v-if="addedTags.length > 0"
           class="rounded-md border border-stone-200 mt-4 mb-3 flex flex-wrap gap-2 bg-stone-50 p-6"
         >
-          <span v-for="(tag, i) in addedTags">
+          <span v-for="tag in addedTags" :key="tag">
             <div
               class="flex items-center align-middle justify-center font-medium border rounded-full px-2 py-1 leading-none text-xs"
               :class="{
@@ -183,7 +251,7 @@ function isInvalidTag(tag) {
             </div>
           </span>
         </div>
-        <span>
+        <div class="flex flex-wrap gap-2">
           <button
             :disabled="inputBlocking"
             @click="openTagMenu($event)"
@@ -205,7 +273,16 @@ function isInvalidTag(tag) {
               <polyline points="6 9 12 15 18 9"></polyline>
             </svg>
           </button>
-        </span>
+          <button
+            :disabled="inputBlocking"
+            @click="showSetTag"
+            class="btn border border-stone-300 hover:border-stone-300 disabled:border-stone-300 bg-white hover:bg-base-100 disabled:bg-base-100/60 text-black disabled:text-black/30 h-9 min-h-fit"
+            type="button"
+          >
+            创建标签…
+          </button>
+        </div>
+        <p class="text-sm text-gray-500 mt-3">新建标签后会自动加入当前设备的待保存标签。</p>
         <div
           v-if="currentMachine.hasTags && addedTags.length == 0"
           class="flex overflow-hidden rounded-md py-3 px-4 gap-2 text-sm mt-6 bg-orange-50 text-orange-800 border border-orange-100"
@@ -219,7 +296,7 @@ function isInvalidTag(tag) {
           class="flex overflow-hidden rounded-md py-3 px-4 gap-2 text-sm mt-6 bg-orange-50 text-orange-800 border border-orange-100"
         >
           <div class="w-full">
-            你不能保存修改，因为存在不可用的标签，您可以从设备上移除它们或者在ACL中定义它们。
+            你不能保存修改，因为存在不可用的标签，您可以从设备上移除它们或者在 ACL 中定义它们。
           </div>
         </div>
         <footer class="flex mt-10 justify-end space-x-4">
@@ -237,7 +314,6 @@ function isInvalidTag(tag) {
               containInvalidTags ||
               (currentMachine.hasTags && addedTags.length == 0)
             "
-            @click="updateTags"
             class="btn border-0 bg-blue-500 hover:bg-blue-900 disabled:bg-blue-500/60 text-white disabled:text-white/60 h-9 min-h-fit"
             type="submit"
           >
@@ -267,22 +343,22 @@ function isInvalidTag(tag) {
       </button>
     </div>
   </div>
-  <!--下方显示标签菜单-->
+
   <div
     v-if="tagMenuShow"
+    ref="tagMenu"
     v-click-away="closeTagMenu"
     class="shadow-xl border border-base-300 rounded-md z-20"
     :style="
-      'position: fixed; left: 0px; top: 0px; transform: translate3d(' +
+      'position: fixed; left: ' +
       tagMenuLeft +
-      'px, ' +
+      'px; top: ' +
       tagMenuTop +
-      'px, 0px); min-width: max-content; z-index: 50; --radix-popper-transform-origin: 50% 155px;'
+      'px; width: min(16rem, calc(100vw - 24px)); z-index: 50; --radix-popper-transform-origin: 50% 0px;'
     "
   >
     <div
-      v-for="tag in tagOwners"
-      class="bg-white rounded-md overflow-y-scroll max-h-80 max-w-xs z-50"
+      class="bg-white rounded-md overflow-y-auto max-h-80 z-50"
       style="
         outline: currentcolor;
         pointer-events: auto;
@@ -292,11 +368,19 @@ function isInvalidTag(tag) {
       "
     >
       <div
-        @click="addTag(tag.tagName)"
-        class="cursor-pointer hover:bg-stone-100 focus:outline-none focus:bg-bg-menu-item-hover border-b"
+        v-if="availableTagOwners.length == 0"
+        class="px-4 py-3 text-sm text-gray-500 border-b border-stone-200"
       >
-        <div class="h-full w-full flex justify-between items-center p-4 md:px-3 md:py-2">
-          <div class="w-6">
+        暂无现有标签，请先创建标签。
+      </div>
+      <div
+        v-for="tag in availableTagOwners"
+        :key="tag.tagName"
+        @click="addTag(tag.tagName)"
+        class="cursor-pointer hover:bg-stone-100 focus:outline-none focus:bg-bg-menu-item-hover border-b last:border-b-0"
+      >
+        <div class="h-full w-full flex justify-between items-center p-4 md:px-3 md:py-2 gap-3">
+          <div class="w-6 shrink-0">
             <span v-if="addedTags.includes(tag.tagName)" class="w-6">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -318,23 +402,10 @@ function isInvalidTag(tag) {
       </div>
     </div>
   </div>
+
+  <Teleport to="body">
+    <SetTag v-if="setTagShow" @added-tag="handleTagCreated" @close="setTagShow = false"></SetTag>
+  </Teleport>
 </template>
 
-<style scoped>
-.toggle {
-  border: 0;
-  --tglbg: #d6d3d1;
-  background-color: white;
-}
-
-.toggle:checked {
-  border: 0;
-  --tglbg: #1e40af;
-  background-color: white;
-}
-
-.toggle:disabled {
-  --togglehandleborder: 0 0 0 3px white inset,
-    var(--handleoffsetcalculator) 0 0 3px white inset;
-}
-</style>
+<style scoped></style>

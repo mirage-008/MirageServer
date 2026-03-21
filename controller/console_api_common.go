@@ -16,7 +16,12 @@ func (h *Mirage) ListIdps(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	h.doAPIResponse(w, "", h.cfg.IdpList)
+	h.doAPIResponse(w, "", map[string]interface{}{
+		"providers": h.cfg.IdpList,
+		"aggregate": map[string]interface{}{
+			"login_types": normalizeAggregateLoginTypes(h.cfg.AggregateLogin.LoginTypes),
+		},
+	})
 }
 
 // 全部API响应报文框架

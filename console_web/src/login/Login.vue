@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, watch, ref } from "vue";
+import { onMounted, watch, ref } from "vue";
 import { useGetURLQuery } from "../utils";
 import Register from "./Register.vue";
 import RegisterDone from "./RegisterDone.vue";
@@ -29,6 +29,52 @@ const WXMiniCheck = ref("");
 const showWXMiniCode = ref(false);
 
 const IDPs = ref([]);
+const aggregateLoginTypes = ref([]);
+
+function normalizeAggregateLoginTypes(loginTypes) {
+  if (!Array.isArray(loginTypes)) {
+    return [];
+  }
+
+  const normalized = [];
+  const seen = new Set();
+  loginTypes.forEach((loginType) => {
+    const value = `${loginType ?? ""}`.trim();
+    if (value == "" || seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+    normalized.push(value);
+  });
+
+  return normalized;
+}
+
+function aggregateLoginTypeLabel(loginType) {
+  switch ((loginType || "").toLowerCase()) {
+    case "qq":
+      return "QQ";
+    case "wx":
+    case "wechat":
+      return "微信";
+    case "alipay":
+      return "支付宝";
+    default:
+      return loginType || "聚合";
+  }
+}
+
+function aggregateButtonText(loginType) {
+  if (aggregateLoginTypes.value.length <= 1) {
+    return "聚合登录";
+  }
+
+  return `${aggregateLoginTypeLabel(loginType)} 登录`;
+}
+
+function hasIDP(provider) {
+  return IDPs.value.includes(provider);
+}
 
 function doCloseRegister() {
   showRegister.value = false;
@@ -61,7 +107,8 @@ function startWXScan() {
       }
     })
     .catch(function (error) {
-      reject(error);
+      toastMsg.value = error;
+      toastShow.value = true;
     });
 }
 onMounted(() => {
@@ -70,7 +117,11 @@ onMounted(() => {
     .then(function (response) {
       // 处理成功情况
       if (response.data["status"] == "success") {
-        IDPs.value = response.data["data"];
+        const data = response.data["data"] || {};
+        IDPs.value = Array.isArray(data["providers"]) ? data["providers"] : [];
+        aggregateLoginTypes.value = normalizeAggregateLoginTypes(
+          (data["aggregate"] || {})["login_types"]
+        );
       } else {
         toastMsg.value = response.data["status"].substring(6);
         toastShow.value = true;
@@ -88,7 +139,7 @@ onMounted(() => {
   <div class="mb-10">
     <img class="h-8 w-24" src="/img/logo_withname@60.png" />
   </div>
-  <form v-if="IDPs.includes('Microsoft')" method="POST" class="mb-3">
+  <form v-if="hasIDP('Microsoft')" method="POST" class="mb-3">
     <input type="hidden" name="provider" value="Microsoft" />
     <input type="hidden" name="next_url" :value="next_url" />
     <button
@@ -113,7 +164,7 @@ onMounted(() => {
       Microsoft 登录
     </button>
   </form>
-  <form v-if="IDPs.includes('Github')" method="POST" class="mb-3">
+  <form v-if="hasIDP('Github')" method="POST" class="mb-3">
     <input type="hidden" name="provider" value="Github" />
     <input type="hidden" name="next_url" :value="next_url" />
     <button
@@ -139,7 +190,107 @@ onMounted(() => {
       GitHub 登录
     </button>
   </form>
-  <form v-if="IDPs.includes('Google')" method="POST" class="mb-3">
+  <form v-if="hasIDP('Gitea')" method="POST" class="mb-3">
+    <input type="hidden" name="provider" value="Gitea" />
+    <input type="hidden" name="next_url" :value="next_url" />
+    <button
+      type="submit"
+      class="btn btn-outline rounded-md shadow border-stone-300 hover:border-stone-400 hover:bg-transparent text-black hover:text-black h-10 min-h-fit w-64 justify-start"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        class="icon ml-8 mr-3"
+        viewBox="0 0 24 24"
+        width="20"
+        height="20"
+        fill="none"
+      >
+        <path
+          fill="#609926"
+          d="M4.75 0A4.75 4.75 0 0 0 0 4.75v14.5A4.75 4.75 0 0 0 4.75 24h14.5A4.75 4.75 0 0 0 24 19.25V8.625h-9.813a1.06 1.06 0 0 1-1.062-1.063V0z"
+        />
+        <path
+          fill="#fff"
+          d="M24 7.125h-6.562A1.06 1.06 0 0 1 16.374 6.062V0zM5.437 11.25a.75.75 0 0 0 0 1.5h2.157v5.063a.75.75 0 1 0 1.5 0V8.718a.75.75 0 0 0-1.5 0v2.532zm6.214 0a.75.75 0 0 0 0 1.5h1.594v1.375h-1.594a.75.75 0 0 0 0 1.5h1.594v1.438h-1.594a.75.75 0 0 0 0 1.5h2.344a.75.75 0 0 0 .75-.75V12a.75.75 0 0 0-.75-.75zm5.812-.031a2.782 2.782 0 0 0-2.625 1.844.75.75 0 1 0 1.406.525 1.283 1.283 0 1 1 0 .818.75.75 0 1 0-1.406.524 2.781 2.781 0 1 0 2.625-3.71"
+        />
+      </svg>
+      Gitea 登录
+    </button>
+  </form>
+  <form
+    v-if="hasIDP('Aggregator') && aggregateLoginTypes.length <= 1"
+    method="POST"
+    class="mb-3"
+  >
+    <input type="hidden" name="provider" value="Aggregator" />
+    <input type="hidden" name="next_url" :value="next_url" />
+    <input
+      type="hidden"
+      name="aggregate_type"
+      :value="aggregateLoginTypes[0] || ''"
+    />
+    <button
+      type="submit"
+      class="btn btn-outline rounded-md shadow border-stone-300 hover:border-stone-400 hover:bg-transparent text-black hover:text-black h-10 min-h-fit w-64 justify-start"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        class="icon ml-8 mr-3"
+        viewBox="0 0 24 24"
+        width="20"
+        height="20"
+        fill="none"
+      >
+        <circle cx="6" cy="12" r="2.5" fill="#2563EB" />
+        <circle cx="18" cy="6" r="2.5" fill="#7C3AED" />
+        <circle cx="18" cy="18" r="2.5" fill="#0F766E" />
+        <path
+          d="M8.2 11l7.6-4M8.2 13l7.6 4M18 8.5v7"
+          stroke="#475569"
+          stroke-width="1.8"
+          stroke-linecap="round"
+        />
+      </svg>
+      {{ aggregateButtonText(aggregateLoginTypes[0] || "") }}
+    </button>
+  </form>
+  <form
+    v-for="loginType in hasIDP('Aggregator') && aggregateLoginTypes.length > 1
+      ? aggregateLoginTypes
+      : []"
+    :key="loginType"
+    method="POST"
+    class="mb-3"
+  >
+    <input type="hidden" name="provider" value="Aggregator" />
+    <input type="hidden" name="next_url" :value="next_url" />
+    <input type="hidden" name="aggregate_type" :value="loginType" />
+    <button
+      type="submit"
+      class="btn btn-outline rounded-md shadow border-stone-300 hover:border-stone-400 hover:bg-transparent text-black hover:text-black h-10 min-h-fit w-64 justify-start"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        class="icon ml-8 mr-3"
+        viewBox="0 0 24 24"
+        width="20"
+        height="20"
+        fill="none"
+      >
+        <circle cx="6" cy="12" r="2.5" fill="#2563EB" />
+        <circle cx="18" cy="6" r="2.5" fill="#7C3AED" />
+        <circle cx="18" cy="18" r="2.5" fill="#0F766E" />
+        <path
+          d="M8.2 11l7.6-4M8.2 13l7.6 4M18 8.5v7"
+          stroke="#475569"
+          stroke-width="1.8"
+          stroke-linecap="round"
+        />
+      </svg>
+      {{ aggregateButtonText(loginType) }}
+    </button>
+  </form>
+  <form v-if="hasIDP('Google')" method="POST" class="mb-3">
     <input type="hidden" name="provider" value="Google" />
     <input type="hidden" name="next_url" :value="next_url" />
     <button
@@ -180,7 +331,7 @@ onMounted(() => {
       Google 登录
     </button>
   </form>
-  <form v-if="IDPs.includes('Apple')" method="POST" class="mb-3">
+  <form v-if="hasIDP('Apple')" method="POST" class="mb-3">
     <input type="hidden" name="provider" value="Apple" />
     <input type="hidden" name="next_url" :value="next_url" />
     <button
@@ -206,7 +357,7 @@ onMounted(() => {
       Apple 登录
     </button>
   </form>
-  <form v-if="IDPs.includes('Ali')" method="POST" class="mb-3">
+  <form v-if="hasIDP('Ali')" method="POST" class="mb-3">
     <input type="hidden" name="provider" value="Ali" />
     <input type="hidden" name="next_url" :value="next_url" />
     <button
@@ -233,7 +384,7 @@ onMounted(() => {
     </button>
   </form>
   <form
-    v-if="IDPs.includes('WeChat') && !showWXMiniCode"
+    v-if="hasIDP('WeChat') && !showWXMiniCode"
     @submit.prevent="startWXScan"
     class="mb-3"
   >
@@ -260,13 +411,13 @@ onMounted(() => {
     </button>
   </form>
   <div
-    v-if="IDPs.includes('Ali') && !showRegister && !showRegSuccess && !showWXMiniCode"
+    v-if="hasIDP('Ali') && !showRegister && !showRegSuccess && !showWXMiniCode"
     class="mt-3 mb-2 text-stone-500 text-xs"
   >
     还没有账号？
   </div>
   <Register
-    v-if="IDPs.includes('Ali')"
+    v-if="hasIDP('Ali')"
     :wantMeClose="closeRegister"
     :show="showRegister"
     @close="doCloseRegister"
@@ -275,7 +426,7 @@ onMounted(() => {
   </Register>
 
   <Transition
-    v-if="IDPs.includes('Ali')"
+    v-if="hasIDP('Ali')"
     enter-from-class="opacity-0"
     enter-active-class="transition ease-in-out duration-75 delay-150"
   >

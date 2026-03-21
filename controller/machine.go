@@ -78,6 +78,8 @@ type Machine struct {
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	Shared bool `gorm:"-"`
 }
 
 func (machine *Machine) BeforeCreate(tx *gorm.DB) error {
@@ -173,7 +175,28 @@ func (machine *Machine) isEphemeral() bool {
 
 func containsAddresses(inputs []string, addrs []string) bool {
 	for _, addr := range addrs {
-		if containsStr(inputs, addr) {
+		if containsAddress(inputs, addr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func containsAddress(inputs []string, addr string) bool {
+	parsedAddr, err := netip.ParseAddr(addr)
+	parsed := err == nil
+	for _, input := range inputs {
+		if input == "*" || input == addr {
+			return true
+		}
+		if !parsed {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(input); err == nil && prefix.Contains(parsedAddr) {
+			return true
+		}
+		if inputAddr, err := netip.ParseAddr(input); err == nil && inputAddr == parsedAddr {
 			return true
 		}
 	}
@@ -283,30 +306,39 @@ func (h *Mirage) ListPeers(machine *Machine) (Machines, error) {
 	h.db.Model(&User{}).Where(&User{
 		OrganizationID: orgId,
 	}).Select("id").Find(&userIds)
-	if len(userIds) == 0 {
-		return machines, nil
-	}
-	scopeFunc := func(tx *gorm.DB) *gorm.DB {
-		if len(userIds) == 1 {
-			return tx.Where("user_id = ?", userIds[0])
-		} else {
+	if len(userIds) != 0 {
+		scopeFunc := func(tx *gorm.DB) *gorm.DB {
+			if len(userIds) == 1 {
+				return tx.Where("user_id = ?", userIds[0])
+			}
 			return tx.Where("user_id in ?", userIds)
 		}
+		if err := h.db.Preload("AuthKey").Preload("AuthKey.User").Preload("User").Preload("User.Organization").Scopes(scopeFunc).Where("node_key <> ?", machine.NodeKey).Find(&machines).Error; err != nil {
+			log.Error().Err(err).Msg("Error accessing db")
+			return Machines{}, err
+		}
 	}
-	if err := h.db.Preload("AuthKey").Preload("AuthKey.User").Preload("User").Preload("User.Organization").Scopes(scopeFunc).Where("node_key <> ?",
-		machine.NodeKey).Find(&machines).Error; err != nil {
-		log.Error().Err(err).Msg("Error accessing db")
 
+	sharePeers, err := h.ListSharePeersForMachine(machine)
+	if err != nil {
 		return Machines{}, err
 	}
+	merged := mergeMachines(machines, sharePeers)
+	peers := make(Machines, 0, len(merged))
+	for _, peer := range merged {
+		if peer.NodeKey == machine.NodeKey {
+			continue
+		}
+		peers = append(peers, peer)
+	}
 
-	sort.Slice(machines, func(i, j int) bool { return machines[i].ID < machines[j].ID })
+	sort.Slice(peers, func(i, j int) bool { return peers[i].ID < peers[j].ID })
 
 	log.Trace().
 		Str("machine", machine.Hostname).
-		Msgf("Found peers: %s", machines.String())
+		Msgf("Found peers: %s", peers.String())
 
-	return machines, nil
+	return peers, nil
 }
 
 func (h *Mirage) getPeers(machine *Machine, enableSelf bool) (Machines, []tailcfg.NodeID, error) {
@@ -319,7 +351,7 @@ func (h *Mirage) getPeers(machine *Machine, enableSelf bool) (Machines, []tailcf
 	// else use the classic user scope
 	if machine.User.Organization.AclPolicy != nil {
 		var machines []Machine
-		machines, err = h.ListMachinesByOrgID(org.ID)
+		machines, err = h.ListVisibleMachinesByOrgID(org.ID)
 		if err != nil {
 			log.Error().Err(err).Msg("Error retrieving list of machines")
 
@@ -664,7 +696,7 @@ func (h *Mirage) SetTags(machine *Machine, tags []string) error {
 	}
 	machine.ForcedTags = newTags
 	/*
-		if err := h.UpdateACLRulesOfOrg(org); err != nil && !errors.Is(err, errEmptyPolicy) {
+		if _, err := h.UpdateACLRulesOfOrg(org, &machine.User, machine); err != nil && !errors.Is(err, errEmptyPolicy) {
 			return err
 		}
 	*/
@@ -886,7 +918,7 @@ func (h *Mirage) toNodes(
 	nodes := make([]*tailcfg.Node, len(machines))
 
 	for index, machine := range machines {
-		node, err := h.toNode(machine) //, baseDomain, dnsConfig)
+		node, err := h.toNode(machine, machine.Shared) //, baseDomain, dnsConfig)
 		if err != nil {
 			return nil, err
 		}
@@ -901,6 +933,7 @@ func (h *Mirage) toNodes(
 // as per the expected behaviour in the official SaaS.
 func (h *Mirage) toNode(
 	machine Machine,
+	shared bool,
 	// baseDomain string,
 	// dnsConfig *tailcfg.DNSConfig,
 ) (*tailcfg.Node, error) {
@@ -947,28 +980,30 @@ func (h *Mirage) toNode(
 		[]netip.Prefix{},
 		addrs...) // we append the node own IP, as it is required by the clients
 
-	primaryRoutes, err := h.getMachinePrimaryRoutes(&machine)
-	if err != nil {
-		return nil, err
-	}
-	primaryPrefixes := Routes(primaryRoutes).toPrefixes()
+	primaryPrefixes := []netip.Prefix{}
+	if !shared {
+		primaryRoutes, err := h.getMachinePrimaryRoutes(&machine)
+		if err != nil {
+			return nil, err
+		}
+		primaryPrefixes = Routes(primaryRoutes).toPrefixes()
 
-	machineRoutes, err := h.GetMachineRoutes(&machine)
-	if err != nil {
-		return nil, err
-	}
-	for _, route := range machineRoutes {
-		if route.Enabled && (route.IsPrimary || route.isExitRoute()) {
-			allowedIPs = append(allowedIPs, netip.Prefix(route.Prefix))
+		machineRoutes, err := h.GetMachineRoutes(&machine)
+		if err != nil {
+			return nil, err
+		}
+		for _, route := range machineRoutes {
+			if route.Enabled && (route.IsPrimary || route.isExitRoute()) {
+				allowedIPs = append(allowedIPs, netip.Prefix(route.Prefix))
+			}
 		}
 	}
 
-	var derp string
+	homeDERP := 0
 	if machine.HostInfo.NetInfo != nil {
-		derp = fmt.Sprintf("127.3.3.40:%d", machine.HostInfo.NetInfo.PreferredDERP)
-	} else {
-		derp = "127.3.3.40:0" // Zero means disconnected or unknown.
+		homeDERP = machine.HostInfo.NetInfo.PreferredDERP
 	}
+	legacyDERP := fmt.Sprintf("%s:%d", tailcfg.DerpMagicIP, homeDERP)
 
 	var keyExpiry time.Time
 	if machine.Expiry != nil {
@@ -980,11 +1015,11 @@ func (h *Mirage) toNode(
 	var hostname string
 	if machine.User.Organization.EnableMagic { //[cgao6 removed] dnsConfig != nil && dnsConfig.Proxied { // MagicDNS
 		_, baseDomain := machine.User.GetDNSConfig(h.cfg.IPPrefixes)
-		hostname = fmt.Sprintf(
-			"%s.%s",
-			machine.GivenName,
-			baseDomain,
-		)
+		baseDomain = strings.TrimSuffix(baseDomain, ".")
+		hostname = machine.GivenName
+		if baseDomain != "" {
+			hostname = fmt.Sprintf("%s.%s.", machine.GivenName, baseDomain)
+		}
 		if len(hostname) > maxHostnameLength {
 			return nil, fmt.Errorf(
 				"hostname %q is too long it cannot except 255 ASCII chars: %w",
@@ -999,9 +1034,23 @@ func (h *Mirage) toNode(
 	hostInfo := machine.GetHostInfo()
 
 	online := machine.isOnline()
+	expired := machine.isExpired()
 
 	tags, _ := getTags(machine.User.Organization.AclPolicy, machine, h.cfg.OIDC.StripEmaildomain)
 	tags = lo.Uniq(append(tags, machine.ForcedTags...))
+
+	capMap := tailcfg.NodeCapMap{
+		tailcfg.CapabilityAdmin: []tailcfg.RawMessage{},
+		tailcfg.CapabilitySSH:   []tailcfg.RawMessage{},
+	}
+	capabilities := []tailcfg.NodeCapability{
+		tailcfg.CapabilityAdmin,
+		tailcfg.CapabilitySSH,
+	}
+	if machine.User.Organization.FileSharingEnabledValue() {
+		capMap[tailcfg.CapabilityFileSharing] = []tailcfg.RawMessage{}
+		capabilities = append(capabilities, tailcfg.CapabilityFileSharing)
+	}
 
 	node := tailcfg.Node{
 		ID: tailcfg.NodeID(machine.ID), // this is the actual ID
@@ -1009,20 +1058,22 @@ func (h *Mirage) toNode(
 			strconv.FormatInt(machine.ID, Base10),
 		), // in mirage, unlike tailcontrol server, IDs are permanent
 		Name: hostname,
+		Cap:  tailcfg.CurrentCapabilityVersion,
 
 		User: tailcfg.UserID(machine.UserID),
 
 		Key:       nodeKey,
-		KeyExpiry: keyExpiry,
+		KeyExpiry: keyExpiry.UTC(),
 
-		Machine:    machineKey,
-		DiscoKey:   discoKey,
-		Addresses:  addrs,
-		AllowedIPs: allowedIPs,
-		Endpoints:  machine.Endpoints,
-		DERP:       derp,
-		Hostinfo:   hostInfo.View(),
-		Created:    machine.CreatedAt,
+		Machine:          machineKey,
+		DiscoKey:         discoKey,
+		Addresses:        addrs,
+		AllowedIPs:       allowedIPs,
+		Endpoints:        parseMachineEndpoints(machine.Endpoints),
+		HomeDERP:         homeDERP,
+		LegacyDERPString: legacyDERP,
+		Hostinfo:         hostInfo.View(),
+		Created:          machine.CreatedAt.UTC(),
 
 		Tags: tags,
 
@@ -1030,17 +1081,31 @@ func (h *Mirage) toNode(
 
 		LastSeen:          machine.LastSeen,
 		Online:            &online,
-		KeepAlive:         true,
-		MachineAuthorized: !machine.isExpired(),
+		MachineAuthorized: !expired,
+		Expired:           expired,
 
-		Capabilities: []string{
-			tailcfg.CapabilityFileSharing,
-			tailcfg.CapabilityAdmin,
-			tailcfg.CapabilitySSH,
-		},
+		Capabilities: capabilities,
+		CapMap: capMap,
 	}
 
 	return &node, nil
+}
+
+func parseMachineEndpoints(endpoints []string) []netip.AddrPort {
+	parsed := make([]netip.AddrPort, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		addrPort, err := netip.ParseAddrPort(endpoint)
+		if err != nil {
+			log.Warn().
+				Err(err).
+				Str("endpoint", endpoint).
+				Msg("ignoring invalid machine endpoint")
+			continue
+		}
+		parsed = append(parsed, addrPort)
+	}
+
+	return parsed
 }
 
 // getTags will return the tags of the current machine.

@@ -1,5 +1,5 @@
 <script setup>
-import { watch, ref, onMounted, computed } from "vue";
+import { ref, computed } from "vue";
 import { useDisScroll } from "../utils.js";
 
 useDisScroll();
@@ -14,14 +14,17 @@ const props = defineProps({
   cantEdit: Boolean,
 });
 const menuLeft = computed(() => {
-  return String(String(props.toleft + 32 - userMenu.value?.clientWidth));
+  const menuWidth = userMenu.value?.clientWidth || 224;
+  const rawLeft = props.toleft + 32 - menuWidth;
+  const maxLeft = Math.max(window.innerWidth - menuWidth - 12, 12);
+  return String(Math.min(Math.max(rawLeft, 12), maxLeft));
 });
 const menuTop = computed(() => {
-  if (props.totop <= window.innerHeight / 2) {
-    return String(props.totop + 36);
-  } else {
-    return String(props.totop - 10 - userMenu.value?.clientHeight);
-  }
+  const menuHeight = userMenu.value?.clientHeight || 260;
+  const rawTop =
+    props.totop <= window.innerHeight / 2 ? props.totop + 36 : props.totop - 10 - menuHeight;
+  const maxTop = Math.max(window.innerHeight - menuHeight - 12, 12);
+  return String(Math.min(Math.max(rawTop, 12), maxTop));
 });
 
 const emit = defineEmits(["close"]);
@@ -40,11 +43,11 @@ const closeMe = (event) => {
       menuLeft +
       'px; top: ' +
       menuTop +
-      'px; min-width: max-content; --radix-popper-transform-origin: 0% 0px;'
+      'px; width: min(16rem, calc(100vw - 24px)); --radix-popper-transform-origin: 0% 0px;'
     "
   >
     <div
-      class="dropdown bg-white rounded-md py-1 z-20"
+      class="dropdown bg-white rounded-md py-1 z-20 overflow-hidden"
       style="outline: none; pointer-events: auto"
     >
       <RouterLink

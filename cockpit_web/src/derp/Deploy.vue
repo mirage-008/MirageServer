@@ -203,10 +203,12 @@ function doAddDerp() {
               <el-option
                 v-for="nr in naviRegionList"
                 :key="nr.Region.RegionID"
-                :label="nr.Region.RegionName"
+                :label="(nr.Region.OrgID == 0 ? '[全局] ' : '[组织 ' + nr.Region.OrgID + '] ') + nr.Region.RegionName"
                 :value="nr.Region"
               >
-                <span style="float: left">{{ nr.Region.RegionName }}</span>
+                <span style="float: left">
+                  {{ (nr.Region.OrgID == 0 ? "[全局] " : "[组织 " + nr.Region.OrgID + "] ") + nr.Region.RegionName }}
+                </span>
                 <span
                   style="
                     float: right;

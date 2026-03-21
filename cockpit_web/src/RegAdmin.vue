@@ -51,6 +51,8 @@ let getMakeCredentialsChallenge = () => {
     })
         .then((response) => response.json())
         .then((response) => {
+            if (response.status !== 'success' || !response.data || !response.data.publicKey)
+                throw new Error(`Server responed with error. The message is: ${response.status}`);
             let publicKey = preformatMakeCredReq(response.data.publicKey);
             return navigator.credentials.create({ publicKey })
         })

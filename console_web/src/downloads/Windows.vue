@@ -17,7 +17,7 @@ const props = defineProps({
       <div v-if="downloadDetails.windows.primary != ''" class="text-center">
         <a :href="downloadDetails.windows.primary">
           <button class="btn border-0 bg-blue-600 hover:bg-blue-700 text-white">
-            下载 <span class="hidden md:inline">蜃境客户端</span> Windows版
+            下载 <span class="hidden md:inline">蜃境客户端</span> Windows 安装器
           </button>
         </a>
         <p class="mt-2 text-sm text-gray-600">要求 Windows 7 SP1 及以上版本</p>

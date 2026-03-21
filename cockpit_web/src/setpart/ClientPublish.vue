@@ -47,6 +47,12 @@ const winUploader = ref(null);
 const winFileName = ref("");
 const winProc = ref("");
 const winProcPercent = ref(0);
+const defaultWinLatestURL = computed(() => {
+  if (!uploadURL.value || uploadURL.value == "") {
+    return "";
+  }
+  return uploadURL.value.replace(/\/cockpit\/api\/publish$/, "/download/MirageSetup-latest.exe");
+});
 
 const wantIOSStoreVersion = ref({});
 const wantIOSTestVersion = ref({});
@@ -776,6 +782,12 @@ function publishIOSToTestflight() {
                   : "未设置"
               }}
             </div>
+            <div class="w-full text-left font-bold max-w-xl text-gray-500 mt-2">
+              上传模式固定地址
+            </div>
+            <div class="w-full text-left max-w-xl break-all text-gray-500">
+              {{ defaultWinLatestURL != "" ? defaultWinLatestURL : "未设置" }}
+            </div>
           </div>
         </div>
         <div class="flex w-full max-w-sm">
@@ -816,6 +828,10 @@ function publishIOSToTestflight() {
           <input type="checkbox" class="toggle" v-model="winExtURL" />
           <p class="text-gray-600 min-w-fit">设置URL</p>
         </div>
+        <p v-if="!winExtURL" class="text-xs text-gray-500 max-w-sm mt-2">
+          上传 EXE 后会保留原始版本文件，并自动刷新固定下载地址
+          <code>MirageSetup-latest.exe</code>
+        </p>
         <label
           :class="{
             'swap-active': winExtURL,

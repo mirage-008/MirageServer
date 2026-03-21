@@ -32,6 +32,1093 @@ const IDaaS = ref({});
 const OIDC = ref({});
 const Microsoft = ref({});
 const Github = ref({});
+const Gitea = ref({});
+const Aggregate = ref({
+  base_url: "",
+  app_id: "",
+  app_key: "",
+  login_types: [],
+});
+
+const aggregateLoginTypesText = computed({
+  get() {
+    if (!Array.isArray(Aggregate.value.login_types)) {
+      return "";
+    }
+    return Aggregate.value.login_types.join(", ");
+  },
+  set(value) {
+    Aggregate.value.login_types = normalizeAggregateLoginTypes(value);
+  },
+});
+
+function normalizeAggregateLoginTypes(input) {
+  const values = Array.isArray(input) ? input : `${input ?? ""}`.split(",");
+  const normalized = [];
+  const seen = new Set();
+
+  values.forEach((loginType) => {
+    const trimmed = `${loginType ?? ""}`.trim();
+    if (trimmed == "" || seen.has(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  });
+
+  return normalized;
+}
+
+function normalizeAggregateConfig(config) {
+  return {
+    base_url: `${config?.base_url || ""}`.trim(),
+    app_id: `${config?.app_id || ""}`.trim(),
+    app_key: `${config?.app_key || ""}`.trim(),
+    login_types: normalizeAggregateLoginTypes(
+      config?.login_types || config?.login_type || []
+    ),
+  };
+}
+
+function normalizeAggregateBaseURL(baseURL) {
+  return `${baseURL ?? ""}`.trim();
+}
+
+function normalizeAggregateAppID(appID) {
+  return `${appID ?? ""}`.trim();
+}
+
+function normalizeAggregateAppKey(appKey) {
+  return `${appKey ?? ""}`.trim();
+}
+
+const aggregateLoginTypesValid = computed(() => {
+  return normalizeAggregateLoginTypes(Aggregate.value.login_types).length > 0;
+});
+
+const normalizedAggregateBaseURL = computed(() =>
+  normalizeAggregateBaseURL(Aggregate.value.base_url)
+);
+const normalizedAggregateAppID = computed(() =>
+  normalizeAggregateAppID(Aggregate.value.app_id)
+);
+const normalizedAggregateAppKey = computed(() =>
+  normalizeAggregateAppKey(Aggregate.value.app_key)
+);
+
+const normalizedAggregateLoginTypes = computed(() =>
+  normalizeAggregateLoginTypes(Aggregate.value.login_types)
+);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function aggregateLoginTypeBadgeLabel(loginType) {
+  switch ((loginType || "").toLowerCase()) {
+    case "qq":
+      return "QQ";
+    case "wx":
+    case "wechat":
+      return "微信";
+    case "alipay":
+      return "支付宝";
+    default:
+      return loginType;
+  }
+}
+
+function rmAggregateLoginType(loginType) {
+  Aggregate.value.login_types = normalizeAggregateLoginTypes(
+    Aggregate.value.login_types
+  ).filter((candidate) => candidate !== loginType);
+}
+
+function aggregateConnectURLPreview() {
+  if (!isValidURL(normalizedAggregateBaseURL.value)) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(normalizedAggregateBaseURL.value);
+    const trimmedPath = parsed.pathname.replace(/\/+$/, "");
+    if (trimmedPath == "") {
+      parsed.pathname = "/connect.php";
+    } else if (
+      trimmedPath === "connect.php" ||
+      trimmedPath.endsWith("/connect.php")
+    ) {
+      parsed.pathname = trimmedPath.startsWith("/") ? trimmedPath : `/${trimmedPath}`;
+    } else {
+      parsed.pathname = `${trimmedPath}/connect.php`;
+    }
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch (_error) {
+    return "";
+  }
+}
+
+const aggregateConnectURL = computed(() => aggregateConnectURLPreview());
+
+const aggregateSaveDisabled = computed(() => {
+  return (
+    !isValidURL(normalizedAggregateBaseURL.value) ||
+    normalizedAggregateAppID.value == "" ||
+    normalizedAggregateAppKey.value == "" ||
+    !aggregateLoginTypesValid.value
+  );
+});
+
+const aggregatePayload = computed(() => ({
+  ...Aggregate.value,
+  base_url: normalizedAggregateBaseURL.value,
+  app_id: normalizedAggregateAppID.value,
+  app_key: normalizedAggregateAppKey.value,
+  login_types: normalizedAggregateLoginTypes.value,
+}));
+
+const aggregateFormClass = computed(() => ({
+  "border-red-500 hover:border-red-700": !aggregateLoginTypesValid.value,
+  "border-stone-200 hover:border-stone-400": aggregateLoginTypesValid.value,
+}));
+
+const aggregateConfigFallback = () => ({
+  base_url: "",
+  app_id: "",
+  app_key: "",
+  login_types: [],
+});
+
 const Google = ref({});
 const Apple = ref({});
 
@@ -255,6 +1342,52 @@ function setGithub() {
       toastShow.value = true;
     });
 }
+function setGitea() {
+  axios
+    .post("/cockpit/api/setting/general", {
+      state: "set-gitea",
+      Gitea: Gitea.value,
+    })
+    .then(function (response) {
+      // 处理成功情况
+      if (response.data["status"] == "success") {
+        Gitea.value = response.data["data"]["gitea"];
+        toastMsg.value = "已更新Gitea设置";
+        toastShow.value = true;
+      } else {
+        toastMsg.value = response.data["status"].substring(6);
+        toastShow.value = true;
+      }
+    })
+    .catch(function (error) {
+      toastMsg.value = error;
+      toastShow.value = true;
+    });
+}
+function setAggregate() {
+  axios
+    .post("/cockpit/api/setting/general", {
+      state: "set-aggregate",
+      Aggregate: aggregatePayload.value,
+    })
+    .then(function (response) {
+      // 处理成功情况
+      if (response.data["status"] == "success") {
+        Aggregate.value = normalizeAggregateConfig(
+          response.data["data"]["aggregate"] || aggregateConfigFallback()
+        );
+        toastMsg.value = "已更新聚合登录设置";
+        toastShow.value = true;
+      } else {
+        toastMsg.value = response.data["status"].substring(6);
+        toastShow.value = true;
+      }
+    })
+    .catch(function (error) {
+      toastMsg.value = error;
+      toastShow.value = true;
+    });
+}
 function setGoogle() {
   axios
     .post("/cockpit/api/setting/general", {
@@ -313,6 +1446,10 @@ onMounted(() => {
         OIDC.value = response.data["data"]["oidc"];
         Microsoft.value = response.data["data"]["microsoft"];
         Github.value = response.data["data"]["github"];
+        Gitea.value = response.data["data"]["gitea"];
+        Aggregate.value = normalizeAggregateConfig(
+          response.data["data"]["aggregate"] || aggregateConfigFallback()
+        );
         Google.value = response.data["data"]["google"];
         Apple.value = response.data["data"]["apple"];
       } else {
@@ -953,6 +2090,206 @@ onMounted(() => {
       <div>
         <header class="max-w-sm flex mt-4">
           <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="28"
+            height="28"
+            viewBox="0 0 24 24"
+            fill="none"
+          >
+            <path
+              fill="#609926"
+              d="M4.75 0A4.75 4.75 0 0 0 0 4.75v14.5A4.75 4.75 0 0 0 4.75 24h14.5A4.75 4.75 0 0 0 24 19.25V8.625h-9.813a1.06 1.06 0 0 1-1.062-1.063V0z"
+            />
+            <path
+              fill="#fff"
+              d="M24 7.125h-6.562A1.06 1.06 0 0 1 16.374 6.062V0zM5.437 11.25a.75.75 0 0 0 0 1.5h2.157v5.063a.75.75 0 1 0 1.5 0V8.718a.75.75 0 0 0-1.5 0v2.532zm6.214 0a.75.75 0 0 0 0 1.5h1.594v1.375h-1.594a.75.75 0 0 0 0 1.5h1.594v1.438h-1.594a.75.75 0 0 0 0 1.5h2.344a.75.75 0 0 0 .75-.75V12a.75.75 0 0 0-.75-.75zm5.812-.031a2.782 2.782 0 0 0-2.625 1.844.75.75 0 1 0 1.406.525 1.283 1.283 0 1 1 0 .818.75.75 0 1 0-1.406.524 2.781 2.781 0 1 0 2.625-3.71"
+            />
+          </svg>
+          <h3 class="text-xl font-semibold tracking-tight ml-4 min-w-fit">
+            Gitea 认证设置
+          </h3>
+          <div class="w-full flex justify-end">
+            <button
+              :disabled="
+                !isValidURL(Gitea.base_url) ||
+                Gitea.client_id == '' ||
+                Gitea.client_secret == ''
+              "
+              @click="setGitea"
+              class="btn border-0 bg-blue-500 hover:bg-blue-900 disabled:bg-blue-500/60 text-white disabled:text-white/60 h-7 min-h-fit"
+            >
+              保存
+            </button>
+          </div>
+        </header>
+        <p class="mt-3 text-gray-600">Base URL</p>
+        <p class="text-gray-400 text-sm">
+          参考形式
+          <code class="bg-gray-200 text-xs rounded px-1">https://gitea.example.com</code>
+        </p>
+        <div
+          :class="{
+            'border-red-500 hover:border-red-700': !isValidURL(Gitea.base_url),
+            'border-stone-200 hover:border-stone-400': isValidURL(Gitea.base_url),
+          }"
+          class="mt-1 max-w-sm flex border rounded-md relative overflow-hidden min-w-0"
+        >
+          <input
+            class="outline-none py-2 px-3 w-full h-full font-mono text-sm text-ellipsis"
+            v-model="Gitea.base_url"
+          />
+        </div>
+        <p class="mt-3 text-gray-600">Client ID</p>
+        <div
+          :class="{
+            'border-red-500 hover:border-red-700': Gitea.client_id == '',
+            'border-stone-200 hover:border-stone-400': Gitea.client_id != '',
+          }"
+          class="mt-1 max-w-sm flex border rounded-md relative overflow-hidden min-w-0"
+        >
+          <input
+            class="outline-none py-2 px-3 w-full h-full font-mono text-sm text-ellipsis"
+            v-model="Gitea.client_id"
+          />
+        </div>
+        <p class="mt-3 text-gray-600">Client Secret</p>
+        <div
+          :class="{
+            'border-red-500 hover:border-red-700': Gitea.client_secret == '',
+            'border-stone-200 hover:border-stone-400': Gitea.client_secret != '',
+          }"
+          class="mt-1 max-w-sm flex border rounded-md relative overflow-hidden min-w-0"
+        >
+          <input
+            class="outline-none py-2 px-3 w-full h-full font-mono text-sm text-ellipsis"
+            v-model="Gitea.client_secret"
+          />
+        </div>
+      </div>
+      <!---->
+      <div>
+        <header class="max-w-sm flex mt-4">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="28"
+            height="28"
+            viewBox="0 0 24 24"
+            fill="none"
+          >
+            <circle cx="6" cy="12" r="2.5" fill="#2563EB" />
+            <circle cx="18" cy="6" r="2.5" fill="#7C3AED" />
+            <circle cx="18" cy="18" r="2.5" fill="#0F766E" />
+            <path
+              d="M8.2 11l7.6-4M8.2 13l7.6 4M18 8.5v7"
+              stroke="#475569"
+              stroke-width="1.8"
+              stroke-linecap="round"
+            />
+          </svg>
+          <h3 class="text-xl font-semibold tracking-tight ml-4 min-w-fit">
+            聚合登录设置
+          </h3>
+          <div class="w-full flex justify-end">
+            <button
+              :disabled="aggregateSaveDisabled"
+              @click="setAggregate"
+              class="btn border-0 bg-blue-500 hover:bg-blue-900 disabled:bg-blue-500/60 text-white disabled:text-white/60 h-7 min-h-fit"
+            >
+              保存
+            </button>
+          </div>
+        </header>
+        <p class="mt-3 text-gray-600">Base URL</p>
+        <p class="text-gray-400 text-sm">
+          参考形式
+          <code class="bg-gray-200 text-xs rounded px-1">https://aggregate.example.com/entry</code>
+        </p>
+        <div
+          :class="{
+            'border-red-500 hover:border-red-700': !isValidURL(Aggregate.base_url),
+            'border-stone-200 hover:border-stone-400': isValidURL(Aggregate.base_url),
+          }"
+          class="mt-1 max-w-sm flex border rounded-md relative overflow-hidden min-w-0"
+        >
+          <input
+            class="outline-none py-2 px-3 w-full h-full font-mono text-sm text-ellipsis"
+            v-model="Aggregate.base_url"
+          />
+        </div>
+        <p class="mt-3 text-gray-600">App ID</p>
+        <div
+          :class="{
+            'border-red-500 hover:border-red-700': Aggregate.app_id == '',
+            'border-stone-200 hover:border-stone-400': Aggregate.app_id != '',
+          }"
+          class="mt-1 max-w-sm flex border rounded-md relative overflow-hidden min-w-0"
+        >
+          <input
+            class="outline-none py-2 px-3 w-full h-full font-mono text-sm text-ellipsis"
+            v-model="Aggregate.app_id"
+          />
+        </div>
+        <p class="mt-3 text-gray-600">App Key</p>
+        <div
+          :class="{
+            'border-red-500 hover:border-red-700': Aggregate.app_key == '',
+            'border-stone-200 hover:border-stone-400': Aggregate.app_key != '',
+          }"
+          class="mt-1 max-w-sm flex border rounded-md relative overflow-hidden min-w-0"
+        >
+          <input
+            class="outline-none py-2 px-3 w-full h-full font-mono text-sm text-ellipsis"
+            v-model="Aggregate.app_key"
+          />
+        </div>
+        <p class="mt-3 text-gray-600">登录类型</p>
+        <p class="text-gray-400 text-sm">
+          使用英文逗号分隔多个类型，例如
+          <code class="bg-gray-200 text-xs rounded px-1">qq, wx, alipay</code>
+        </p>
+        <div :class="aggregateFormClass" class="mt-1 max-w-sm flex border rounded-md relative overflow-hidden min-w-0">
+          <input
+            class="outline-none py-2 px-3 w-full h-full font-mono text-sm text-ellipsis"
+            v-model="aggregateLoginTypesText"
+            placeholder="qq, wx"
+          />
+        </div>
+        <div v-if="Aggregate.login_types.length > 0" class="flex flex-wrap gap-2 p-1 mt-2 max-w-sm">
+          <span v-for="loginType in Aggregate.login_types" :key="loginType">
+            <div
+              class="flex items-center align-middle justify-center font-medium border-stone-400 bg-stone-200 border rounded-full px-2 py-1 leading-none text-xs"
+            >
+              <span class="text-gray-500">{{ aggregateLoginTypeBadgeLabel(loginType) }}</span>
+              <span class="ml-1">
+                <button @click="rmAggregateLoginType(loginType)" type="button">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
+              </span>
+            </div>
+          </span>
+        </div>
+        <p v-if="aggregateConnectURL" class="mt-3 text-gray-400 text-sm">
+          实际请求地址：
+          <code class="bg-gray-200 text-xs rounded px-1 break-all">{{ aggregateConnectURL }}</code>
+        </p>
+      </div>
+      <!---->
+      <div>
+        <header class="max-w-sm flex mt-4">
+          <svg
             t="1679449475826"
             viewBox="0 0 1024 1024"
             version="1.1"
@@ -960,8 +2297,7 @@ onMounted(() => {
             p-id="4669"
             width="112"
             height="28"
-          >
-            <path
+          >            <path
               d="M214.101333 512c0-32.512 5.546667-63.701333 15.36-92.928L57.173333 290.218667A491.861333 491.861333 0 0 0 4.693333 512c0 79.701333 18.858667 154.88 52.394667 221.610667l172.202667-129.066667A290.56 290.56 0 0 1 214.101333 512"
               fill="#FBBC05"
               p-id="4670"

@@ -46,6 +46,13 @@ watch(toastShow, () => {
 
 const currentUserId = ref(0);
 const ownerId = ref(-1);
+const pendingInvites = ref([]);
+const externalUsers = ref([]);
+const inviteTargetIdentity = ref("");
+const inviteSubmitting = ref(false);
+const canManageInvites = computed(() => {
+  return ownerId.value > 0 && currentUserId.value == ownerId.value;
+});
 
 const selectUser = ref({});
 function mouseOnUser(u) {
@@ -88,10 +95,12 @@ function setWantedRole(newWantedRole) {
 }
 
 function doChangeRole() {
+  const nextRole = wantedRoles.value[selectUser.value["id"]];
+  const action = nextRole == "owner" ? "set_owner" : "set_member";
   axios
     .post("/admin/api/users", {
       userID: selectUser.value["id"],
-      action: "set_" + wantedRoles.value[selectUser.value["id"]],
+      action: action,
     })
     .then(function (response) {
       if (response.data["status"] != "success") {
@@ -145,6 +154,87 @@ function doRemoveUser() {
     });
 }
 
+function createInvite() {
+  const targetIdentity = inviteTargetIdentity.value.trim();
+  if (!targetIdentity) {
+    toastMsg.value = "请输入目标身份";
+    toastShow.value = true;
+    return;
+  }
+
+  inviteSubmitting.value = true;
+  axios
+    .post("/admin/api/users", {
+      action: "create_invite",
+      targetIdentity: targetIdentity,
+    })
+    .then(function (response) {
+      if (response.data["status"] != "success") {
+        toastMsg.value = response.data["status"].substring(6);
+        toastShow.value = true;
+        return;
+      }
+
+      const invite = response.data["data"]?.["invite"];
+      if (invite) {
+        pendingInvites.value = pendingInvites.value.filter(function (item) {
+          return item.id != invite.id;
+        });
+        pendingInvites.value.unshift(invite);
+      }
+      inviteTargetIdentity.value = "";
+      toastMsg.value = "已创建邀请";
+      toastShow.value = true;
+    })
+    .catch(function (error) {
+      toastMsg.value = String(error);
+      toastShow.value = true;
+    })
+    .finally(function () {
+      inviteSubmitting.value = false;
+    });
+}
+
+function revokeInvite(invite) {
+  if (!invite || inviteSubmitting.value) {
+    return;
+  }
+
+  inviteSubmitting.value = true;
+  axios
+    .post("/admin/api/users", {
+      action: "revoke_invite",
+      inviteID: invite.id,
+    })
+    .then(function (response) {
+      if (response.data["status"] != "success") {
+        toastMsg.value = response.data["status"].substring(6);
+        toastShow.value = true;
+        return;
+      }
+
+      pendingInvites.value = pendingInvites.value.filter(function (item) {
+        return item.id != invite.id;
+      });
+      toastMsg.value = "已撤销邀请";
+      toastShow.value = true;
+    })
+    .catch(function (error) {
+      toastMsg.value = String(error);
+      toastShow.value = true;
+    })
+    .finally(function () {
+      inviteSubmitting.value = false;
+    });
+}
+
+function formatInviteTime(value) {
+  if (!value) {
+    return "";
+  }
+  return new Date(value).toLocaleString();
+}
+
 //数据填充控制部分
 const UserList = ref({});
 const usersNum = computed(() => {
@@ -166,6 +256,8 @@ function getUsers() {
         currentUserId.value = response.data["data"]["currentUserID"];
         ownerId.value = response.data["data"]["ownerID"];
         UserList.value = response.data["data"]["users"];
+        externalUsers.value = response.data["data"]["externalUsers"] || [];
+        pendingInvites.value = response.data["data"]["pendingInvites"] || [];
         for (let i in UserList.value) {
           wantedRoles.value[UserList.value[i]["id"]] = wantedRoles.value[
             UserList.value[i]["id"]
@@ -215,18 +307,17 @@ function getMachines() {
             response.data["needreauthreason"] + "，登录状态失效，请重新登录";
           toastShow.value = true;
           reject();
+          return;
         }
-        // 处理成功情况
-        if (response.data["errormsg"] == undefined || response.data["errormsg"] === "") {
-          resolve(response.data["mlist"]);
-        } else if (response.data["errormsg"] != undefined) {
-          toastMsg.value = "获取设备信息出错：" + response.data["errormsg"];
+        if (response.data["status"] == "success") {
+          resolve(response.data["data"]["machines"] || []);
+        } else {
+          toastMsg.value = "获取设备信息出错：" + response.data["status"].substring(6);
           toastShow.value = true;
           reject();
         }
       })
       .catch(function (error) {
-        // 处理错误情况
         toastMsg.value = "获取设备信息出错：" + error;
         toastShow.value = true;
         reject();
@@ -247,12 +338,181 @@ function getMachines() {
         <p class="text-gray-600">管理你网络中的用户和他们的权限</p>
       </header>
 
-      <div
-        class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-gray-200 text-gray-600 rounded-full px-2 py-1 leading-none text-sm mb-8"
-      >
-        {{ usersNum }} 个用户
+      <div class="flex flex-wrap items-center gap-3 mb-8">
+        <div
+          class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-gray-200 text-gray-600 rounded-full px-2 py-1 leading-none text-sm"
+        >
+          {{ usersNum }} 个用户
+        </div>
+        <div
+          v-if="externalUsers.length > 0"
+          class="inline-flex items-center align-middle justify-center font-medium border border-orange-100 bg-orange-50 text-orange-600 rounded-full px-2 py-1 leading-none text-sm"
+        >
+          {{ externalUsers.length }} 个外部共享用户
+        </div>
+        <div
+          v-if="pendingInvites.length > 0"
+          class="inline-flex items-center align-middle justify-center font-medium border border-blue-100 bg-blue-50 text-blue-600 rounded-full px-2 py-1 leading-none text-sm"
+        >
+          {{ pendingInvites.length }} 个待处理邀请
+        </div>
       </div>
-      <table class="table w-full">
+
+      <section class="mb-8 rounded-md border border-gray-200 p-4 md:p-6">
+        <header class="mb-4">
+          <h2 class="text-lg font-semibold tracking-tight mb-1">邀请用户</h2>
+          <p class="text-sm text-gray-600">
+            输入目标身份后，用户下次登录时会自动加入当前组织。
+          </p>
+        </header>
+        <form @submit.prevent="createInvite" class="flex flex-col gap-3 md:flex-row md:items-center">
+          <input
+            v-model="inviteTargetIdentity"
+            :disabled="!canManageInvites || inviteSubmitting"
+            class="input w-full border focus:outline-blue-500/60 hover:border disabled:hover:border-stone-200 disabled:border-stone-200 border-stone-200 hover:border-stone-400 rounded-md h-9 min-h-fit"
+            type="text"
+            placeholder="例如 user@example.com 或登录名"
+          />
+          <button
+            :disabled="!canManageInvites || inviteSubmitting || inviteTargetIdentity.trim() == ''"
+            class="btn border-0 bg-blue-500 hover:bg-blue-900 disabled:bg-blue-500/60 text-white disabled:text-white/60 h-9 min-h-fit"
+            type="submit"
+          >
+            创建邀请
+          </button>
+        </form>
+        <p v-if="!canManageInvites" class="text-sm text-gray-500 mt-3">仅所有者可以管理邀请。</p>
+
+        <div class="mt-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="font-medium">待处理邀请</h3>
+            <span class="text-sm text-gray-500">{{ pendingInvites.length }} 条</span>
+          </div>
+          <div
+            v-if="pendingInvites.length == 0"
+            class="rounded-md border border-stone-200 bg-stone-50 p-5 text-center text-gray-500"
+          >
+            暂无待处理邀请
+          </div>
+          <div v-else class="rounded-md border border-stone-200 divide-y divide-stone-200">
+            <div
+              v-for="invite in pendingInvites"
+              :key="invite.id"
+              class="p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between"
+            >
+              <div class="min-w-0">
+                <div class="font-medium break-all">{{ invite.targetIdentity }}</div>
+                <div class="text-sm text-gray-600 mt-1">
+                  <span>{{ invite.status == 'pending' ? '待接受' : invite.status }}</span>
+                  <span v-if="invite.created"> · 创建于 {{ formatInviteTime(invite.created) }}</span>
+                </div>
+              </div>
+              <div class="flex shrink-0 justify-end">
+                <button
+                  :disabled="!canManageInvites || inviteSubmitting"
+                  @click="revokeInvite(invite)"
+                  class="btn border-0 bg-red-600 hover:bg-red-700 disabled:bg-red-600/60 text-white h-9 min-h-fit"
+                  type="button"
+                >
+                  撤销
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="externalUsers.length > 0" class="mb-8 rounded-md border border-orange-100 bg-orange-50/40 p-4 md:p-6">
+        <header class="mb-4">
+          <h2 class="text-lg font-semibold tracking-tight mb-1">外部共享用户</h2>
+          <p class="text-sm text-gray-600">这些用户因外部共享设备而出现在你的可见范围内。</p>
+        </header>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div
+            v-for="user in externalUsers"
+            :key="user.id"
+            class="rounded-md border border-orange-100 bg-white p-4"
+          >
+            <div class="font-medium break-all">{{ user.displayName }}</div>
+            <div class="text-sm text-gray-600 mt-1 break-all">{{ user.loginName }}</div>
+            <div class="text-xs text-gray-500 mt-2">来源组织：{{ user.domainName }}</div>
+          </div>
+        </div>
+      </section>
+
+      <div class="md:hidden space-y-3">
+        <div
+          v-for="u in UserList"
+          :key="'mobile-' + u.id"
+          class="rounded-md border border-stone-200 bg-white p-4 shadow-sm"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex min-w-0 items-start gap-3">
+              <div class="relative shrink-0 rounded-full overflow-hidden w-10 h-10 text-base">
+                <div
+                  class="flex items-center justify-center text-center capitalize text-white font-medium pointer-events-none w-10 h-10 text-base"
+                  style="background-color: rgb(161, 56, 33)"
+                >
+                  {{ u.displayName[0] }}
+                </div>
+              </div>
+              <div class="min-w-0">
+                <div class="font-semibold text-gray-900 break-all">{{ u.displayName }}</div>
+                <div class="mt-1 text-sm text-gray-600 break-all">{{ u.loginName }}</div>
+              </div>
+            </div>
+            <div @click="openUserMenu(u, $event)" class="shrink-0">
+              <button
+                class="btn btn-sm border border-stone-300 bg-white hover:bg-stone-50 text-gray-700 h-8 min-h-fit"
+                type="button"
+              >
+                操作
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-3 flex flex-wrap gap-1">
+            <span
+              class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-gray-100 text-gray-600 rounded-sm px-1 text-xs"
+            >
+              {{ u.role == "owner" ? "所有者" : "普通成员" }}
+            </span>
+            <span v-if="u.status == 'suspend'">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-red-50 bg-red-50 text-red-600 rounded-sm px-1 text-xs"
+              >
+                已冻结
+              </div>
+            </span>
+          </div>
+
+          <div class="mt-3 space-y-1 text-sm text-gray-600">
+            <div>
+              加入日期：
+              {{
+                new Date(u.created)
+                  .toLocaleDateString()
+                  .replace("/", "年")
+                  .replace("/", "月") + "日"
+              }}
+            </div>
+            <div>
+              最近连线：
+              {{
+                u.currentlyConnected
+                  ? "已连接"
+                  : new Date(u.lastSeen)
+                      .toLocaleString()
+                      .replace("/", "年")
+                      .replace("/", "月")
+                      .replace(" ", "日 ")
+              }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <table class="hidden md:table w-full">
         <thead>
           <tr>
             <th class="flex-auto table-cell items-center">用户</th>

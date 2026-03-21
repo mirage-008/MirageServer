@@ -26,25 +26,44 @@ const (
 )
 
 type Organization struct {
-	ID             int64  `gorm:"primary_key;unique;not null"`
-	StableID       string `gorm:"unique"`
-	Name           string `gorm:"uniqueIndex:idx_name_provider"`
-	Provider       string `gorm:"uniqueIndex:idx_name_provider"`
-	ExpiryDuration uint   `gorm:"default:180"`
-	EnableMagic    bool   `gorm:"default:false"`
-	MagicDnsDomain string
-	OverrideLocal  bool `gorm:"default:false"`
-	Nameservers    StringList
-	SplitDns       SplitDNS
-	AclPolicy      *ACLPolicy
-	AclRules       []tailcfg.FilterRule `gorm:"-"`
-	SshPolicy      *tailcfg.SSHPolicy   `gorm:"-"`
-	NaviBanList    NaviBanList
-	NaviDeployKey  string
-	NaviDeployPub  string
+	ID                 int64  `gorm:"primary_key;unique;not null"`
+	StableID           string `gorm:"unique"`
+	Name               string `gorm:"uniqueIndex:idx_name_provider"`
+	Provider           string `gorm:"uniqueIndex:idx_name_provider"`
+	ExpiryDuration     uint   `gorm:"default:180"`
+	EnableMagic        bool   `gorm:"default:false"`
+	MagicDnsDomain     string
+	OverrideLocal      bool `gorm:"default:false"`
+	FileSharingEnabled *bool `gorm:"default:true"`
+	Nameservers        StringList
+	SplitDns           SplitDNS
+	AclPolicy          *ACLPolicy
+	AclRules           []tailcfg.FilterRule `gorm:"-"`
+	SshPolicy          *tailcfg.SSHPolicy   `gorm:"-"`
+	NaviBanList        NaviBanList
+	NaviDeployKey      string
+	NaviDeployPub      string
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func (o *Organization) NormalizeFileSharingEnabled() {
+	if o != nil && o.FileSharingEnabled == nil {
+		o.FileSharingEnabled = boolPtr(true)
+	}
+}
+
+func (o *Organization) FileSharingEnabledValue() bool {
+	if o == nil {
+		return true
+	}
+	o.NormalizeFileSharingEnabled()
+	return *o.FileSharingEnabled
 }
 
 type NaviBanList map[int]struct{}
@@ -75,6 +94,7 @@ func (o *Organization) BeforeCreate(tx *gorm.DB) error {
 		o.ID = id
 	}
 	o.StableID = GetShortId(o.ID)
+	o.NormalizeFileSharingEnabled()
 	return nil
 }
 
@@ -128,6 +148,7 @@ func (m *Mirage) CreateOrgnaizationInTx(tx *gorm.DB, name, provider string) (*Or
 	org.Name = name
 	org.Provider = provider
 	org.ExpiryDuration = DefaultExpireTime
+	org.FileSharingEnabled = boolPtr(true)
 	org.AclPolicy = &ACLPolicy{
 		Groups:    make(Groups, 0),
 		Hosts:     make(Hosts, 0),
@@ -148,7 +169,6 @@ func (m *Mirage) CreateOrgnaizationInTx(tx *gorm.DB, name, provider string) (*Or
 		SSHs: make([]SSH, 0),
 	}
 
-	//cgao6: 添加组织幻域域名roll生成
 	newMagicDNSDomain, err := m.GenNewMagicDNSDomain(tx)
 	if err != nil {
 		log.Error().
@@ -177,6 +197,7 @@ func (m *Mirage) GetOrgnaizationRecordByName(name, provider string) (*Organizati
 		Name:     name,
 		Provider: provider,
 	}).Take(&org).Error
+	org.NormalizeFileSharingEnabled()
 	return &org, err
 }
 
@@ -197,7 +218,7 @@ func (m *Mirage) GetOrgnaizationByID(id int64) (*Organization, error) {
 	if err != nil {
 		return nil, err
 	}
-	//m.UpdateACLRulesOfOrg(org)
+	org.NormalizeFileSharingEnabled()
 	return org, err
 }
 
@@ -207,6 +228,9 @@ func (m *Mirage) ListOrgnaizations() ([]Organization, error) {
 	err := m.db.Find(&orgs).Error
 	if err != nil {
 		return nil, err
+	}
+	for i := range orgs {
+		orgs[i].NormalizeFileSharingEnabled()
 	}
 	return orgs, err
 }
@@ -227,6 +251,7 @@ func GetOrgnaizationByNameInTx(tx *gorm.DB, name, provider string) (*Organizatio
 		return nil, err
 	}
 
+	org.NormalizeFileSharingEnabled()
 	return &org, nil
 }
 
@@ -280,7 +305,6 @@ func (m *Mirage) UpdateOrgExpiry(user *User, newDuration uint) error {
 }
 
 func (m *Mirage) UpdateOrgDNSConfig(org *Organization, newDNSCfg DNSData) error {
-
 	org.EnableMagic = newDNSCfg.MagicDNS
 	org.Nameservers = make([]string, 0)
 	if len(newDNSCfg.Resolvers) > 0 {

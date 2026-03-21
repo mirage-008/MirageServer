@@ -419,12 +419,9 @@ func (h *Mirage) SetMachineUser(machine *Machine, username, orgName, provider st
 func (n *User) toTailscaleUser() *tailcfg.User {
 	user := tailcfg.User{
 		ID:            tailcfg.UserID(n.ID),
-		LoginName:     n.Name,
 		DisplayName:   n.Display_Name,
 		ProfilePicURL: "",
-		Domain:        n.Organization.MagicDnsDomain,
-		Logins:        []tailcfg.LoginID{},
-		Created:       time.Time{},
+		Created:       n.CreatedAt.UTC(),
 	}
 
 	return &user
@@ -433,10 +430,10 @@ func (n *User) toTailscaleUser() *tailcfg.User {
 func (n *User) toTailscaleLogin() *tailcfg.Login {
 	login := tailcfg.Login{
 		ID:            tailcfg.LoginID(n.ID),
+		Provider:      "mirage",
 		LoginName:     n.Name,
-		DisplayName:   n.Name,
+		DisplayName:   n.Display_Name,
 		ProfilePicURL: "",
-		Domain:        n.Organization.MagicDnsDomain,
 	}
 
 	return &login

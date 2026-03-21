@@ -19,7 +19,7 @@ const routes = [
     { path: '/settings', redirect: '/settings/general' },
     { path: '/settings/:setpart', component: Settings },
     { path: '/users', component: Users },
-    { path: '/acls', redirect: '/acls/tags' },
+    { path: '/acls', redirect: '/acls/rules' },
     { path: '/acls/:aclpart', component: ACLs },
     { path: '/navi', component: Navi },
 ]

@@ -3,6 +3,7 @@ package controller
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -68,10 +69,13 @@ type machineItem struct {
 	LastSeen               string   `json:"lastSeen"`               //done
 	Created                string   `json:"created"`                //done
 
-	IsExternal   bool `json:"isExternal"`
-	IsEphemeral  bool `json:"isEphemeral"`
-	IsSharedOut  bool `json:"issharedout"`
-	NeverExpires bool `json:"neverExpires"` //done
+	IsExternal         bool                  `json:"isExternal"`
+	IsEphemeral        bool                  `json:"isEphemeral"`
+	IsSharedOut        bool                  `json:"issharedout"`
+	ShareID            string                `json:"shareID"`
+	AcceptedShareCount int                   `json:"acceptedShareCount"`
+	ActiveShares       []*machineShareResponse `json:"activeShares"`
+	NeverExpires       bool                  `json:"neverExpires"` //done
 
 	AllowedIPs         []string `json:"allowedIPs"`
 	ExtraIPs           []string `json:"extraIPs"`
@@ -115,36 +119,76 @@ func (h *Mirage) ConsoleMachinesAPI(
 		return
 	}
 
-	OrgMachines, err := h.ListMachinesByOrgID(user.OrganizationID)
+	orgMachines, err := h.ListVisibleMachinesByOrgID(user.OrganizationID)
 	if err != nil {
 		h.doAPIResponse(w, "查询用户节点列表失败", nil)
 		return
 	}
 
-	mlist := make([]machineItem, 0)
-	for _, machine := range OrgMachines {
-		tz, _ := time.LoadLocation("Asia/Shanghai")
+	tz, _ := time.LoadLocation("Asia/Shanghai")
+	mlist := make([]machineItem, 0, len(orgMachines))
+	for _, machine := range orgMachines {
+		userNameHead := ""
+		if machine.User.Display_Name != "" {
+			userNameHead = string([]rune(machine.User.Display_Name)[0])
+		} else if machine.User.Name != "" {
+			userNameHead = string([]rune(machine.User.Name)[0])
+		}
+
+		lastSeen := ""
+		if machine.LastSeen != nil {
+			lastSeen = machine.LastSeen.In(tz).Format("2006年01月02日 15:04:05")
+		}
+
+		expires := time.Time{}
+		neverExpires := true
+		if machine.Expiry != nil {
+			expires = *machine.Expiry
+			neverExpires = machine.Expiry.IsZero()
+		}
+
 		tmpMachine := machineItem{
 			Id:                 strconv.FormatInt(machine.ID, 10),
 			Name:               machine.GivenName,
 			User:               machine.User.Name,
-			UserNameHead:       string([]rune(machine.User.Display_Name)[0]),
+			UserNameHead:       userNameHead,
 			Os:                 machine.HostInfo.OS,
 			Hostname:           machine.HostInfo.Hostname,
 			IpnVersion:         machine.HostInfo.IPNVersion,
 			Created:            machine.CreatedAt.In(tz).Format("2006年01月02日 15:04:05"),
-			LastSeen:           machine.LastSeen.In(tz).Format("2006年01月02日 15:04:05"),
+			LastSeen:           lastSeen,
 			ConnectedToControl: machine.isOnline(),
 			AllowedTags:        machine.ForcedTags,
 			InvalidTags:        []string{},
 			HasTags:            machine.ForcedTags != nil && len(machine.ForcedTags) > 0,
+			IsExternal:         machine.Shared || machine.User.OrganizationID != user.OrganizationID,
+			IsEphemeral:        machine.isEphemeral(),
+			NeverExpires:       neverExpires,
+			Expires:            expires,
+			Endpoints:          machine.Endpoints,
+			AutomaticNameMode:  machine.AutoGenName,
+		}
 
-			IsEphemeral:  machine.isEphemeral(),
-			NeverExpires: *machine.Expiry == time.Time{},
-			Expires:      *machine.Expiry,
-
-			Endpoints:         machine.Endpoints,
-			AutomaticNameMode: machine.AutoGenName,
+		if !tmpMachine.IsExternal {
+			shares, err := h.ListMachineSharesBySourceMachine(machine.ID)
+			if err != nil {
+				h.doAPIResponse(w, "查询设备分享信息失败", nil)
+				return
+			}
+			for i := range shares {
+				share := &shares[i]
+				if share.Status == MachineShareStatusRevoked {
+					continue
+				}
+				if tmpMachine.ShareID == "" {
+					tmpMachine.ShareID = share.StableID
+				}
+				tmpMachine.IsSharedOut = true
+				tmpMachine.ActiveShares = append(tmpMachine.ActiveShares, h.buildMachineShareResponse(share))
+				if share.Status == MachineShareStatusAccepted {
+					tmpMachine.AcceptedShareCount++
+				}
+			}
 		}
 
 		switch machine.HostInfo.OS {
@@ -177,28 +221,23 @@ func (h *Mirage) ConsoleMachinesAPI(
 		if machine.User.Organization.EnableMagic {
 			tmpMachine.Fqdn = machine.GivenName + "." + machine.User.Organization.MagicDnsDomain
 		}
-		// 处理路由部分
-		machineRoutes, err := h.GetMachineRoutes(&machine)
-		if err != nil {
-			h.doAPIResponse(w, "查询设备路由失败", nil)
-			return
-		}
-		for _, route := range machineRoutes {
-			if route.isExitRoute() {
-				if route.Advertised {
-					tmpMachine.AdvertisedExitNode = true
-					if route.Enabled {
-						tmpMachine.AllowedExitNode = true
+		if !tmpMachine.IsExternal {
+			machineRoutes, err := h.GetMachineRoutes(&machine)
+			if err != nil {
+				h.doAPIResponse(w, "查询设备路由失败", nil)
+				return
+			}
+			for _, route := range machineRoutes {
+				if route.isExitRoute() {
+					if route.Advertised {
+						tmpMachine.AdvertisedExitNode = true
+						if route.Enabled {
+							tmpMachine.AllowedExitNode = true
+						}
 					}
-				}
-			} else {
-				if route.Advertised {
+				} else if route.Advertised {
 					tmpMachine.HasSubnets = true
 					routeV := netip.Prefix(route.Prefix).String()
-					if err != nil {
-						h.doAPIResponse(w, "子网路由地址转换失败", nil)
-						return
-					}
 					tmpMachine.AdvertisedIPs = append(tmpMachine.AdvertisedIPs, routeV)
 					if route.Enabled {
 						tmpMachine.AllowedIPs = append(tmpMachine.AllowedIPs, routeV)
@@ -210,17 +249,15 @@ func (h *Mirage) ConsoleMachinesAPI(
 		}
 
 		if !tmpMachine.NeverExpires {
-			ExpiryDuration := time.Until(*machine.Expiry)
-			tmpMachine.ExpiryDesc = convExpiryToStr(ExpiryDuration)
+			tmpMachine.ExpiryDesc = convExpiryToStr(time.Until(expires))
 		}
-		if machine.IPAddresses[0].Is4() {
-			tmpMachine.Addresses = []string{
-				machine.IPAddresses[0].String(),
-				machine.IPAddresses[1].String()}
-		} else if machine.IPAddresses[1].Is4() {
-			tmpMachine.Addresses = []string{
-				machine.IPAddresses[1].String(),
-				machine.IPAddresses[0].String()}
+		switch {
+		case len(machine.IPAddresses) >= 2 && machine.IPAddresses[0].Is4():
+			tmpMachine.Addresses = []string{machine.IPAddresses[0].String(), machine.IPAddresses[1].String()}
+		case len(machine.IPAddresses) >= 2 && machine.IPAddresses[1].Is4():
+			tmpMachine.Addresses = []string{machine.IPAddresses[1].String(), machine.IPAddresses[0].String()}
+		default:
+			tmpMachine.Addresses = machine.IPAddresses.ToStringSlice()
 		}
 		mlist = append(mlist, tmpMachine)
 	}
@@ -248,6 +285,98 @@ type Latency struct {
 	LatencyMs  float64 `json:"latencyMs"`
 }
 
+func machineNeverExpires(machine *Machine) bool {
+	return machine == nil || machine.Expiry == nil || machine.Expiry.IsZero()
+}
+
+func mapShareErrorMessage(err error, creating bool) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrMachineShareTargetInvalid):
+		if creating {
+			return "目标身份无效"
+		}
+		return "分享信息无效"
+	case errors.Is(err, ErrMachineShareTargetAlreadyInOrg):
+		return "目标身份已在当前组织中"
+	case errors.Is(err, ErrMachineShareAlreadyRevoked):
+		return "分享已被撤销"
+	case errors.Is(err, ErrMachineShareNotFound):
+		return "分享不存在"
+	default:
+		return err.Error()
+	}
+}
+
+type machineShareResponse struct {
+	Id             string     `json:"id"`
+	StableId       string     `json:"stableId"`
+	ShareToken     string     `json:"shareToken"`
+	TargetIdentity string     `json:"targetIdentity"`
+	Status         string     `json:"status"`
+	SourceMachineID string    `json:"sourceMachineID"`
+	TargetOrgID    string     `json:"targetOrgID"`
+	AcceptedAt     *time.Time `json:"acceptedAt"`
+	RevokedAt      *time.Time `json:"revokedAt"`
+	CreatedAt      time.Time  `json:"createdAt"`
+}
+
+func (h *Mirage) buildMachineShareResponse(share *MachineShare) *machineShareResponse {
+	if share == nil {
+		return nil
+	}
+
+	res := &machineShareResponse{
+		Id:              strconv.FormatInt(share.ID, 10),
+		StableId:        share.StableID,
+		ShareToken:      share.ShareToken,
+		TargetIdentity:  share.TargetIdentity,
+		Status:          share.Status,
+		SourceMachineID: strconv.FormatInt(share.SourceMachineID, 10),
+		AcceptedAt:      share.AcceptedAt,
+		RevokedAt:       share.RevokedAt,
+		CreatedAt:       share.CreatedAt.UTC(),
+	}
+	if share.TargetOrgID != 0 {
+		res.TargetOrgID = strconv.FormatInt(share.TargetOrgID, 10)
+	}
+
+	return res
+}
+
+func (h *Mirage) resolveShareIDFromRequest(reqData map[string]interface{}) (int64, error) {
+	if shareID, ok := parseRequestInt64(reqData, "shareID", "shareId", "id"); ok {
+		return shareID, nil
+	}
+	stableID := parseRequestString(reqData, "shareStableID", "shareStableId", "stableId")
+	if stableID == "" {
+		return 0, ErrMachineShareNotFound
+	}
+	share, err := h.GetMachineShareByStableID(stableID)
+	if err != nil {
+		return 0, err
+	}
+
+	return share.ID, nil
+}
+
+func (h *Mirage) getVisibleMachineForOrg(machineID int64, orgID int64) (*Machine, error) {
+	machine, err := h.GetMachineByID(machineID)
+	if err != nil {
+		return nil, err
+	}
+	visible, err := h.IsMachineVisibleToOrg(machine, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if !visible {
+		return nil, ErrMachineNotFound
+	}
+
+	return machine, nil
+}
+
 func (m *Mirage) ConsoleMachineDebugAPI(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -269,18 +398,46 @@ func (m *Mirage) ConsoleMachineDebugAPI(
 		return
 	}
 	targetMachine := m.GetMachineByIP(targetMIP)
-	if targetMachine == nil || targetMachine.User.OrganizationID != user.OrganizationID {
+	if targetMachine == nil {
 		m.doAPIResponse(w, "组织内无此设备", nil)
 		return
 	}
+	visible, err := m.IsMachineVisibleToOrg(targetMachine, user.OrganizationID)
+	if err != nil {
+		m.doAPIResponse(w, "查询设备权限失败", nil)
+		return
+	}
+	if !visible {
+		m.doAPIResponse(w, "组织内无此设备", nil)
+		return
+	}
+	if targetMachine.User.OrganizationID != user.OrganizationID {
+		targetMachine.Shared = true
+	}
+	var (
+		mappingVariesByDestIP bool
+		ipv6                  bool
+		udp                   bool
+		upnp                  bool
+		pmp                   bool
+		pcp                   bool
+	)
+	if targetMachine.HostInfo.NetInfo != nil {
+		mappingVariesByDestIP = targetMachine.HostInfo.NetInfo.MappingVariesByDestIP.EqualBool(true)
+		ipv6 = targetMachine.HostInfo.NetInfo.WorkingIPv6.EqualBool(true)
+		udp = targetMachine.HostInfo.NetInfo.WorkingUDP.EqualBool(true)
+		upnp = targetMachine.HostInfo.NetInfo.UPnP.EqualBool(true)
+		pmp = targetMachine.HostInfo.NetInfo.PMP.EqualBool(true)
+		pcp = targetMachine.HostInfo.NetInfo.PCP.EqualBool(true)
+	}
 	resData := &MachineDebugInfo{
-		MappingVariesByDestIP: targetMachine.HostInfo.NetInfo.MappingVariesByDestIP.EqualBool(true),
-		HairPinning:           targetMachine.HostInfo.NetInfo.HairPinning.EqualBool(true),
-		IPv6:                  targetMachine.HostInfo.NetInfo.WorkingIPv6.EqualBool(true),
-		UDP:                   targetMachine.HostInfo.NetInfo.WorkingUDP.EqualBool(true),
-		UPnP:                  targetMachine.HostInfo.NetInfo.UPnP.EqualBool(true),
-		PMP:                   targetMachine.HostInfo.NetInfo.PMP.EqualBool(true),
-		PCP:                   targetMachine.HostInfo.NetInfo.PCP.EqualBool(true),
+		MappingVariesByDestIP: mappingVariesByDestIP,
+		HairPinning:           false,
+		IPv6:                  ipv6,
+		UDP:                   udp,
+		UPnP:                  upnp,
+		PMP:                   pmp,
+		PCP:                   pcp,
 		Latency:               make(map[string]*Latency),
 	}
 	derpMap, err := m.LoadOrgDERPs(targetMachine.User.OrganizationID)
@@ -333,54 +490,96 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 		h.doAPIResponse(writer, "用户信息核对失败:"+err.Error(), nil)
 		return
 	}
-	err = req.ParseForm()
-	if err != nil {
+	if err := req.ParseForm(); err != nil {
 		h.doAPIResponse(writer, "用户请求解析失败:"+err.Error(), nil)
 		return
 	}
+
 	reqData := make(map[string]interface{})
-	json.NewDecoder(req.Body).Decode(&reqData)
-	reqMID, ok := reqData["mid"].(string)
-	if !ok {
-		h.doAPIResponse(writer, "用户请求mid解析失败", nil)
+	if err := json.NewDecoder(req.Body).Decode(&reqData); err != nil && err.Error() != "EOF" {
+		h.doAPIResponse(writer, "用户请求解析失败:"+err.Error(), nil)
 		return
 	}
-	MachineID, err := strconv.ParseInt(reqMID, 0, 64)
-	if err != nil {
-		h.doAPIResponse(writer, "用户请求mid处理失败", nil)
-		return
-	}
-	toUpdateMachine, err := h.GetMachineByID(MachineID)
-	if err != nil {
-		h.doAPIResponse(writer, "查询用户设备失败", nil)
-		return
-	}
-	/*
-		if toUpdateMachine.User.ID != user.ID {
-			h.doAPIResponse(writer, "用户没有该权限", nil)
-			return
-		}
-	*/
-	reqState, ok := reqData["state"].(string)
-	if !ok {
+
+	reqState := parseRequestString(reqData, "state", "action")
+	if reqState == "" {
 		h.doAPIResponse(writer, "用户请求state解析失败", nil)
 		return
 	}
 
 	switch reqState {
-	case "set-expires": //切换密钥永不过期设置
+	case "accept_share", "accept-share":
+		shareToken := parseRequestString(reqData, "shareToken", "token")
+		share, err := h.AcceptMachineShareByToken(shareToken, user)
+		if err != nil {
+			h.doAPIResponse(writer, mapShareErrorMessage(err, false), nil)
+			return
+		}
+		h.doAPIResponse(writer, "", h.buildMachineShareResponse(share))
+		return
+	case "revoke_share", "revoke-share":
+		shareID, err := h.resolveShareIDFromRequest(reqData)
+		if err != nil {
+			h.doAPIResponse(writer, mapShareErrorMessage(err, false), nil)
+			return
+		}
+		if err := h.RevokeMachineShare(shareID, user.OrganizationID); err != nil {
+			h.doAPIResponse(writer, mapShareErrorMessage(err, false), nil)
+			return
+		}
+		h.doAPIResponse(writer, "", nil)
+		return
+	}
+
+	machineID, ok := parseRequestInt64(reqData, "mid", "machineID", "machineId")
+	if !ok {
+		h.doAPIResponse(writer, "用户请求mid解析失败", nil)
+		return
+	}
+	toUpdateMachine, err := h.getVisibleMachineForOrg(machineID, user.OrganizationID)
+	if err != nil {
+		h.doAPIResponse(writer, "查询用户设备失败", nil)
+		return
+	}
+	if toUpdateMachine.User.OrganizationID != user.OrganizationID {
+		toUpdateMachine.Shared = true
+	}
+
+	switch reqState {
+	case "create_share", "share", "create-share":
+		if toUpdateMachine.Shared {
+			h.doAPIResponse(writer, "外部共享设备不支持此操作", nil)
+			return
+		}
+		targetIdentity := parseRequestString(reqData, "targetIdentity", "targetUser", "targetUserName", "targetLoginName")
+		share, err := h.CreateMachineShare(toUpdateMachine, user, targetIdentity)
+		if err != nil {
+			h.doAPIResponse(writer, mapShareErrorMessage(err, true), nil)
+			return
+		}
+		h.doAPIResponse(writer, "", h.buildMachineShareResponse(share))
+		return
+	}
+
+	if toUpdateMachine.Shared {
+		h.doAPIResponse(writer, "外部共享设备不支持此操作", nil)
+		return
+	}
+
+	switch reqState {
+	case "set-expires":
 		msg, err := h.setMachineExpiry(toUpdateMachine)
 		if err != nil {
 			h.doAPIResponse(writer, msg, nil)
 		} else {
 			resData := machineData{
-				NeverExpires: *toUpdateMachine.Expiry == time.Time{},
+				NeverExpires: machineNeverExpires(toUpdateMachine),
 				Expires:      msg,
 			}
 			h.doAPIResponse(writer, "", resData)
 		}
-	case "rename-node": //设置设备名称
-		newName := reqData["nodeName"].(string)
+	case "rename-node":
+		newName := parseRequestString(reqData, "nodeName")
 		msg, _, err := h.setMachineName(toUpdateMachine, newName)
 		if err != nil {
 			h.doAPIResponse(writer, msg, nil)
@@ -389,69 +588,67 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 				AutomaticNameMode: toUpdateMachine.AutoGenName,
 				Name:              toUpdateMachine.GivenName,
 				Hostname:          toUpdateMachine.Hostname,
-				NeverExpires:      *toUpdateMachine.Expiry == time.Time{},
+				NeverExpires:      machineNeverExpires(toUpdateMachine),
 				Expires:           msg,
 			}
 			h.doAPIResponse(writer, "", resData)
 		}
-	case "set-route-settings": //设置子网转发及出口节点
-		allowedIPsInterface := reqData["allowedIPs"].([]interface{})
-		allowExitNode := reqData["allowedExitNode"].(bool)
+	case "set-route-settings":
+		allowedIPsInterface, _ := reqData["allowedIPs"].([]interface{})
+		allowExitNode, _ := reqData["allowedExitNode"].(bool)
 
-		allowedIPs := new([]string)
+		allowedIPs := make([]string, 0, len(allowedIPsInterface))
 		for _, ip := range allowedIPsInterface {
-			*allowedIPs = append(*allowedIPs, ip.(string))
+			if ipStr, ok := ip.(string); ok {
+				allowedIPs = append(allowedIPs, ipStr)
+			}
 		}
 
-		msg, err := h.setMachineSubnet(toUpdateMachine, allowExitNode, *allowedIPs)
+		msg, err := h.setMachineSubnet(toUpdateMachine, allowExitNode, allowedIPs)
 		if err != nil {
 			h.doAPIResponse(writer, msg, nil)
 			return
-		} else {
-			resData := machineData{
-				AutomaticNameMode: toUpdateMachine.AutoGenName,
-				Name:              toUpdateMachine.GivenName,
-				Hostname:          toUpdateMachine.Hostname,
-				NeverExpires:      *toUpdateMachine.Expiry == time.Time{},
-				Expires:           msg,
-			}
-			machineRoutes, err := h.GetMachineRoutes(toUpdateMachine)
-			if err != nil {
-				h.doAPIResponse(writer, "查询设备路由失败", nil)
-				return
-			}
-			for _, route := range machineRoutes {
-				if route.isExitRoute() {
-					if route.Advertised {
-						resData.AdvertisedExitNode = true
-						if route.Enabled {
-							resData.AllowedExitNode = true
-						}
-					}
-				} else {
-					if route.Advertised {
-						resData.HasSubnets = true
-						routeV := netip.Prefix(route.Prefix).String()
-						if err != nil {
-							h.doAPIResponse(writer, "子网路由地址转换失败", nil)
-							return
-						}
-						resData.AdvertisedIPs = append(resData.AdvertisedIPs, routeV)
-						if route.Enabled {
-							resData.AllowedIPs = append(resData.AllowedIPs, routeV)
-						} else {
-							resData.ExtraIPs = append(resData.ExtraIPs, routeV)
-						}
+		}
+
+		resData := machineData{
+			AutomaticNameMode: toUpdateMachine.AutoGenName,
+			Name:              toUpdateMachine.GivenName,
+			Hostname:          toUpdateMachine.Hostname,
+			NeverExpires:      machineNeverExpires(toUpdateMachine),
+			Expires:           msg,
+		}
+		machineRoutes, err := h.GetMachineRoutes(toUpdateMachine)
+		if err != nil {
+			h.doAPIResponse(writer, "查询设备路由失败", nil)
+			return
+		}
+		for _, route := range machineRoutes {
+			if route.isExitRoute() {
+				if route.Advertised {
+					resData.AdvertisedExitNode = true
+					if route.Enabled {
+						resData.AllowedExitNode = true
 					}
 				}
+			} else if route.Advertised {
+				resData.HasSubnets = true
+				routeV := netip.Prefix(route.Prefix).String()
+				resData.AdvertisedIPs = append(resData.AdvertisedIPs, routeV)
+				if route.Enabled {
+					resData.AllowedIPs = append(resData.AllowedIPs, routeV)
+				} else {
+					resData.ExtraIPs = append(resData.ExtraIPs, routeV)
+				}
 			}
-			h.doAPIResponse(writer, "", resData)
 		}
-	case "set-tags": //设置设备标签
-		reqTags := reqData["tags"].([]interface{})
-		setTags := make([]string, len(reqTags))
-		for i, tag := range reqTags {
-			setTags[i] = tag.(string)
+		h.doAPIResponse(writer, "", resData)
+	case "set-tags":
+		reqTags, _ := reqData["tags"].([]interface{})
+		setTags := make([]string, 0, len(reqTags))
+		for _, tag := range reqTags {
+			if tagStr, ok := tag.(string); ok {
+				setTags = append(setTags, tagStr)
+			}
 		}
 		msg, err := h.setMachineTags(toUpdateMachine, setTags)
 		if err != nil {
@@ -462,6 +659,7 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 			org, err := h.GetOrgnaizationByID(user.OrganizationID)
 			if err != nil {
 				h.doAPIResponse(writer, msg, nil)
+				return
 			}
 			for _, tag := range setTags {
 				if _, ok := org.AclPolicy.TagOwners[tag]; ok {
@@ -474,7 +672,7 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 				AutomaticNameMode: toUpdateMachine.AutoGenName,
 				Name:              toUpdateMachine.GivenName,
 				Hostname:          toUpdateMachine.Hostname,
-				NeverExpires:      *toUpdateMachine.Expiry == time.Time{},
+				NeverExpires:      machineNeverExpires(toUpdateMachine),
 				Expires:           msg,
 				HasTags:           len(setTags) > 0,
 				AllowedTags:       allowedTags,
@@ -482,6 +680,8 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 			}
 			h.doAPIResponse(writer, "", resData)
 		}
+	default:
+		h.doAPIResponse(writer, "未知设备操作", nil)
 	}
 }
 
@@ -495,11 +695,6 @@ func (h *Mirage) ConsoleRemoveMachineAPI(
 		h.doAPIResponse(writer, "用户信息核对失败:"+err.Error(), nil)
 		return
 	}
-	UserMachines, err := h.ListMachinesByOrgID(user.OrganizationID)
-	if err != nil {
-		h.doAPIResponse(writer, "用户设备检索失败:"+err.Error(), nil)
-		return
-	}
 	err = req.ParseForm()
 	if err != nil {
 		h.doAPIResponse(writer, "用户请求解析失败:"+err.Error(), nil)
@@ -508,20 +703,30 @@ func (h *Mirage) ConsoleRemoveMachineAPI(
 	reqData := make(map[string]string)
 	json.NewDecoder(req.Body).Decode(&reqData)
 	wantRemoveID := reqData["mid"]
-	for _, machine := range UserMachines {
-		if strconv.FormatInt(machine.ID, 10) == wantRemoveID {
-			err = h.HardDeleteMachine(&machine)
-			if err != nil {
-				h.doAPIResponse(writer, "用户设备删除失败:"+err.Error(), nil)
-				return
-			}
-			h.NotifyNaviOrgNodesChange(user.OrganizationID, "", machine.NodeKey)
-
-			h.doAPIResponse(writer, "", nil)
-			return
-		}
+	machineID, err := strconv.ParseInt(wantRemoveID, 10, 64)
+	if err != nil {
+		h.doAPIResponse(writer, "用户请求mid处理失败", nil)
+		return
 	}
-	h.doAPIResponse(writer, "未找到目标设备", nil)
+
+	machine, err := h.getVisibleMachineForOrg(machineID, user.OrganizationID)
+	if err != nil {
+		h.doAPIResponse(writer, "未找到目标设备", nil)
+		return
+	}
+	if machine.User.OrganizationID != user.OrganizationID {
+		h.doAPIResponse(writer, "外部共享设备不支持此操作", nil)
+		return
+	}
+
+	err = h.HardDeleteMachine(machine)
+	if err != nil {
+		h.doAPIResponse(writer, "用户设备删除失败:"+err.Error(), nil)
+		return
+	}
+	h.NotifyNaviOrgNodesChange(user.OrganizationID, "", machine.NodeKey)
+
+	h.doAPIResponse(writer, "", nil)
 }
 
 // 切换设备密钥是否禁用过期

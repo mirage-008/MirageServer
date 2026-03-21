@@ -3,11 +3,20 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"tailscale.com/tailcfg"
+)
+
+const (
+	defaultRemoteDERPMapURL = "https://controlplane.tailscale.com/derpmap/default"
+	derpMapCacheTTL         = 10 * time.Minute
 )
 
 type NaviRegion struct {
@@ -150,8 +159,108 @@ func (c *Cockpit) UpdateNaviNode(naviNode *NaviNode) *NaviNode {
 	return naviNode
 }
 
-// cgao6: 以下为Mirage的实现
-func (m *Mirage) LoadDERPMapFromURL(addr string) (*tailcfg.DERPMap, error) {
+func newDERPMap() *tailcfg.DERPMap {
+	return &tailcfg.DERPMap{
+		Regions: make(map[int]*tailcfg.DERPRegion),
+	}
+}
+
+func normalizeDERPMapURL(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return defaultRemoteDERPMapURL
+	}
+
+	return addr
+}
+
+func validateDERPMapURL(addr string) (string, error) {
+	normalized := normalizeDERPMapURL(addr)
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("missing host")
+	}
+
+	return parsed.String(), nil
+}
+
+func (m *Mirage) configuredDERPMapURL() string {
+	if m == nil || m.cfg == nil {
+		return defaultRemoteDERPMapURL
+	}
+
+	return m.cfg.DERPURL
+}
+
+func (m *Mirage) resetRemoteDERPMapCache() {
+	if m == nil {
+		return
+	}
+
+	m.derpMapMu.Lock()
+	m.remoteDERPMap = nil
+	m.remoteDERPMapAt = time.Time{}
+	m.derpMapMu.Unlock()
+}
+
+func cloneDERPNode(node *tailcfg.DERPNode) *tailcfg.DERPNode {
+	if node == nil {
+		return nil
+	}
+
+	nodeCopy := *node
+
+	return &nodeCopy
+}
+
+func cloneDERPRegion(region *tailcfg.DERPRegion) *tailcfg.DERPRegion {
+	if region == nil {
+		return nil
+	}
+
+	regionCopy := *region
+	regionCopy.Nodes = make([]*tailcfg.DERPNode, 0, len(region.Nodes))
+	for _, node := range region.Nodes {
+		regionCopy.Nodes = append(regionCopy.Nodes, cloneDERPNode(node))
+	}
+
+	return &regionCopy
+}
+
+func cloneDERPMap(derpMap *tailcfg.DERPMap) *tailcfg.DERPMap {
+	if derpMap == nil {
+		return nil
+	}
+
+	clone := &tailcfg.DERPMap{
+		OmitDefaultRegions: derpMap.OmitDefaultRegions,
+		Regions:            make(map[int]*tailcfg.DERPRegion, len(derpMap.Regions)),
+	}
+	for regionID, region := range derpMap.Regions {
+		clone.Regions[regionID] = cloneDERPRegion(region)
+	}
+
+	return clone
+}
+
+func mergeDERPRegion(derpMap *tailcfg.DERPMap, region tailcfg.DERPRegion) {
+	if derpMap == nil {
+		return
+	}
+	if derpMap.Regions == nil {
+		derpMap.Regions = make(map[int]*tailcfg.DERPRegion)
+	}
+
+	derpMap.Regions[region.RegionID] = cloneDERPRegion(&region)
+}
+
+func (m *Mirage) fetchDERPMapFromURL(addr string) (*tailcfg.DERPMap, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), HTTPReadTimeout)
 	defer cancel()
 
@@ -175,20 +284,77 @@ func (m *Mirage) LoadDERPMapFromURL(addr string) (*tailcfg.DERPMap, error) {
 		return nil, err
 	}
 
-	var derpMap tailcfg.DERPMap
-	err = json.Unmarshal(body, &derpMap)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"fetch DERP map: http %d: %.200s",
+			resp.StatusCode,
+			strings.TrimSpace(string(body)),
+		)
+	}
 
+	derpMap := newDERPMap()
+	if err := json.Unmarshal(body, derpMap); err != nil {
+		return nil, err
+	}
+	if derpMap.Regions == nil {
+		derpMap.Regions = make(map[int]*tailcfg.DERPRegion)
+	}
 	if len(derpMap.Regions) == 0 {
 		log.Warn().
 			Msg("DERP map is empty, not a single DERP map datasource was loaded correctly or contained a region")
 	}
 
-	//cgao6: TEMP
-	derpMap = tailcfg.DERPMap{
-		Regions: make(map[int]*tailcfg.DERPRegion),
-	} //TODO: 临时
+	return derpMap, nil
+}
 
-	// 从数据库读取DERP信息
+func (m *Mirage) loadRemoteDERPMap() (*tailcfg.DERPMap, error) {
+	m.derpMapMu.RLock()
+	cached := cloneDERPMap(m.remoteDERPMap)
+	cachedAt := m.remoteDERPMapAt
+	m.derpMapMu.RUnlock()
+
+	if cached != nil && time.Since(cachedAt) < derpMapCacheTTL {
+		return cached, nil
+	}
+
+	derpURL, err := validateDERPMapURL(m.configuredDERPMapURL())
+	if err != nil {
+		log.Warn().Err(err).Str("derp_url", m.configuredDERPMapURL()).Msg("Invalid DERP map URL configured, using default")
+		derpURL = defaultRemoteDERPMapURL
+	}
+
+	derpMap, err := m.fetchDERPMapFromURL(derpURL)
+	if err != nil {
+		if cached != nil {
+			log.Warn().
+				Err(err).
+				Msg("Failed to refresh remote DERP map, using cached copy")
+			return cached, nil
+		}
+
+		return newDERPMap(), err
+	}
+
+	m.derpMapMu.Lock()
+	m.remoteDERPMap = cloneDERPMap(derpMap)
+	m.remoteDERPMapAt = time.Now()
+	m.derpMapMu.Unlock()
+
+	return derpMap, nil
+}
+
+// cgao6: 以下为Mirage的实现
+func (m *Mirage) LoadDERPMapFromURL(addr string) (*tailcfg.DERPMap, error) {
+	derpURL, err := validateDERPMapURL(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	derpMap, err := m.fetchDERPMapFromURL(derpURL)
+	if err != nil {
+		return nil, err
+	}
+
 	naviRegions := m.ListNaviRegions()
 	if len(naviRegions) != 0 {
 		for _, nr := range naviRegions {
@@ -197,16 +363,18 @@ func (m *Mirage) LoadDERPMapFromURL(addr string) (*tailcfg.DERPMap, error) {
 				log.Error().Err(err).Msg("Cannot convert NaviRegion to DERPRegion")
 				return nil, err
 			}
-			derpMap.Regions[derpRegion.RegionID] = &derpRegion
+			mergeDERPRegion(derpMap, derpRegion)
 		}
 	}
 
-	return &derpMap, err
+	return derpMap, nil
 }
 
 func (m *Mirage) LoadOrgDERPs(orgID int64) (*tailcfg.DERPMap, error) {
-	derpMap := &tailcfg.DERPMap{
-		Regions: make(map[int]*tailcfg.DERPRegion),
+	derpMap, err := m.loadRemoteDERPMap()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to load remote DERP map, falling back to Mirage-managed DERP regions only")
+		derpMap = newDERPMap()
 	}
 
 	org, err := m.GetOrgnaizationByID(orgID)
@@ -226,8 +394,10 @@ func (m *Mirage) LoadOrgDERPs(orgID int64) (*tailcfg.DERPMap, error) {
 						log.Error().Err(err).Msg("Cannot convert NaviRegion to DERPRegion")
 						return nil, err
 					}
-					derpMap.Regions[derpRegion.RegionID] = &derpRegion
+					mergeDERPRegion(derpMap, derpRegion)
 				}
+			} else {
+				delete(derpMap.Regions, nr.ID)
 			}
 		}
 	}

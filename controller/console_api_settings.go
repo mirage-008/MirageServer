@@ -6,6 +6,10 @@ import (
 	"net/http"
 )
 
+type UpdateFileSharingREQ struct {
+	FileSharing bool `json:"fileSharing"`
+}
+
 // 网络设置响应Data体
 type NetSettingResData struct {
 	FileSharing        bool   `json:"fileSharing"`
@@ -27,17 +31,60 @@ func (h *Mirage) getNetSettingAPI(
 		h.doAPIResponse(writer, "用户信息核对失败:"+err.Error(), nil)
 		return
 	}
+
+	org, err := h.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		h.doAPIResponse(writer, "用户组织信息获取失败", nil)
+		return
+	}
+	user.Organization = *org
+
 	netsettingData := NetSettingResData{
-		FileSharing:        false, //未实现
+		FileSharing:        org.FileSharingEnabledValue(),
 		ServicesCollection: false, //未实现
 		HttpsEnabled:       false, //未实现
-		Provider:           user.Organization.Provider,
+		Provider:           org.Provider,
 		MachineAuthNeeded:  false, //未实现
-		MaxKeyDurationDays: 180,
+		MaxKeyDurationDays: int(org.ExpiryDuration),
 		NetworkLockEnabled: false, //未实现
 	}
-	netsettingData.MaxKeyDurationDays = int(user.Organization.ExpiryDuration)
+
 	h.doAPIResponse(writer, "", netsettingData)
+}
+
+func (h *Mirage) ConsoleUpdateFileSharingAPI(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	user, err := h.verifyTokenIDandGetUser(writer, req)
+	if err != nil || user.CheckEmpty() {
+		h.doAPIResponse(writer, "用户信息核对失败:"+err.Error(), nil)
+		return
+	}
+	if err := req.ParseForm(); err != nil {
+		h.doAPIResponse(writer, "用户请求解析失败:"+err.Error(), nil)
+		return
+	}
+
+	reqData := UpdateFileSharingREQ{}
+	if err := json.NewDecoder(req.Body).Decode(&reqData); err != nil {
+		h.doAPIResponse(writer, "用户请求解析失败:"+err.Error(), nil)
+		return
+	}
+
+	org, err := h.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		h.doAPIResponse(writer, "用户组织信息获取失败", nil)
+		return
+	}
+	org.FileSharingEnabled = boolPtr(reqData.FileSharing)
+	if err := h.db.Select("FileSharingEnabled").Updates(org).Error; err != nil {
+		h.doAPIResponse(writer, "更新文件共享设置失败:"+err.Error(), nil)
+		return
+	}
+
+	h.setOrgLastStateChangeToNow(user.OrganizationID)
+	h.doAPIResponse(writer, "", org.FileSharingEnabledValue())
 }
 
 // 更新用户网络密钥过期时长
@@ -50,6 +97,14 @@ func (h *Mirage) ConsoleUpdateKeyExpiryAPI(
 		h.doAPIResponse(writer, "用户信息核对失败:"+err.Error(), nil)
 		return
 	}
+
+	org, err := h.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		h.doAPIResponse(writer, "用户组织信息获取失败", nil)
+		return
+	}
+	user.Organization = *org
+
 	err = req.ParseForm()
 	if err != nil {
 		h.doAPIResponse(writer, "用户请求解析失败:"+err.Error(), nil)

@@ -72,7 +72,10 @@ func (h *Mirage) handlePollCommon(
 	// The intended use is for clients to discover the DERP map at start-up
 	// before their first real endpoint update.
 	if !mapRequest.ReadOnly {
-		machine.Endpoints = mapRequest.Endpoints
+		machine.Endpoints = make(StringList, 0, len(mapRequest.Endpoints))
+		for _, endpoint := range mapRequest.Endpoints {
+			machine.Endpoints = append(machine.Endpoints, endpoint.String())
+		}
 		machine.LastSeen = &now
 	}
 

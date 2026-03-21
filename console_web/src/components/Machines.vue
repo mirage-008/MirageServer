@@ -7,6 +7,7 @@ import UpdateHostname from "./mmenu/UpdateHostname.vue";
 import SetSubnet from "./mmenu/SetSubnet.vue";
 import Toast from "./Toast.vue";
 import EditTags from "./mmenu/EditTags.vue";
+import ShareMachine from "./mmenu/ShareMachine.vue";
 
 //与框架交互部分
 
@@ -82,10 +83,183 @@ function showSetSubnet() {
   closeMachineMenu();
   setSubnetShow.value = true;
 }
+const shareMachineShow = ref(false);
+function showShareMachine() {
+  machineBtnShow.value = false;
+  closeMachineMenu();
+  shareMachineShow.value = true;
+}
+
+function machineActiveShares(id) {
+  return MList.value[id]?.activeShares || [];
+}
+
+function shareCreatedDone(shareResponse) {
+  const mid = currentMID.value;
+  if (!MList.value[mid]) {
+    return;
+  }
+  const share = shareResponse?.share || shareResponse;
+  if (!share) {
+    return;
+  }
+
+  const currentShares = machineActiveShares(mid).filter(function (item) {
+    return item.id != share.id;
+  });
+  currentShares.push(share);
+  MList.value[mid]["activeShares"] = currentShares;
+  MList.value[mid]["issharedout"] = true;
+  MList.value[mid]["shareID"] = currentShares[0]?.stableId || share.stableId || "";
+  MList.value[mid]["acceptedShareCount"] = currentShares.filter(function (item) {
+    return item.status == "accepted";
+  }).length;
+  toastMsg.value = "已创建设备分享！";
+  toastShow.value = true;
+}
+
+function shareRevokedDone(share) {
+  const mid = currentMID.value;
+  if (!MList.value[mid]) {
+    return;
+  }
+
+  const currentShares = machineActiveShares(mid).filter(function (item) {
+    return item.id != share.id;
+  });
+  MList.value[mid]["activeShares"] = currentShares;
+  MList.value[mid]["issharedout"] = currentShares.length > 0;
+  MList.value[mid]["shareID"] = currentShares[0]?.stableId || "";
+  MList.value[mid]["acceptedShareCount"] = currentShares.filter(function (item) {
+    return item.status == "accepted";
+  }).length;
+  toastMsg.value = "已撤销设备分享！";
+  toastShow.value = true;
+}
+
+function openMachineMenuForItem(id, event) {
+  openMachineMenu(id, event);
+}
+
+function externalReadonlyToast() {
+  toastMsg.value = "外部共享设备仅支持查看";
+  toastShow.value = true;
+}
+
+function openReadonlyMachineMenu(id, event) {
+  openMachineMenu(id, event);
+  if (MList.value[id]?.isExternal) {
+    externalReadonlyToast();
+  }
+}
+
+function openMachineAction(id, event) {
+  if (MList.value[id]?.isExternal) {
+    openReadonlyMachineMenu(id, event);
+    return;
+  }
+  openMachineMenuForItem(id, event);
+}
+
+function actionMachineLabel(m) {
+  return m?.isExternal ? "查看" : "操作";
+}
+
+function actionMachineButtonClass(m) {
+  if (m?.isExternal) {
+    return "py-0.5 px-2 shadow-none rounded-md border border-gray-300/100 bg-gray-50 hover:bg-gray-100 hover:border-gray-300/100 hover:shadow-md hover:cursor-pointer active:border-gray-300/100 active:shadow focus:outline-none focus:ring transition-shadow duration-100 ease-in-out z-20 text-gray-500 text-sm";
+  }
+  return "py-0.5 px-2 shadow-none rounded-md border border-gray-300/0 hover:border-gray-300/100 hover:bg-gray-100 hover:shadow-md hover:cursor-pointer active:border-gray-300/100 active:shadow focus:outline-none focus:ring transition-shadow duration-100 ease-in-out z-20";
+}
+
+function actionMachineButtonActiveClass(m) {
+  if (m?.isExternal) {
+    return "flex-none border button-outline bg-gray-50 shadow-md cursor-pointer focus:outline-none focus:ring -mt-0.5 relative py-0.5 px-2 rounded-md border-gray-300/100 hover:border-gray-300/100 hover:bg-gray-100 hover:shadow-md active:border-gray-300/100 transition-shadow duration-100 ease-in-out z-20 text-gray-500 text-sm";
+  }
+  return "flex-none w-12 border button-outline bg-white shadow-md cursor-pointer focus:outline-none focus:ring -mt-0.5 relative py-0.5 px-2 rounded-md border-gray-300/100 hover:border-gray-300/100 hover:bg-gray-100 hover:shadow-md hover:cursor-pointer active:border-gray-300/100 transition-shadow duration-100 ease-in-out z-20";
+}
+
+function actionMachineContainerClass(m) {
+  return m?.isExternal ? "flex-none min-w-[3.5rem] -mt-0.5 relative" : "flex-none w-12 -mt-0.5 relative";
+}
+
+function showActionIcon(m) {
+  return !m?.isExternal;
+}
+
+function machineShareBadgeText(m) {
+  if (!m?.issharedout) {
+    return "";
+  }
+  const accepted = m.acceptedShareCount || 0;
+  return accepted > 0 ? `对外共享+${accepted}` : "共享中";
+}
+
+function machineShareTooltip(m) {
+  const shares = m?.activeShares || [];
+  if (shares.length == 0) {
+    return "";
+  }
+  return shares
+    .map(function (share) {
+      return `${share.targetIdentity}（${share.status == "accepted" ? "已接受" : "待接受"}）`;
+    })
+    .join("\n");
+}
+
+function firstMachineShareToken(m) {
+  return m?.activeShares?.[0]?.shareToken || "";
+}
+
+function copyShareToken(m) {
+  const shareToken = firstMachineShareToken(m);
+  if (!shareToken) {
+    toastMsg.value = "暂无可复制的分享令牌";
+    toastShow.value = true;
+    return;
+  }
+  navigator.clipboard.writeText(shareToken).then(function () {
+    toastMsg.value = "分享令牌已复制到粘贴板！";
+    toastShow.value = true;
+  });
+}
+
+function shareTokenButtonText(m) {
+  return firstMachineShareToken(m) ? "复制令牌" : "";
+}
+
+function pendingShareCount(m) {
+  const total = (m?.activeShares || []).length;
+  const accepted = m?.acceptedShareCount || 0;
+  return Math.max(total - accepted, 0);
+}
+
+function machineShareDetailText(m) {
+  if (!m?.issharedout) {
+    return "";
+  }
+  const total = (m.activeShares || []).length;
+  if (total == 0) {
+    return "";
+  }
+  const pending = pendingShareCount(m);
+  const detail = [];
+  if (pending > 0) {
+    detail.push(`${pending} 个待接受`);
+  }
+  if ((m.acceptedShareCount || 0) > 0) {
+    detail.push(`${m.acceptedShareCount} 个已接受`);
+  }
+  return detail.join(" · ");
+}
+
+function machineShareStatusClass(m) {
+  return m?.isExternal ? "text-orange-600" : "text-gray-600";
+}
 
 //数据填充控制部分
 const MList = ref({});
-const tagOwners = ref({});
+const tagOwners = ref([]);
 const machinenumber = computed(() => {
   return Object.getOwnPropertyNames(MList.value).length;
 });
@@ -103,8 +277,8 @@ function getMachines() {
             response.data["needreauthreason"] + "，登录状态失效，请重新登录";
           toastShow.value = true;
           reject();
+          return;
         }
-        // 处理成功情况
         if (response.data["status"] == "success") {
           let resList = response.data["data"]["machines"];
           for (var i in resList) {
@@ -126,13 +300,30 @@ function getMachines() {
         }
       })
       .catch(function (error) {
-        // 处理错误情况
         toastMsg.value = "更新页面出错：" + error;
         toastShow.value = true;
         reject();
       });
   });
 }
+
+function refreshTagOwners() {
+  return axios
+    .get("/admin/api/acls/tags")
+    .then(function (response) {
+      if (response.data["status"] == "success") {
+        tagOwners.value = response.data["data"]["tagOwners"] || [];
+        return tagOwners.value;
+      }
+      throw response.data["status"].substring(6);
+    })
+    .catch(function (error) {
+      toastMsg.value = "获取标签失败：" + error;
+      toastShow.value = true;
+      throw error;
+    });
+}
+
 onMounted(() => {
   refreshMachineMenuPos();
   window.addEventListener("resize", refreshMachineMenuPos);
@@ -143,19 +334,7 @@ onMounted(() => {
     getMachines().then().catch();
   }, 15000);
 
-  axios
-    .get("/admin/api/acls/tags")
-    .then(function (response) {
-      // 处理成功情况
-      if (response.data["status"] == "success") {
-        tagOwners.value = response.data["data"]["tagOwners"];
-      }
-    })
-    .catch(function (error) {
-      // 处理错误情况
-      toastMsg.value = "更新页面出错：" + error;
-      toastShow.value = true;
-    });
+  refreshTagOwners().catch(function () {});
 });
 onUnmounted(() => {
   window.removeEventListener("resize", refreshMachineMenuPos);
@@ -234,6 +413,7 @@ function hostnameUpdateFail(msg) {
 function tagsUpdateDone(mid, allowedTags, invalidTags) {
   MList.value[mid]["allowedTags"] = allowedTags;
   MList.value[mid]["invalidTags"] = invalidTags;
+  MList.value[mid]["hasTags"] = allowedTags.length + invalidTags.length > 0;
   editTagsShow.value = false;
   nextTick(() => {
     nextTick(() => {
@@ -305,7 +485,148 @@ function copyMIPv6() {
       >
         {{ machinenumber }} 个设备
       </div>
-      <table class="table w-full">
+
+      <div class="md:hidden space-y-3">
+        <div
+          v-for="(m, id) in MList"
+          :key="'mobile-' + id"
+          class="rounded-md border border-stone-200 bg-white p-4 shadow-sm"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <router-link class="min-w-0" :to="'/machines/' + m.addresses[0]">
+              <div class="font-semibold text-gray-900 break-all">{{ m.name }}</div>
+              <div class="mt-1 text-sm text-gray-600 break-all">{{ m.addresses[0] }}</div>
+            </router-link>
+            <div @click="openMachineAction(id, $event)" class="shrink-0">
+              <button
+                class="btn btn-sm border border-stone-300 bg-white hover:bg-stone-50 text-gray-700 h-8 min-h-fit"
+                type="button"
+              >
+                {{ actionMachineLabel(m) }}
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-2 text-sm text-gray-600 break-all">
+            {{ m.os }} ·
+            {{
+              m.ipnVersion.split("-")[1].indexOf("t") != -1
+                ? m.ipnVersion.split("-")[0]
+                : m.ipnVersion
+            }}
+          </div>
+
+          <div v-if="m.hasTags" class="mt-3 -mb-1">
+            <span v-for="tag in m.allowedTags" :key="tag">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border rounded-full px-2 py-1 leading-none text-xs mr-1 mb-1"
+                :class="{
+                  'border-gray-200 bg-gray-200 text-gray-600': isInvalidTag(tag),
+                  'border-gray-300 bg-white': !isInvalidTag(tag),
+                }"
+              >
+                <svg
+                  v-if="isInvalidTag(tag)"
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="3"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="mr-1 text-gray-500"
+                >
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line>
+                </svg>
+                <span class="text-gray-500">{{ tag.substring(4) }}</span>
+              </div>
+            </span>
+          </div>
+          <div v-else class="mt-3 text-sm text-gray-600 break-all">{{ m.user }}</div>
+
+          <div class="mt-3 flex flex-wrap gap-1">
+            <span v-if="m.isExternal">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-orange-50 bg-orange-50 text-orange-600 rounded-sm px-1 text-xs"
+              >
+                外部共享
+              </div>
+            </span>
+            <span v-if="m.issharedout">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-orange-50 bg-orange-50 text-orange-600 rounded-sm px-1 text-xs tooltip"
+                :data-tip="machineShareTooltip(m)"
+              >
+                {{ machineShareBadgeText(m) }}
+              </div>
+            </span>
+            <span v-if="m.expirydesc == '已过期'">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-red-50 bg-red-50 text-red-600 rounded-sm px-1 text-xs"
+              >
+                已过期
+              </div>
+            </span>
+            <span v-if="m.neverExpires">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-gray-200 text-gray-600 rounded-sm px-1 text-xs"
+              >
+                永不过期
+              </div>
+            </span>
+            <span v-if="m.soonexpiry">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-gray-200 text-gray-600 rounded-sm px-1 text-xs"
+              >
+                {{ m.expirydesc }}
+              </div>
+            </span>
+            <span v-if="m.hasSubnets">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-blue-50 bg-blue-50 text-blue-600 rounded-sm px-1 text-xs"
+              >
+                子网转发
+              </div>
+            </span>
+            <span v-if="m.advertisedExitNode">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-blue-50 bg-blue-50 text-blue-600 rounded-sm px-1 text-xs"
+              >
+                出口节点
+              </div>
+            </span>
+            <span v-if="m.isEphemeral">
+              <div
+                class="inline-flex items-center align-middle justify-center font-medium border border-blue-50 bg-blue-50 text-blue-600 rounded-sm px-1 text-xs"
+              >
+                自熄
+              </div>
+            </span>
+          </div>
+
+          <div class="mt-3 flex flex-wrap items-center gap-2 text-sm text-gray-600">
+            <span>
+              {{ m.connectedToControl ? "已连接" : m.lastSeen }}
+            </span>
+            <button
+              v-if="m.issharedout && shareTokenButtonText(m)"
+              @click.stop="copyShareToken(m)"
+              class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-white text-gray-600 rounded-sm px-2 py-1 text-xs hover:bg-gray-100"
+              type="button"
+            >
+              {{ shareTokenButtonText(m) }}
+            </button>
+            <span v-if="m.issharedout && machineShareDetailText(m)" class="text-xs text-gray-600">
+              {{ machineShareDetailText(m) }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <table class="hidden md:table w-full">
         <thead>
           <tr>
             <th class="md:w-1/4 flex-auto md:flex-initial md:shrink-0 w-0 text-ellipsis">
@@ -343,7 +664,7 @@ function copyMIPv6() {
                       ></span>
                       <a class="stretched-link">{{ m.name }} </a>
                     </p>
-                    <div class="md:hidden flex space-x-1 truncate">
+                    <div class="md:hidden flex flex-wrap gap-x-1 text-sm text-gray-600 break-all">
                       <span class="text-sm">{{ m.addresses[0] }}</span
                       ><span>·</span
                       ><span
@@ -403,10 +724,39 @@ function copyMIPv6() {
                     </span>
                     <span v-if="m.issharedout">
                       <div
-                        class="inline-flex items-center align-middle justify-center font-medium border border-orange-50 bg-orange-50 text-orange-600 rounded-sm px-1 text-xs mr-1"
+                        class="inline-flex items-center align-middle justify-center font-medium border border-orange-50 bg-orange-50 text-orange-600 rounded-sm px-1 text-xs mr-1 tooltip"
+                        :data-tip="machineShareTooltip(m)"
                       >
-                        对外共享+1
+                        {{ machineShareBadgeText(m) }}
                       </div>
+                    </span>
+                    <span v-if="m.issharedout && shareTokenButtonText(m)">
+                      <button
+                        @click.stop="copyShareToken(m)"
+                        class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-white text-gray-600 rounded-sm px-1 text-xs mr-1 hover:bg-gray-100"
+                        type="button"
+                      >
+                        {{ shareTokenButtonText(m) }}
+                      </button>
+                    </span>
+                    <span
+                      v-if="m.issharedout && machineShareDetailText(m)"
+                      :class="machineShareStatusClass(m)"
+                      class="text-xs mr-1"
+                    >
+                      {{ machineShareDetailText(m) }}
+                    </span>
+                    <span
+                      v-if="m.isExternal"
+                      class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-gray-100 text-gray-500 rounded-sm px-1 text-xs mr-1"
+                    >
+                      只读
+                    </span>
+                    <span
+                      v-if="m.isExternal && m.user"
+                      class="text-xs text-gray-500 mr-1"
+                    >
+                      来源：{{ m.user }}
                     </span>
                     <span v-if="m.expirydesc == '已过期'">
                       <div
@@ -615,13 +965,12 @@ function copyMIPv6() {
               >
                 <div
                   v-if="(!machineBtnShow && !machineMenuShow) || currentMID != id"
-                  @click="openMachineMenu(id, $event)"
-                  class="flex-none w-12 -mt-0.5 relative"
+                  @click="openMachineAction(id, $event)"
+                  :class="actionMachineContainerClass(m)"
                 >
-                  <button
-                    class="py-0.5 px-2 shadow-none rounded-md border border-gray-300/0 hover:border-gray-300/100 hover:bg-gray-100 hover:shadow-md hover:cursor-pointer active:border-gray-300/100 active:shadow focus:outline-none focus:ring transition-shadow duration-100 ease-in-out z-20"
-                  >
+                  <button :class="actionMachineButtonClass(m)">
                     <svg
+                      v-if="showActionIcon(m)"
                       xmlns="http://www.w3.org/2000/svg"
                       width="24"
                       height="24"
@@ -637,15 +986,17 @@ function copyMIPv6() {
                       <circle cx="19" cy="12" r="1"></circle>
                       <circle cx="5" cy="12" r="1"></circle>
                     </svg>
+                    <span v-else>{{ actionMachineLabel(m) }}</span>
                   </button>
                 </div>
                 <!---->
                 <div
                   v-if="(machineBtnShow || machineMenuShow) && currentMID == id"
-                  @click="openMachineMenu(id, $event)"
-                  class="flex-none w-12 border button-outline bg-white shadow-md cursor-pointer focus:outline-none focus:ring -mt-0.5 relative py-0.5 px-2 rounded-md border-gray-300/100 hover:border-gray-300/100 hover:bg-gray-100 hover:shadow-md hover:cursor-pointer active:border-gray-300/100 transition-shadow duration-100 ease-in-out z-20"
+                  @click="openMachineAction(id, $event)"
+                  :class="actionMachineButtonActiveClass(m)"
                 >
                   <svg
+                    v-if="showActionIcon(m)"
                     xmlns="http://www.w3.org/2000/svg"
                     width="24"
                     height="24"
@@ -661,6 +1012,7 @@ function copyMIPv6() {
                     <circle cx="19" cy="12" r="1"></circle>
                     <circle cx="5" cy="12" r="1"></circle>
                   </svg>
+                  <span v-else>{{ actionMachineLabel(m) }}</span>
                 </div>
               </td>
             </tr>
@@ -682,17 +1034,31 @@ function copyMIPv6() {
       :toleft="btnLeft"
       :totop="btnTop"
       :neverExpires="MList[currentMID].neverExpires"
+      :is-external="MList[currentMID].isExternal"
       @close="closeMachineMenu"
       @set-expires="setExpires(currentMID)"
       @showdialog-remove="showDelConfirm"
       @showdialog-edittags="showEditTags"
       @showdialog-updatehostname="showUpdateHostname"
       @showdialog-setsubnet="showSetSubnet"
+      @showdialog-share="showShareMachine"
     ></MachineMenu>
+
   </Teleport>
 
   <!-- 菜单弹出提示框显示 -->
   <Teleport to="body">
+    <ShareMachine
+      v-if="shareMachineShow"
+      :id="currentMID"
+      :machine-name="MList[currentMID].name"
+      :shares="machineActiveShares(currentMID)"
+      @close="shareMachineShow = false"
+      @created="shareCreatedDone"
+      @revoked="shareRevokedDone"
+    ></ShareMachine>
+
+    <!-- 删除设备提示框显示 -->
     <!-- 删除设备提示框显示 -->
     <RemoveMachine
       v-if="delConfirmShow"
@@ -728,6 +1094,7 @@ function copyMIPv6() {
       :current-machine="MList[currentMID]"
       :tag-owners="tagOwners"
       :given-name="MList[currentMID].name"
+      :refresh-tag-owners="refreshTagOwners"
       @close="editTagsShow = false"
       @update-done="tagsUpdateDone"
       @update-fail="tagsUpdateFail"

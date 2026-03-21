@@ -83,6 +83,16 @@ func (dp *DataPool) InitMirageDB() error {
 		return err
 	}
 
+	err = dp.db.AutoMigrate(&MachineShare{})
+	if err != nil {
+		return err
+	}
+
+	err = dp.db.AutoMigrate(&OrgInvite{})
+	if err != nil {
+		return err
+	}
+
 	return err
 }
 

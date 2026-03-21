@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/dexidp/dex/server"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"gorm.io/gorm"
 )
@@ -15,19 +16,20 @@ type SysConfig struct {
 	gorm.Model
 	//	AdminCredential AdminCredential `gorm:"not null"`
 
-	ServerURL  string
-	ServerKey  string
-	Addr       string   `gorm:"default:':8080'"`               // default port
-	Mip4       IPPrefix `gorm:"default:'100.64.0.0/10'"`       // default prefix
-	Mip6       IPPrefix `gorm:"default:'fd7a:115c:a1e0::/48'"` // default prefix
-	Basedomain string   `gorm:"default:'mira.net'"`            // default domain
-	//	DerpUrl               string   `gorm:"default:'https://controlplane.tailscale.com/derpmap/default'"`
-	RouteAccessDueMachine bool `gorm:"default:false"`
+	ServerURL             string
+	ServerKey             string
+	Addr                  string   `gorm:"default:':8080'"`               // default port
+	Mip4                  IPPrefix `gorm:"default:'100.64.0.0/10'"`       // default prefix
+	Mip6                  IPPrefix `gorm:"default:'fd7a:115c:a1e0::/48'"` // default prefix
+	Basedomain            string   `gorm:"default:'mira.net'"`            // default domain
+	DerpUrl               string   `gorm:"default:'https://controlplane.tailscale.com/derpmap/default'"`
+	RouteAccessDueMachine bool     `gorm:"default:false"`
 
 	EsUrl string
 	EsKey string
 
-	WXScanURL string
+	WXScanURL    string
+	AggregateCfg AggregateLoginConfig
 
 	SMSConfig SMSConfig
 
@@ -38,6 +40,7 @@ type SysConfig struct {
 
 	MicrosoftCfg MicrosoftCfg
 	GithubCfg    GithubCfg
+	GiteaCfg     GiteaCfg
 	GoogleCfg    GoogleCfg
 	AppleCfg     AppleCfg
 
@@ -50,24 +53,26 @@ type SysConfig struct {
 }
 
 type GeneralCfg struct {
-	SrvAddr    string `json:"srvaddr"`
-	ServerURL  string `json:"server_url"`
-	MIPV4      string `json:"mipv4"`
-	MIPV6      string `json:"mipv6"`
-	BaseDomain string `json:"basedomain"`
-	//		DERPURL               string `json:"derp_url"`
-	RouteAccessDueMachine bool `json:"route_access_due_machine"`
+	SrvAddr               string `json:"srvaddr"`
+	ServerURL             string `json:"server_url"`
+	MIPV4                 string `json:"mipv4"`
+	MIPV6                 string `json:"mipv6"`
+	BaseDomain            string `json:"basedomain"`
+	DERPURL               string `json:"derp_url"`
+	RouteAccessDueMachine bool   `json:"route_access_due_machine"`
 
 	ESURL string `json:"es_url"`
 	ESKey string `json:"es_key"`
 
-	WXScanURL string `json:"wxscan_url"`
+	WXScanURL    string               `json:"wxscan_url"`
+	AggregateCfg AggregateLoginConfig `json:"aggregate"`
 
 	SMSConfig   SMSConfig `json:"sms"`
 	IDaaSConfig ALIConfig `json:"idaas"`
 
 	MicrosoftCfg MicrosoftCfg `json:"microsoft"`
 	GithubCfg    GithubCfg    `json:"github"`
+	GiteaCfg     GiteaCfg     `json:"gitea"`
 	GoogleCfg    GoogleCfg    `json:"google"`
 	AppleCfg     AppleCfg     `json:"apple"`
 
@@ -77,23 +82,25 @@ type GeneralCfg struct {
 
 func (s *SysConfig) toGeneralCfg() GeneralCfg {
 	return GeneralCfg{
-		SrvAddr:    s.Addr,
-		ServerURL:  s.ServerURL,
-		MIPV4:      s.Mip4.String(),
-		MIPV6:      s.Mip6.String(),
-		BaseDomain: s.Basedomain,
-		//		DERPURL:               s.DerpUrl,
+		SrvAddr:               s.Addr,
+		ServerURL:             s.ServerURL,
+		MIPV4:                 s.Mip4.String(),
+		MIPV6:                 s.Mip6.String(),
+		BaseDomain:            s.Basedomain,
+		DERPURL:               normalizeDERPMapURL(s.DerpUrl),
 		RouteAccessDueMachine: s.RouteAccessDueMachine,
 
 		ESURL: s.EsUrl,
 		ESKey: s.EsKey,
 
-		WXScanURL: s.WXScanURL,
+		WXScanURL:    s.WXScanURL,
+		AggregateCfg: s.AggregateCfg,
 
 		SMSConfig:    s.SMSConfig,
 		IDaaSConfig:  s.IdaasConfig,
 		MicrosoftCfg: s.MicrosoftCfg,
 		GithubCfg:    s.GithubCfg,
+		GiteaCfg:     s.GiteaCfg,
 		GoogleCfg:    s.GoogleCfg,
 		AppleCfg:     s.AppleCfg,
 
@@ -101,17 +108,25 @@ func (s *SysConfig) toGeneralCfg() GeneralCfg {
 		ClientVersion: s.ClientVersion,
 	}
 }
+
+func (s *SysConfig) hasDexOIDCProvider() bool {
+	return (s.MicrosoftCfg.ClientID != "" && s.MicrosoftCfg.ClientSecret != "") ||
+		(s.GithubCfg.ClientID != "" && s.GithubCfg.ClientSecret != "") ||
+		(s.GiteaCfg.ClientID != "" && s.GiteaCfg.ClientSecret != "") ||
+		(s.GoogleCfg.ClientID != "" && s.GoogleCfg.ClientSecret != "") ||
+		(s.AppleCfg.ClientID != "" && s.AppleCfg.KeyID != "" && s.AppleCfg.TeamID != "" && s.AppleCfg.PrivateKey != "")
+}
+
 func (s *SysConfig) toSrvConfig() (*Config, error) {
-	dexCfg, err := s.toDexConfig()
-	if err != nil {
-		return nil, err
-	}
 	idps := []string{}
 	if s.MicrosoftCfg.ClientID != "" && s.MicrosoftCfg.ClientSecret != "" {
 		idps = append(idps, "Microsoft")
 	}
 	if s.GithubCfg.ClientID != "" && s.GithubCfg.ClientSecret != "" {
 		idps = append(idps, "Github")
+	}
+	if s.GiteaCfg.ClientID != "" && s.GiteaCfg.ClientSecret != "" {
+		idps = append(idps, "Gitea")
 	}
 	if s.GoogleCfg.ClientID != "" && s.GoogleCfg.ClientSecret != "" {
 		idps = append(idps, "Google")
@@ -122,31 +137,46 @@ func (s *SysConfig) toSrvConfig() (*Config, error) {
 	if s.WXScanURL != "" {
 		idps = append(idps, "WeChat")
 	}
+	if s.AggregateCfg.Configured() {
+		idps = append(idps, "Aggregator")
+	}
 
-	OidcConfig := OIDCConfig{
-		Issuer:       "https://" + s.ServerURL + "/issuer",
-		ClientID:     "MirageServer",
-		ClientSecret: s.DexSecret,
-		Scope:        []string{"offline_access", "openid", "profile", "email", "groups", "name"},
-		ExtraParams:  map[string]string{"prompt": "login"},
+	var (
+		dexCfg     *server.Config
+		err        error
+		oidcConfig OIDCConfig
+	)
+	if s.hasDexOIDCProvider() {
+		dexCfg, err = s.toDexConfig()
+		if err != nil {
+			return nil, err
+		}
+		oidcConfig = OIDCConfig{
+			Issuer:       "https://" + s.ServerURL + "/issuer",
+			ClientID:     "MirageServer",
+			ClientSecret: s.DexSecret,
+			Scope:        []string{"offline_access", "openid", "profile", "email", "groups", "name"},
+			ExtraParams:  map[string]string{"prompt": "login"},
+		}
 	}
 
 	return &Config{
-		ServerURL:  s.ServerURL,
-		Addr:       s.Addr,
-		IPPrefixes: []netip.Prefix{netip.Prefix(s.Mip4), netip.Prefix(s.Mip6)},
-		BaseDomain: s.Basedomain,
-		//		DERPURL:                s.DerpUrl,
+		ServerURL:              s.ServerURL,
+		Addr:                   s.Addr,
+		IPPrefixes:             []netip.Prefix{netip.Prefix(s.Mip4), netip.Prefix(s.Mip6)},
+		BaseDomain:             s.Basedomain,
+		DERPURL:                normalizeDERPMapURL(s.DerpUrl),
 		AllowRouteDueToMachine: s.RouteAccessDueMachine,
 
 		ESURL: s.EsUrl,
 		ESKey: s.EsKey,
 
-		wxScanURL: s.WXScanURL,
+		wxScanURL:      s.WXScanURL,
+		AggregateLogin: s.AggregateCfg,
 
 		SMS:       s.SMSConfig,
 		IDaaS:     s.IdaasConfig,
-		OIDC:      OidcConfig,
+		OIDC:      oidcConfig,
 		DexConfig: dexCfg,
 		IdpList:   idps,
 
@@ -212,6 +242,28 @@ func (ghCfg *GithubCfg) Scan(value interface{}) error {
 
 func (ghCfg GithubCfg) Value() (driver.Value, error) {
 	bytes, err := json.Marshal(ghCfg)
+	return string(bytes), err
+}
+
+type GiteaCfg struct {
+	BaseURL      string `json:"base_url"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+}
+
+func (giteaCfg *GiteaCfg) Scan(value interface{}) error {
+	switch v := value.(type) {
+	case []byte:
+		return json.Unmarshal(v, giteaCfg)
+	case string:
+		return json.Unmarshal([]byte(v), giteaCfg)
+	default:
+		return fmt.Errorf("cannot parse gitea config: unexpected data type %T", value)
+	}
+}
+
+func (giteaCfg GiteaCfg) Value() (driver.Value, error) {
+	bytes, err := json.Marshal(giteaCfg)
 	return string(bytes), err
 }
 

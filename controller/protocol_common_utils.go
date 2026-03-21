@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
 	"github.com/rs/zerolog/log"
-	"tailscale.com/smallzstd"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
+	"tailscale.com/util/zstdframe"
 )
 
 // mapResponseStreamState tracks state associated with a stream of MapResponse messages,
@@ -34,7 +32,7 @@ func (h *Mirage) generateMapResponse(
 		Msg("Creating Map response")
 
 	//cgao6: change to use User's DNSConfig
-	node, err := h.toNode(*machine) //h.cfg.BaseDomain, h.cfg.DNSConfig)
+	node, err := h.toNode(*machine, machine.Shared) //h.cfg.BaseDomain, h.cfg.DNSConfig)
 	if err != nil {
 		log.Error().
 			Caller().
@@ -56,7 +54,7 @@ func (h *Mirage) generateMapResponse(
 		return nil, err
 	}
 	// enableSelf 表示该节点的用户是否启用了self
-	enableSelf, err := h.UpdateACLRulesOfOrg(org, &machine.User)
+	enableSelf, err := h.UpdateACLRulesOfOrg(org, &machine.User, machine)
 
 	if err != nil {
 		log.Error().
@@ -142,8 +140,7 @@ func (h *Mirage) generateMapResponse(
 		ControlTime: &now,
 
 		Debug: &tailcfg.Debug{
-			DisableLogTail:         true,
-			SetRandomizeClientPort: "true",
+			DisableLogTail: true,
 		},
 	}
 
@@ -253,28 +250,7 @@ func (h *Mirage) marshalMapResponse(
 }
 
 func zstdEncode(in []byte) []byte {
-	encoder, ok := zstdEncoderPool.Get().(*zstd.Encoder)
-	if !ok {
-		panic("invalid type in sync pool")
-	}
-	out := encoder.EncodeAll(in, nil)
-	_ = encoder.Close()
-	zstdEncoderPool.Put(encoder)
-
-	return out
-}
-
-var zstdEncoderPool = &sync.Pool{
-	New: func() any {
-		encoder, err := smallzstd.NewEncoder(
-			nil,
-			zstd.WithEncoderLevel(zstd.SpeedFastest))
-		if err != nil {
-			panic(err)
-		}
-
-		return encoder
-	},
+	return zstdframe.AppendEncode(nil, in, zstdframe.FastestCompression)
 }
 
 // applyMapResponseDelta returns a modified MapResponse

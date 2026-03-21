@@ -106,7 +106,7 @@ func (h *Mirage) handleRegisterCommon(
 	//cgao6: 因为除去NodeKey一致（正常）和NodeKey一致（请求过期）两种外我们预计同样处理，故后续不用再判断
 
 	//cgao6: 授权密钥注册模式 //TODO: 后续需要对授权密钥注册进行检查
-	if registerRequest.Auth.AuthKey != "" {
+	if registerRequest.Auth != nil && registerRequest.Auth.AuthKey != "" {
 		h.handleAuthKeyCommon(writer, registerRequest, machineKey)
 		return
 	}

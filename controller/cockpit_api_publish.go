@@ -6,10 +6,44 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/gorilla/mux"
 )
+
+const windowsLatestInstallerName = "MirageSetup-latest.exe"
+
+func sanitizeUploadFilename(fileName string) string {
+	fileName = strings.TrimSpace(strings.ReplaceAll(fileName, "\\", "/"))
+	if fileName == "" {
+		return ""
+	}
+
+	return path.Base(fileName)
+}
+
+func ensurePublishDir(dirPath string) error {
+	return os.MkdirAll(dirPath, os.ModePerm)
+}
+
+func writePublishedFile(filePath string, fileData []byte) error {
+	tmpPath := filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, fileData, 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+
+	return nil
+}
+
+func buildDownloadURL(serverURL, fileName string) string {
+	return "https://" + serverURL + "/download/" + strings.ReplaceAll(fileName, "\\", "/")
+}
 
 // 接受/cockpit/api/publish的Post请求，用于进行客户端发布
 // 根据请求类型不同，可能是json报文发送来的版本号和URL，也可能是form表单发送来的版本号和文件流
@@ -35,15 +69,30 @@ func (c *Cockpit) CAPIPublishClient(
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		json.NewDecoder(r.Body).Decode(&reqData)
 	} else {
-		r.ParseMultipartForm(64 << 20)
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			c.doAPIResponse(w, "表单解析失败:"+err.Error(), nil)
+			return
+		}
 		mForm := r.MultipartForm
 
-		fileName := mForm.File["file"][0].Filename
+		files, ok := mForm.File["file"]
+		if !ok || len(files) == 0 {
+			c.doAPIResponse(w, "未上传文件", nil)
+			return
+		}
+		fileName := sanitizeUploadFilename(files[0].Filename)
+		if fileName == "" {
+			c.doAPIResponse(w, "文件名无效", nil)
+			return
+		}
 		if strings.HasPrefix(osType, "navi") {
 			fileName = "MirageNavi"
 		}
 
-		reqData.Version = mForm.Value["version"][0]
+		versions := mForm.Value["version"]
+		if len(versions) > 0 {
+			reqData.Version = versions[0]
+		}
 		file, _, err := r.FormFile("file")
 		if err != nil {
 			c.doAPIResponse(w, "文件解析失败:"+err.Error(), nil)
@@ -56,50 +105,43 @@ func (c *Cockpit) CAPIPublishClient(
 			return
 		}
 
-		_, err = os.Stat("download")
-		if err != nil {
-			err = os.Mkdir("download", os.ModePerm)
-			if err != nil {
-				c.doAPIResponse(w, "下载文件夹创建失败:"+err.Error(), nil)
-				return
-			}
+		if err := ensurePublishDir("download"); err != nil {
+			c.doAPIResponse(w, "下载文件夹创建失败:"+err.Error(), nil)
+			return
 		}
 
 		switch osType {
+		case "win":
+			if !strings.HasSuffix(strings.ToLower(fileName), ".exe") {
+				c.doAPIResponse(w, "Windows安装器必须是.exe文件", nil)
+				return
+			}
 		case "navi_x86_64":
-			_, err = os.Stat("download/x86_64")
-			if err != nil {
-				err = os.Mkdir("download/x86_64", os.ModePerm)
-				if err != nil {
-					c.doAPIResponse(w, "下载文件夹创建失败:"+err.Error(), nil)
-					return
-				}
+			if err := ensurePublishDir(filepath.Join("download", "x86_64")); err != nil {
+				c.doAPIResponse(w, "下载文件夹创建失败:"+err.Error(), nil)
+				return
 			}
-			fileName = "x86_64/" + fileName
+			fileName = filepath.ToSlash(filepath.Join("x86_64", fileName))
 		case "navi_aarch64":
-			_, err = os.Stat("download/aarch64")
-			if err != nil {
-				err = os.Mkdir("download/aarch64", os.ModePerm)
-				if err != nil {
-					c.doAPIResponse(w, "下载文件夹创建失败:"+err.Error(), nil)
-					return
-				}
+			if err := ensurePublishDir(filepath.Join("download", "aarch64")); err != nil {
+				c.doAPIResponse(w, "下载文件夹创建失败:"+err.Error(), nil)
+				return
 			}
-			fileName = "aarch64/" + fileName
+			fileName = filepath.ToSlash(filepath.Join("aarch64", fileName))
 		}
 
-		newFile, err := os.Create("download/" + fileName)
-		if err != nil {
-			c.doAPIResponse(w, "文件创建失败:"+err.Error(), nil)
-			return
-		}
-		defer newFile.Close()
-		_, err = newFile.Write(fileData)
-		if err != nil {
+		if err := writePublishedFile(filepath.Join("download", fileName), fileData); err != nil {
 			c.doAPIResponse(w, "文件写入失败:"+err.Error(), nil)
 			return
 		}
-		reqData.Url = "https://" + sysCfg.ServerURL + "/download/" + fileName
+		reqData.Url = buildDownloadURL(sysCfg.ServerURL, fileName)
+		if osType == "win" {
+			if err := writePublishedFile(filepath.Join("download", windowsLatestInstallerName), fileData); err != nil {
+				c.doAPIResponse(w, "Windows安装器最新别名写入失败:"+err.Error(), nil)
+				return
+			}
+			reqData.Url = buildDownloadURL(sysCfg.ServerURL, windowsLatestInstallerName)
+		}
 	}
 
 	if reqData.Url == "" || reqData.Version == "" && osType != "linux" {

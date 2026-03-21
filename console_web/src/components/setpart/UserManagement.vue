@@ -95,6 +95,23 @@ onMounted(() => {
                   ></path>
                 </svg>
                 <svg
+                  v-if="orgProvider == 'Gitea'"
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  width="17"
+                  height="17"
+                  fill="none"
+                >
+                  <path
+                    fill="#609926"
+                    d="M4.75 0A4.75 4.75 0 0 0 0 4.75v14.5A4.75 4.75 0 0 0 4.75 24h14.5A4.75 4.75 0 0 0 24 19.25V8.625h-9.813a1.06 1.06 0 0 1-1.062-1.063V0z"
+                  />
+                  <path
+                    fill="#fff"
+                    d="M24 7.125h-6.562A1.06 1.06 0 0 1 16.374 6.062V0zM5.437 11.25a.75.75 0 0 0 0 1.5h2.157v5.063a.75.75 0 1 0 1.5 0V8.718a.75.75 0 0 0-1.5 0v2.532zm6.214 0a.75.75 0 0 0 0 1.5h1.594v1.375h-1.594a.75.75 0 0 0 0 1.5h1.594v1.438h-1.594a.75.75 0 0 0 0 1.5h2.344a.75.75 0 0 0 .75-.75V12a.75.75 0 0 0-.75-.75zm5.812-.031a2.782 2.782 0 0 0-2.625 1.844.75.75 0 1 0 1.406.525 1.283 1.283 0 1 1 0 .818.75.75 0 1 0-1.406.524 2.781 2.781 0 1 0 2.625-3.71"
+                  />
+                </svg>
+                <svg
                   v-if="orgProvider == 'Google'"
                   t="1679449475826"
                   viewBox="0 0 1024 1024"
@@ -154,9 +171,33 @@ onMounted(() => {
                     fill="rgba(56,186,109,1)"
                   />
                 </svg>
+                <svg
+                  v-if="orgProvider == 'Aggregator'"
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  width="17"
+                  height="17"
+                  fill="none"
+                >
+                  <circle cx="6" cy="12" r="2.5" fill="#2563EB" />
+                  <circle cx="18" cy="6" r="2.5" fill="#7C3AED" />
+                  <circle cx="18" cy="18" r="2.5" fill="#0F766E" />
+                  <path
+                    d="M8.2 11l7.6-4M8.2 13l7.6 4M18 8.5v7"
+                    stroke="#475569"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                  />
+                </svg>
               </span>
 
-              {{ orgProvider == "WXScan" ? "微信小程序" : orgProvider }}
+              {{
+                orgProvider == "WXScan"
+                  ? "微信小程序"
+                  : orgProvider == "Aggregator"
+                    ? "聚合登录"
+                    : orgProvider
+              }}
             </div>
           </div>
         </div>

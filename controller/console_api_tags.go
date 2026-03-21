@@ -91,7 +91,7 @@ func (h *Mirage) CAPIPostTags(
 			return
 		}
 		/*
-			err = h.UpdateACLRulesOfOrg(org)
+			err = nil
 			h.organizationCache.Delete(org.Name)
 			if err != nil {
 				delete(h.aclPolicy.TagOwners, "tag:"+reqData.TagName)

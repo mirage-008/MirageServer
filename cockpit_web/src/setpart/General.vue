@@ -19,7 +19,7 @@ const MIPv6 = ref("");
 const SrvAddr = ref("");
 const ServerURL = ref("");
 const BaseDomain = ref("");
-//const DERPURL = ref("");
+const DERPURL = ref("");
 const SubnetAccessDueMachine = ref(false);
 
 const isServerURLValid = computed(() => {
@@ -35,7 +35,7 @@ const setMIPv6Text = ref("设置");
 const setSrvAddrText = ref("设置");
 const setServerURLText = ref("设置");
 const setBaseDomainText = ref("设置");
-//const setDERPURLText = ref("设置");
+const setDERPURLText = ref("设置");
 
 function setMIPv4() {
   axios
@@ -167,7 +167,6 @@ function setBaseDomain() {
       toastShow.value = true;
     });
 }
-/*
 function setDERPURL() {
   axios
     .post("/cockpit/api/setting/general", {
@@ -194,7 +193,6 @@ function setDERPURL() {
       toastShow.value = true;
     });
 }
-*/
 function setSubnetAccessDueMachine() {
   axios
     .post("/cockpit/api/setting/general", {
@@ -233,7 +231,7 @@ onMounted(() => {
         MIPv4.value = response.data["data"]["mipv4"];
         MIPv6.value = response.data["data"]["mipv6"];
         BaseDomain.value = response.data["data"]["basedomain"];
-        //        DERPURL.value = response.data["data"]["derp_url"];
+        DERPURL.value = response.data["data"]["derp_url"];
         SubnetAccessDueMachine.value = response.data["data"]["route_access_due_machine"];
       } else {
         toastMsg.value = response.data["status"].substring(6);
@@ -377,17 +375,17 @@ onMounted(() => {
           </button>
         </div>
       </div>
-      <!--
-      <div v-if="false">
+      <div>
         <header class="max-w-2xl">
           <h3 class="text-xl font-semibold tracking-tight">向导节点列表发布地址</h3>
         </header>
-        <p class="mt-3 text-gray-600">从该地址获取向导节点列表</p>
+        <p class="mt-3 text-gray-600">从该地址拉取远端 DERP 地图，并与 Mirage 自管司南区域合并下发</p>
         <p class="text-gray-400 text-sm">
           默认值
           <code class="bg-gray-200 text-xs rounded px-1"
             >https://controlplane.tailscale.com/derpmap/default</code
           >
+          ，留空会恢复默认
         </p>
         <div
           class="mt-1 max-w-sm flex border border-stone-200 hover:border-stone-400 rounded-md relative overflow-hidden min-w-0"
@@ -404,7 +402,6 @@ onMounted(() => {
           </button>
         </div>
       </div>
-      -->
       <div>
         <header class="max-w-2xl">
           <h3 class="text-xl font-semibold tracking-tight">ACL特性（临时）</h3>

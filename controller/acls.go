@@ -17,16 +17,18 @@ import (
 	"github.com/tailscale/hujson"
 	"gopkg.in/yaml.v3"
 	"tailscale.com/envknob"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
 )
 
 const (
-	errEmptyPolicy       = Error("empty policy")
-	errInvalidAction     = Error("invalid action")
-	errInvalidGroup      = Error("invalid group")
-	errInvalidTag        = Error("invalid tag")
-	errInvalidPortFormat = Error("invalid port format")
-	errWildcardIsNeeded  = Error("wildcard as port is required for the protocol")
+	errEmptyPolicy                = Error("empty policy")
+	errInvalidAction              = Error("invalid action")
+	errInvalidGroup               = Error("invalid group")
+	errInvalidTag                 = Error("invalid tag")
+	errInvalidPortFormat          = Error("invalid port format")
+	errWildcardIsNeeded           = Error("wildcard as port is required for the protocol")
+	errInvalidAutoGroupSelfSource = Error("autogroup:self destination requires sources to be users, groups, wildcard, or autogroup:member only")
 )
 
 const (
@@ -41,9 +43,10 @@ const (
 )
 
 const (
-	AutoGroupPrefix = "autogroup:"
-	AutoGroupSelf   = "autogroup:self"
-	AutoGroupOwner  = "autogroup:owner"
+	AutoGroupPrefix   = "autogroup:"
+	AutoGroupSelf     = "autogroup:self"
+	AutoGroupOwner    = "autogroup:owner"
+	AutoGroupMember   = "autogroup:member"
 	AutoGroupInternet = "autogroup:internet"
 )
 
@@ -191,7 +194,7 @@ func (h *Mirage) UpdateACLRules(userId int64) error {
 	return nil
 }
 
-func (h *Mirage) UpdateACLRulesOfOrg(org *Organization, user *User) (bool, error) {
+func (h *Mirage) UpdateACLRulesOfOrg(org *Organization, user *User, targetMachine *Machine) (bool, error) {
 
 	var enableSelf bool
 	if org == nil || org.ID == 0 {
@@ -211,7 +214,7 @@ func (h *Mirage) UpdateACLRulesOfOrg(org *Organization, user *User) (bool, error
 	org.AclRules = rules
 
 	if featureEnableSSH() {
-		sshRules, err := h.generateSSHRulesOfOrg(machines, user.ID, org)
+		sshRules, err := h.generateSSHRulesOfOrg(machines, user.ID, org, targetMachine)
 
 		if err != nil {
 			return enableSelf, err
@@ -228,15 +231,8 @@ func (h *Mirage) UpdateACLRulesOfOrg(org *Organization, user *User) (bool, error
 	return enableSelf, nil
 }
 
-func (h *Mirage) generateSSHRulesOfOrg(machines []Machine, userId int64, org *Organization) ([]*tailcfg.SSHRule, error) {
-	if org == nil || org.ID == 0 {
-		return nil, ErrOrgNotFound
-	}
-	a := org.AclPolicy
-
-	rules := []*tailcfg.SSHRule{}
-
-	acceptAction := tailcfg.SSHAction{
+func sshAcceptAction() tailcfg.SSHAction {
+	return tailcfg.SSHAction{
 		Message:                  "",
 		Reject:                   false,
 		Accept:                   true,
@@ -245,8 +241,10 @@ func (h *Mirage) generateSSHRulesOfOrg(machines []Machine, userId int64, org *Or
 		HoldAndDelegate:          "",
 		AllowLocalPortForwarding: true,
 	}
+}
 
-	rejectAction := tailcfg.SSHAction{
+func sshRejectAction() tailcfg.SSHAction {
+	return tailcfg.SSHAction{
 		Message:                  "",
 		Reject:                   true,
 		Accept:                   false,
@@ -255,25 +253,561 @@ func (h *Mirage) generateSSHRulesOfOrg(machines []Machine, userId int64, org *Or
 		HoldAndDelegate:          "",
 		AllowLocalPortForwarding: false,
 	}
+}
 
-	for index, sshACL := range a.SSHs {
-		action := rejectAction
-		switch sshACL.Action {
-		case "accept":
-			action = acceptAction
-		case "check":
-			checkAction, err := sshCheckAction(sshACL.CheckPeriod)
-			if err != nil {
-				log.Error().
-					Msgf("Error parsing SSH %d, check action with unparsable duration '%s'", index, sshACL.CheckPeriod)
-			} else {
-				action = *checkAction
-			}
+func cloneSSHRule(rule SSH) SSH {
+	return SSH{
+		Action:       rule.Action,
+		Sources:      append([]string(nil), rule.Sources...),
+		Destinations: append([]string(nil), rule.Destinations...),
+		Users:        append([]string(nil), rule.Users...),
+		CheckPeriod:  rule.CheckPeriod,
+	}
+}
+
+func cloneSSHRules(rules []SSH) []SSH {
+	cloned := make([]SSH, 0, len(rules))
+	for _, rule := range rules {
+		cloned = append(cloned, cloneSSHRule(rule))
+	}
+
+	return cloned
+}
+
+func normalizeSSHRuleItems(items []string) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		result = append(result, item)
+	}
+
+	return result
+}
+
+func normalizeSSHRule(rule SSH) SSH {
+	return SSH{
+		Action:       strings.ToLower(strings.TrimSpace(rule.Action)),
+		Sources:      normalizeSSHRuleItems(rule.Sources),
+		Destinations: normalizeSSHRuleItems(rule.Destinations),
+		Users:        normalizeSSHRuleItems(rule.Users),
+		CheckPeriod:  strings.TrimSpace(rule.CheckPeriod),
+	}
+}
+
+func validateSSHRuleShape(rule SSH) error {
+	if rule.Action == "" {
+		return fmt.Errorf("SSH 规则动作不能为空")
+	}
+	if rule.Action != "accept" && rule.Action != "check" {
+		return fmt.Errorf("SSH 规则动作无效")
+	}
+	if len(rule.Sources) == 0 {
+		return fmt.Errorf("SSH 来源不能为空")
+	}
+	if len(rule.Destinations) == 0 {
+		return fmt.Errorf("SSH 目标不能为空")
+	}
+	if len(rule.Users) == 0 {
+		return fmt.Errorf("SSH 用户不能为空")
+	}
+	if rule.Action == "check" {
+		if rule.CheckPeriod == "" {
+			return fmt.Errorf("SSH 检查时长不能为空")
+		}
+		if _, err := sshCheckAction(rule.CheckPeriod); err != nil {
+			return fmt.Errorf("SSH 检查时长无效")
+		}
+	}
+
+	return nil
+}
+
+func validateSSHAliasReference(alias string, aclPolicy ACLPolicy, machines []Machine) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return fmt.Errorf("SSH 别名不能为空")
+	}
+	if alias == "*" {
+		return nil
+	}
+	if _, err := netip.ParseAddr(alias); err == nil {
+		return nil
+	}
+	if _, err := netip.ParsePrefix(alias); err == nil {
+		return nil
+	}
+	if _, ok := aclPolicy.Hosts[alias]; ok {
+		return nil
+	}
+	if strings.HasPrefix(alias, AutoGroupPrefix) {
+		switch alias {
+		case AutoGroupSelf, AutoGroupMember, AutoGroupOwner, AutoGroupInternet:
+			return nil
 		default:
-			log.Error().
-				Msgf("Error parsing SSH %d, unknown action '%s'", index, sshACL.Action)
+			return fmt.Errorf("SSH 别名无效")
+		}
+	}
+	if strings.HasPrefix(alias, "group:") {
+		if _, ok := aclPolicy.Groups[alias]; !ok {
+			return errInvalidGroup
+		}
+		return nil
+	}
+	if strings.HasPrefix(alias, "tag:") {
+		if _, ok := aclPolicy.TagOwners[alias]; ok {
+			return nil
+		}
+		for _, machine := range machines {
+			hi := machine.GetHostInfo()
+			if contains(machine.ForcedTags, alias) || contains(hi.RequestTags, alias) {
+				return nil
+			}
+		}
+		return errInvalidTag
+	}
+	if strings.Contains(alias, ":") {
+		return errInvalidPortFormat
+	}
 
-			return nil, fmt.Errorf("Error parsing SSH %d, unknown action '%s'", index, sshACL.Action)
+	return nil
+}
+
+func validateSSHRuleAliases(rule SSH, aclPolicy ACLPolicy, machines []Machine) error {
+	for _, alias := range rule.Sources {
+		if err := validateSSHAliasReference(alias, aclPolicy, machines); err != nil {
+			return err
+		}
+	}
+	for _, alias := range rule.Destinations {
+		if err := validateSSHAliasReference(alias, aclPolicy, machines); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func sshRuleValidationMessage(err error) string {
+	switch {
+	case errors.Is(err, errInvalidGroup):
+		return "SSH 规则中引用了不存在或无效的用户组"
+	case errors.Is(err, errInvalidTag):
+		return "SSH 规则中引用了不存在或无效的标签"
+	case errors.Is(err, errInvalidPortFormat), errors.Is(err, errWildcardIsNeeded):
+		return "SSH 规则中的别名格式无效"
+	default:
+		return err.Error()
+	}
+}
+
+func (h *Mirage) validateSSHRulesForPolicy(machines []Machine, userId int64, aclPolicy ACLPolicy, rules []SSH) error {
+	for _, rule := range rules {
+		rule = normalizeSSHRule(rule)
+		if err := validateSSHRuleShape(rule); err != nil {
+			return err
+		}
+		if err := validateSSHRuleAliases(rule, aclPolicy, machines); err != nil {
+			return err
+		}
+	}
+
+	_, err := h.generateSSHRulesWithPolicy(machines, userId, aclPolicy, rules, nil)
+	return err
+}
+
+func (h *Mirage) validateSSHRulesForOrg(org *Organization, user *User, rules []SSH) error {
+	if org == nil || org.ID == 0 {
+		return ErrOrgNotFound
+	}
+
+	policy := ACLPolicy{}
+	if org.AclPolicy != nil {
+		policy = *org.AclPolicy
+	}
+	policy.SSHs = cloneSSHRules(rules)
+
+	machines, err := h.ListMachinesByOrgID(org.ID)
+	if err != nil {
+		return err
+	}
+
+	return h.validateSSHRulesForPolicy(machines, user.ID, policy, policy.SSHs)
+}
+
+func parseSSHRuleID(raw string) (int, error) {
+	return parseACLRuleID(raw)
+}
+
+func sshRuleDataWithID(id int, rule SSH) map[string]interface{} {
+	cloned := cloneSSHRule(rule)
+	return map[string]interface{}{
+		"id":          id,
+		"action":      cloned.Action,
+		"src":         cloned.Sources,
+		"dst":         cloned.Destinations,
+		"users":       cloned.Users,
+		"checkPeriod": cloned.CheckPeriod,
+	}
+}
+
+func sshRuleResponseData(rules []SSH) []map[string]interface{} {
+	res := make([]map[string]interface{}, 0, len(rules))
+	for id, rule := range rules {
+		res = append(res, sshRuleDataWithID(id, rule))
+	}
+
+	return res
+}
+
+func withUpdatedSSHRule(rules []SSH, id int, rule SSH) ([]SSH, bool) {
+	if id < 0 || id >= len(rules) {
+		return nil, false
+	}
+	updated := cloneSSHRules(rules)
+	updated[id] = cloneSSHRule(rule)
+	return updated, true
+}
+
+func withDeletedSSHRule(rules []SSH, id int) ([]SSH, bool) {
+	if id < 0 || id >= len(rules) {
+		return nil, false
+	}
+	updated := cloneSSHRules(rules)
+	updated = append(updated[:id], updated[id+1:]...)
+	return updated, true
+}
+
+func withCreatedSSHRule(rules []SSH, rule SSH) ([]SSH, int) {
+	updated := cloneSSHRules(rules)
+	updated = append(updated, cloneSSHRule(rule))
+	return updated, len(updated) - 1
+}
+
+func sshRulesOrEmpty(policy *ACLPolicy) []SSH {
+	if policy == nil || len(policy.SSHs) == 0 {
+		return []SSH{}
+	}
+
+	return cloneSSHRules(policy.SSHs)
+}
+
+func ensureSSHPolicy(policy **ACLPolicy) {
+	if *policy == nil {
+		*policy = &ACLPolicy{}
+	}
+	if (*policy).SSHs == nil {
+		(*policy).SSHs = make([]SSH, 0)
+	}
+}
+
+func sshRuleByID(rules []SSH, id int) (SSH, bool) {
+	if id < 0 || id >= len(rules) {
+		return SSH{}, false
+	}
+
+	return cloneSSHRule(rules[id]), true
+}
+
+func sshRuleListResult(rules []SSH) map[string]interface{} {
+	return map[string]interface{}{
+		"rules": sshRuleResponseData(rules),
+	}
+}
+
+func sshRuleStateValue(state string) string {
+	return strings.ToLower(strings.TrimSpace(state))
+}
+
+func sshRuleStored(rule SSH) SSH {
+	return normalizeSSHRule(rule)
+}
+
+func sshRulesLength(rules []*tailcfg.SSHRule) int {
+	return len(rules)
+}
+
+func sshRulesGet(rules []*tailcfg.SSHRule, index int) *tailcfg.SSHRule {
+	if index < 0 || index >= len(rules) {
+		return nil
+	}
+	return rules[index]
+}
+
+func sshRulesAny(rules []*tailcfg.SSHRule) bool {
+	return len(rules) > 0
+}
+
+func sshRulesNone(rules []*tailcfg.SSHRule) bool {
+	return len(rules) == 0
+}
+
+func sshRuleCheckDuration(rule *tailcfg.SSHRule) time.Duration {
+	if rule == nil || rule.Action == nil {
+		return 0
+	}
+	return rule.Action.SessionDuration
+}
+
+func sshRulePrincipalList(rule *tailcfg.SSHRule) []string {
+	if rule == nil {
+		return nil
+	}
+	ips := make([]string, 0, len(rule.Principals))
+	for _, principal := range rule.Principals {
+		if principal == nil {
+			continue
+		}
+		ips = append(ips, principal.NodeIP)
+	}
+	return ips
+}
+
+func sshRuleUserAllowed(rule *tailcfg.SSHRule, user string) bool {
+	if rule == nil {
+		return false
+	}
+	value, ok := rule.SSHUsers[user]
+	return ok && value == "="
+}
+
+func sshRuleCanForward(rule *tailcfg.SSHRule) bool {
+	return rule != nil && rule.Action != nil && rule.Action.AllowLocalPortForwarding
+}
+
+func sshRuleIsAccept(rule *tailcfg.SSHRule) bool {
+	return rule != nil && rule.Action != nil && rule.Action.Accept
+}
+
+func sshRuleIsReject(rule *tailcfg.SSHRule) bool {
+	return rule != nil && rule.Action != nil && rule.Action.Reject
+}
+
+func sshRuleHasPrincipals(rule *tailcfg.SSHRule, ips []string) bool {
+	current := sshRulePrincipalList(rule)
+	if len(current) != len(ips) {
+		return false
+	}
+	for i := range current {
+		if current[i] != ips[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sshRuleResponse(id int, rule SSH) map[string]interface{} {
+	return sshRuleDataWithID(id, rule)
+}
+
+func sshRulesResponse(rules []SSH) map[string]interface{} {
+	return sshRuleListResult(rules)
+}
+
+func sshRuleNormalize(rule SSH) SSH {
+	return normalizeSSHRule(rule)
+}
+
+func sshRuleUpdate(rules []SSH, id int, rule SSH) ([]SSH, bool) {
+	return withUpdatedSSHRule(rules, id, rule)
+}
+
+func sshRuleDelete(rules []SSH, id int) ([]SSH, bool) {
+	return withDeletedSSHRule(rules, id)
+}
+
+func sshRuleCreate(rules []SSH, rule SSH) ([]SSH, int) {
+	return withCreatedSSHRule(rules, rule)
+}
+
+func sshRuleLookup(rules []SSH, id int) (SSH, bool) {
+	return sshRuleByID(rules, id)
+}
+
+func sshRuleEnsurePolicy(policy **ACLPolicy) {
+	ensureSSHPolicy(policy)
+}
+
+func sshRuleID(raw string) (int, error) {
+	return parseSSHRuleID(raw)
+}
+
+func sshRuleErr(err error) string {
+	return sshRuleValidationMessage(err)
+}
+
+func sshRuleActionCheck(rule *tailcfg.SSHRule) time.Duration {
+	return sshRuleCheckDuration(rule)
+}
+
+func sshRuleActionHasUser(rule *tailcfg.SSHRule, user string) bool {
+	return sshRuleUserAllowed(rule, user)
+}
+
+func sshRuleActionForward(rule *tailcfg.SSHRule) bool {
+	return sshRuleCanForward(rule)
+}
+
+func sshRuleActionAccept(rule *tailcfg.SSHRule) bool {
+	return sshRuleIsAccept(rule)
+}
+
+func sshRuleActionReject(rule *tailcfg.SSHRule) bool {
+	return sshRuleIsReject(rule)
+}
+
+func sshRuleActionLen(rules []*tailcfg.SSHRule) int {
+	return sshRulesLength(rules)
+}
+
+func sshRuleActionAt(rules []*tailcfg.SSHRule, index int) *tailcfg.SSHRule {
+	return sshRulesGet(rules, index)
+}
+
+func sshRuleActionAny(rules []*tailcfg.SSHRule) bool {
+	return sshRulesAny(rules)
+}
+
+func sshRuleActionNone(rules []*tailcfg.SSHRule) bool {
+	return sshRulesNone(rules)
+}
+
+func sshRuleActionIPMatch(rule *tailcfg.SSHRule, ips []string) bool {
+	return sshRuleHasPrincipals(rule, ips)
+}
+
+func sshRuleActionUsers(rule *tailcfg.SSHRule) map[string]string {
+	if rule == nil {
+		return nil
+	}
+	return rule.SSHUsers
+}
+
+func sshRuleActionIPs(rule *tailcfg.SSHRule) []string {
+	return sshRulePrincipalList(rule)
+}
+
+func sshRuleActionUser(rule *tailcfg.SSHRule, user string) bool {
+	return sshRuleUserAllowed(rule, user)
+}
+
+func sshRuleActionDuration(rule *tailcfg.SSHRule) time.Duration {
+	return sshRuleCheckDuration(rule)
+}
+
+func sshRuleTypeWrapper(h *Mirage, machines []Machine, userId int64, aclPolicy ACLPolicy, rule SSH, targetMachine *Machine) (bool, error) {
+	return h.sshRuleMatchesTargetMachine(machines, userId, aclPolicy, rule, targetMachine)
+}
+
+func sshRuleTypeActionFor(index int, rule SSH) (*tailcfg.SSHAction, error) {
+	return sshActionForRule(index, rule)
+}
+
+func sshRuleTypeAppendPrincipals(principals []*tailcfg.SSHPrincipal, expandedSrcs []string) []*tailcfg.SSHPrincipal {
+	return appendSSHPrincipals(principals, expandedSrcs)
+}
+
+func sshRuleTypeUsersMap(rule SSH) map[string]string {
+	return buildSSHUsersMap(rule.Users)
+}
+
+func sshActionForRule(index int, sshACL SSH) (*tailcfg.SSHAction, error) {
+	action := sshRejectAction()
+	switch sshACL.Action {
+	case "accept":
+		action = sshAcceptAction()
+	case "check":
+		checkAction, err := sshCheckAction(sshACL.CheckPeriod)
+		if err != nil {
+			log.Error().
+				Msgf("Error parsing SSH %d, check action with unparsable duration '%s'", index, sshACL.CheckPeriod)
+			return nil, err
+		}
+		action = *checkAction
+	default:
+		log.Error().
+			Msgf("Error parsing SSH %d, unknown action '%s'", index, sshACL.Action)
+		return nil, fmt.Errorf("Error parsing SSH %d, unknown action '%s'", index, sshACL.Action)
+	}
+
+	return &action, nil
+}
+
+func appendSSHPrincipals(principals []*tailcfg.SSHPrincipal, expandedSrcs []string) []*tailcfg.SSHPrincipal {
+	seen := make(map[string]struct{}, len(principals)+len(expandedSrcs))
+	for _, principal := range principals {
+		if principal != nil && principal.NodeIP != "" {
+			seen[principal.NodeIP] = struct{}{}
+		}
+	}
+	for _, expandedSrc := range expandedSrcs {
+		if _, ok := seen[expandedSrc]; ok {
+			continue
+		}
+		seen[expandedSrc] = struct{}{}
+		principals = append(principals, &tailcfg.SSHPrincipal{NodeIP: expandedSrc})
+	}
+
+	return principals
+}
+
+func buildSSHUsersMap(users []string) map[string]string {
+	userMap := make(map[string]string, len(users))
+	for _, user := range users {
+		userMap[user] = "="
+	}
+
+	return userMap
+}
+
+func (h *Mirage) sshRuleMatchesTargetMachine(machines []Machine, userId int64, aclPolicy ACLPolicy, sshACL SSH, targetMachine *Machine) (bool, error) {
+	matched := targetMachine == nil
+	var targetIPs []string
+	if targetMachine != nil {
+		targetIPs = targetMachine.IPAddresses.ToStringSlice()
+	}
+
+	for _, rawDst := range sshACL.Destinations {
+		expandedDsts, err := h.expandAlias(
+			false,
+			machines,
+			userId,
+			aclPolicy,
+			rawDst,
+			h.cfg.OIDC.StripEmaildomain,
+		)
+		if err != nil {
+			return false, err
+		}
+		if targetMachine != nil && containsAddresses(expandedDsts, targetIPs) {
+			matched = true
+		}
+	}
+
+	return matched, nil
+}
+
+func (h *Mirage) generateSSHRulesWithPolicy(machines []Machine, userId int64, aclPolicy ACLPolicy, sshACLs []SSH, targetMachine *Machine) ([]*tailcfg.SSHRule, error) {
+	rules := []*tailcfg.SSHRule{}
+	for index, rawRule := range sshACLs {
+		sshACL := normalizeSSHRule(rawRule)
+		if err := validateSSHRuleShape(sshACL); err != nil {
+			return nil, err
+		}
+
+		matched, err := h.sshRuleMatchesTargetMachine(machines, userId, aclPolicy, sshACL, targetMachine)
+		if err != nil {
+			return nil, err
+		}
+		if !matched {
+			continue
+		}
+
+		action, err := sshActionForRule(index, sshACL)
+		if err != nil {
+			return nil, err
 		}
 
 		principals := make([]*tailcfg.SSHPrincipal, 0, len(sshACL.Sources))
@@ -282,36 +816,37 @@ func (h *Mirage) generateSSHRulesOfOrg(machines []Machine, userId int64, org *Or
 				false,
 				machines,
 				userId,
-				*a,
+				aclPolicy,
 				rawSrc,
 				h.cfg.OIDC.StripEmaildomain,
 			)
 			if err != nil {
-				log.Error().
-					Msgf("Error parsing SSH %d, Source %d", index, innerIndex)
-
+				log.Error().Msgf("Error parsing SSH %d, Source %d", index, innerIndex)
 				return nil, err
 			}
-			for _, expandedSrc := range expandedSrcs {
-				principals = append(principals, &tailcfg.SSHPrincipal{
-					NodeIP: expandedSrc,
-				})
-			}
+			principals = appendSSHPrincipals(principals, expandedSrcs)
 		}
 
-		userMap := make(map[string]string, len(sshACL.Users))
-		for _, user := range sshACL.Users {
-			userMap[user] = "="
-		}
 		rules = append(rules, &tailcfg.SSHRule{
 			RuleExpires: nil,
 			Principals:  principals,
-			SSHUsers:    userMap,
-			Action:      &action,
+			SSHUsers:    buildSSHUsersMap(sshACL.Users),
+			Action:      action,
 		})
 	}
 
 	return rules, nil
+}
+
+func (h *Mirage) generateSSHRulesOfOrg(machines []Machine, userId int64, org *Organization, targetMachine *Machine) ([]*tailcfg.SSHRule, error) {
+	if org == nil || org.ID == 0 {
+		return nil, ErrOrgNotFound
+	}
+	if org.AclPolicy == nil {
+		return []*tailcfg.SSHRule{}, nil
+	}
+
+	return h.generateSSHRulesWithPolicy(machines, userId, *org.AclPolicy, org.AclPolicy.SSHs, targetMachine)
 }
 
 func (h *Mirage) generateACLRules(
@@ -324,8 +859,14 @@ func (h *Mirage) generateACLRules(
 	enableSelf := false
 Loop:
 	for index, acl := range aclPolicy.ACLs {
+		useSelf := false
+
 		if acl.Action != "accept" {
 			return nil, enableSelf, errInvalidAction
+		}
+
+		if err := validateACLSourceDestCombination(aclPolicy, acl); err != nil {
+			return nil, enableSelf, err
 		}
 
 		protocols, needsWildcard, err := parseProtocol(acl.Protocol)
@@ -338,7 +879,7 @@ Loop:
 
 		if containsSubStr(acl.Destinations, AutoGroupSelf) {
 			if containsStr(acl.Sources, "*") {
-				enableSelf = true
+				useSelf = true
 			} else {
 			LoopForSelf:
 				for _, alias := range acl.Sources {
@@ -350,21 +891,26 @@ Loop:
 							continue LoopForSelf
 						}
 						if containsStr(users, user.Name) {
-							enableSelf = true
+							useSelf = true
 							break LoopForSelf
 						}
-					} else if alias == user.Name {
-						enableSelf = true
+					} else if alias == user.Name || alias == AutoGroupMember {
+						useSelf = true
 						break LoopForSelf
 					}
 				}
 			}
-			if !enableSelf {
+			if !useSelf {
 				continue Loop
 			}
+			enableSelf = true
 		}
 		destPorts := []tailcfg.NetPortRange{}
 		for innerIndex, dest := range acl.Destinations {
+			if isAutoGroupInternetDestination(dest) {
+				continue
+			}
+
 			dests, err := h.generateACLPolicyDest(
 				machines,
 				user.ID,
@@ -381,10 +927,13 @@ Loop:
 			}
 			destPorts = append(destPorts, dests...)
 		}
+		if len(destPorts) == 0 {
+			continue
+		}
 
 		srcIPs := []string{}
 		// 如果dest里面配置了autogroup:self,且src的作用域包含了user
-		if enableSelf {
+		if useSelf {
 
 			/*
 				for _, dest := range destPorts {
@@ -424,9 +973,77 @@ Loop:
 	return rules, enableSelf, nil
 }
 
-func (h *Mirage) generateSSHRules(userId int64) ([]*tailcfg.SSHRule, error) {
-	rules := []*tailcfg.SSHRule{}
+func validateACLSourceDestCombination(aclPolicy ACLPolicy, acl ACL) error {
+	hasAutoGroupSelf := false
+	for _, dest := range acl.Destinations {
+		if isAutoGroupSelfDestination(dest) {
+			hasAutoGroupSelf = true
+			break
+		}
+	}
+	if !hasAutoGroupSelf {
+		return nil
+	}
 
+	for _, src := range acl.Sources {
+		if !isValidAutoGroupSelfSource(aclPolicy, src) {
+			return errInvalidAutoGroupSelfSource
+		}
+	}
+
+	return nil
+}
+
+func isValidAutoGroupSelfSource(aclPolicy ACLPolicy, src string) bool {
+	switch {
+	case src == "*":
+		return true
+	case strings.HasPrefix(src, "group:"):
+		return true
+	case src == AutoGroupMember:
+		return true
+	case strings.HasPrefix(src, AutoGroupPrefix):
+		return false
+	case strings.HasPrefix(src, "tag:"):
+		return false
+	}
+
+	if _, ok := aclPolicy.Hosts[src]; ok {
+		return false
+	}
+	if _, err := netip.ParseAddr(src); err == nil {
+		return false
+	}
+	if _, err := netip.ParsePrefix(src); err == nil {
+		return false
+	}
+
+	return true
+}
+
+func destinationAlias(dest string) (string, error) {
+	tokens := strings.Split(dest, ":")
+	if len(tokens) < expectedTokenItems || len(tokens) > 3 {
+		return "", errInvalidPortFormat
+	}
+	if len(tokens) == expectedTokenItems {
+		return tokens[0], nil
+	}
+
+	return fmt.Sprintf("%s:%s", tokens[0], tokens[1]), nil
+}
+
+func isAutoGroupSelfDestination(dest string) bool {
+	alias, err := destinationAlias(dest)
+	return err == nil && alias == AutoGroupSelf
+}
+
+func isAutoGroupInternetDestination(dest string) bool {
+	alias, err := destinationAlias(dest)
+	return err == nil && alias == AutoGroupInternet
+}
+
+func (h *Mirage) generateSSHRules(userId int64) ([]*tailcfg.SSHRule, error) {
 	if h.aclPolicy == nil {
 		return nil, errEmptyPolicy
 	}
@@ -436,82 +1053,7 @@ func (h *Mirage) generateSSHRules(userId int64) ([]*tailcfg.SSHRule, error) {
 		return nil, err
 	}
 
-	acceptAction := tailcfg.SSHAction{
-		Message:                  "",
-		Reject:                   false,
-		Accept:                   true,
-		SessionDuration:          0,
-		AllowAgentForwarding:     false,
-		HoldAndDelegate:          "",
-		AllowLocalPortForwarding: true,
-	}
-
-	rejectAction := tailcfg.SSHAction{
-		Message:                  "",
-		Reject:                   true,
-		Accept:                   false,
-		SessionDuration:          0,
-		AllowAgentForwarding:     false,
-		HoldAndDelegate:          "",
-		AllowLocalPortForwarding: false,
-	}
-
-	for index, sshACL := range h.aclPolicy.SSHs {
-		action := rejectAction
-		switch sshACL.Action {
-		case "accept":
-			action = acceptAction
-		case "check":
-			checkAction, err := sshCheckAction(sshACL.CheckPeriod)
-			if err != nil {
-				log.Error().
-					Msgf("Error parsing SSH %d, check action with unparsable duration '%s'", index, sshACL.CheckPeriod)
-			} else {
-				action = *checkAction
-			}
-		default:
-			log.Error().
-				Msgf("Error parsing SSH %d, unknown action '%s'", index, sshACL.Action)
-
-			return nil, err
-		}
-
-		principals := make([]*tailcfg.SSHPrincipal, 0, len(sshACL.Sources))
-		for innerIndex, rawSrc := range sshACL.Sources {
-			expandedSrcs, err := h.expandAlias(
-				false,
-				machines,
-				userId,
-				*h.aclPolicy,
-				rawSrc,
-				h.cfg.OIDC.StripEmaildomain,
-			)
-			if err != nil {
-				log.Error().
-					Msgf("Error parsing SSH %d, Source %d", index, innerIndex)
-
-				return nil, err
-			}
-			for _, expandedSrc := range expandedSrcs {
-				principals = append(principals, &tailcfg.SSHPrincipal{
-					NodeIP: expandedSrc,
-				})
-			}
-		}
-
-		userMap := make(map[string]string, len(sshACL.Users))
-		for _, user := range sshACL.Users {
-			userMap[user] = "="
-		}
-		rules = append(rules, &tailcfg.SSHRule{
-			RuleExpires: nil,
-			Principals:  principals,
-			SSHUsers:    userMap,
-			Action:      &action,
-		})
-	}
-
-	return rules, nil
+	return h.generateSSHRulesWithPolicy(machines, userId, *h.aclPolicy, h.aclPolicy.SSHs, nil)
 }
 
 func sshCheckAction(duration string) (*tailcfg.SSHAction, error) {
@@ -678,7 +1220,10 @@ func (h *Mirage) expandAlias(
 		ips = lo.Uniq(ips)
 	}()
 	if alias == "*" {
-		ips = []string{"*"}
+		ips = []string{
+			tsaddr.CGNATRange().String(),
+			tsaddr.TailscaleULARange().String(),
+		}
 		return
 	}
 
@@ -704,6 +1249,16 @@ func (h *Mirage) expandAlias(
 					ips = append(ips, h.expandMachineRoutes(node)...)
 				}
 			}
+		} else if alias == AutoGroupMember {
+			for _, machine := range machines {
+				if len(machine.ForcedTags) > 0 {
+					continue
+				}
+				ips = append(ips, machine.IPAddresses.ToStringSlice()...)
+				if autoAddRoute {
+					ips = append(ips, h.expandMachineRoutes(machine)...)
+				}
+			}
 			// 处理 autogroup:owner
 		} else if alias == AutoGroupOwner {
 			for _, machine := range machines {
@@ -715,11 +1270,11 @@ func (h *Mirage) expandAlias(
 				}
 			}
 
-		// 处理 autogroup:internet
+			// 处理 autogroup:internet
 		} else if alias == AutoGroupInternet {
 			ips = append(ips, InternetIpLists...)
 		}
-    return
+		return
 	}
 
 	if strings.HasPrefix(alias, "group:") {

@@ -6,6 +6,7 @@ import RemoveMachine from "./mmenu/RemoveMachine.vue";
 import UpdateHostname from "./mmenu/UpdateHostname.vue";
 import SetSubnet from "./mmenu/SetSubnet.vue";
 import EditTags from "./mmenu/EditTags.vue";
+import ShareMachine from "./mmenu/ShareMachine.vue";
 import Toast from "./Toast.vue";
 
 const devmode = ref(false);
@@ -93,6 +94,115 @@ function showEditTags() {
   closeMachineMenu();
   editTagsShow.value = true;
 }
+const shareMachineShow = ref(false);
+function showShareMachine() {
+  closeMachineMenu();
+  shareMachineShow.value = true;
+}
+
+function machineActiveShares() {
+  return currentMachine.value["activeShares"] || [];
+}
+
+function machineShareBadgeText(machine) {
+  if (!machine?.issharedout) {
+    return "";
+  }
+  const accepted = machine.acceptedShareCount || 0;
+  return accepted > 0 ? `对外共享+${accepted}` : "共享中";
+}
+
+function machineShareTooltip(machine) {
+  const shares = machine?.activeShares || [];
+  if (shares.length == 0) {
+    return "";
+  }
+  return shares
+    .map(function (share) {
+      return `${share.targetIdentity}（${share.status == "accepted" ? "已接受" : "待接受"}）`;
+    })
+    .join("\n");
+}
+
+function firstMachineShareToken(machine) {
+  return machine?.activeShares?.[0]?.shareToken || "";
+}
+
+function shareTokenButtonText(machine) {
+  return firstMachineShareToken(machine) ? "复制令牌" : "";
+}
+
+function pendingShareCount(machine) {
+  const total = (machine?.activeShares || []).length;
+  const accepted = machine?.acceptedShareCount || 0;
+  return Math.max(total - accepted, 0);
+}
+
+function machineShareDetailText(machine) {
+  if (!machine?.issharedout) {
+    return "";
+  }
+  const total = (machine.activeShares || []).length;
+  if (total == 0) {
+    return "";
+  }
+  const pending = pendingShareCount(machine);
+  const detail = [];
+  if (pending > 0) {
+    detail.push(`${pending} 个待接受`);
+  }
+  if ((machine.acceptedShareCount || 0) > 0) {
+    detail.push(`${machine.acceptedShareCount} 个已接受`);
+  }
+  return detail.join(" · ");
+}
+
+function shareCreatedDone(shareResponse) {
+  const share = shareResponse?.share || shareResponse;
+  if (!share) {
+    return;
+  }
+
+  const currentShares = machineActiveShares().filter(function (item) {
+    return item.id != share.id;
+  });
+  currentShares.push(share);
+  currentMachine.value["activeShares"] = currentShares;
+  currentMachine.value["issharedout"] = true;
+  currentMachine.value["shareID"] = currentShares[0]?.stableId || share.stableId || "";
+  currentMachine.value["acceptedShareCount"] = currentShares.filter(function (item) {
+    return item.status == "accepted";
+  }).length;
+  toastMsg.value = "已创建设备分享！";
+  toastShow.value = true;
+}
+
+function shareRevokedDone(share) {
+  const currentShares = machineActiveShares().filter(function (item) {
+    return item.id != share.id;
+  });
+  currentMachine.value["activeShares"] = currentShares;
+  currentMachine.value["issharedout"] = currentShares.length > 0;
+  currentMachine.value["shareID"] = currentShares[0]?.stableId || "";
+  currentMachine.value["acceptedShareCount"] = currentShares.filter(function (item) {
+    return item.status == "accepted";
+  }).length;
+  toastMsg.value = "已撤销设备分享！";
+  toastShow.value = true;
+}
+
+function copyShareToken() {
+  const shareToken = firstMachineShareToken(currentMachine.value);
+  if (!shareToken) {
+    toastMsg.value = "暂无可复制的分享令牌";
+    toastShow.value = true;
+    return;
+  }
+  navigator.clipboard.writeText(shareToken).then(function () {
+    toastMsg.value = "分享令牌已复制到粘贴板！";
+    toastShow.value = true;
+  });
+}
 
 //数据填充控制部分
 const currentMachine = ref({});
@@ -101,6 +211,24 @@ const currentMID = ref("");
 const tagOwners = ref([]);
 const mipNotFound = ref(false);
 const basedomain = ref("");
+
+function refreshTagOwners() {
+  return axios
+    .get("/admin/api/acls/tags")
+    .then(function (response) {
+      if (response.data["status"] == "success") {
+        tagOwners.value = response.data["data"]["tagOwners"] || [];
+        return tagOwners.value;
+      }
+      throw response.data["status"].substring(6);
+    })
+    .catch(function (error) {
+      toastMsg.value = "获取标签失败：" + error;
+      toastShow.value = true;
+      throw error;
+    });
+}
+
 onMounted(() => {
   watchWindowChange();
   axios
@@ -112,9 +240,8 @@ onMounted(() => {
       ) {
         toastMsg.value = response.data["needreauthreason"] + "，登录状态失效，请重新登录";
         toastShow.value = true;
-        reject();
+        return;
       }
-      // 处理成功情况
       if (response.data["status"] == "success") {
         let resList = response.data["data"]["machines"];
         for (var i in resList) {
@@ -140,7 +267,6 @@ onMounted(() => {
       }
     })
     .catch(function (error) {
-      // 处理错误情况
       toastMsg.value = "获取机器列表失败：" + error;
       toastShow.value = true;
     });
@@ -148,7 +274,6 @@ onMounted(() => {
   axios
     .get("/admin/api/machine-debug?ip=" + route.params.mip)
     .then(function (response) {
-      // 处理成功情况
       if (response.data["status"] == "success") {
         debugInfo.value = response.data["data"];
       } else {
@@ -157,24 +282,11 @@ onMounted(() => {
       }
     })
     .catch(function (error) {
-      // 处理错误情况
       toastMsg.value = "获取设备调试信息失败：" + error;
       toastShow.value = true;
     });
 
-  axios
-    .get("/admin/api/acls/tags")
-    .then(function (response) {
-      // 处理成功情况
-      if (response.data["status"] == "success") {
-        tagOwners.value = response.data["data"]["tagOwners"];
-      }
-    })
-    .catch(function (error) {
-      // 处理错误情况
-      toastMsg.value = "获取标签失败：" + error;
-      toastShow.value = true;
-    });
+  refreshTagOwners().catch(function () {});
 });
 //服务端请求
 function setExpires() {
@@ -261,9 +373,7 @@ function subnetUpdateFail(msg) {
 function tagsUpdateDone(mid, allowedTags, invalidTags) {
   currentMachine.value["allowedTags"] = allowedTags;
   currentMachine.value["invalidTags"] = invalidTags;
-  if (allowedTags.length > 0) {
-    currentMachine.value["hasTags"] = true;
-  }
+  currentMachine.value["hasTags"] = allowedTags.length + invalidTags.length > 0;
   editTagsShow.value = false;
   nextTick(() => {
     nextTick(() => {
@@ -353,10 +463,18 @@ function isInvalidTag(tag) {
                   >设备设置
                 </div>
               </button>
+              <button
+                v-if="!currentMachine.isExternal"
+                @click="showShareMachine"
+                class="btn btn-outline bg-white border-gray-300 text-gray-700 hover:bg-gray-100 hover:border-gray-300 hover:text-gray-700 min-w-0"
+                type="button"
+              >
+                分享设备
+              </button>
             </div>
           </div>
         </div>
-        <div class="flex border-t border-gray-200 text-sm mt-4 pt-4">
+        <div class="flex flex-col gap-4 border-t border-gray-200 text-sm mt-4 pt-4 md:flex-row md:gap-0">
           <div class="max-w-sm">
             <div class="text-gray-500 mb-2">归属于</div>
             <div v-if="currentMachine.hasTags" class="mt-0.5">
@@ -408,7 +526,7 @@ function isInvalidTag(tag) {
           </div>
           <div
             v-if="hasSpecialStatus"
-            class="max-w-sm border-l border-gray-200 ml-4 pl-4"
+            class="max-w-sm md:border-l border-gray-200 md:ml-4 md:pl-4"
           >
             <p class="text-gray-500 mb-2">状态</p>
             <div>
@@ -421,10 +539,26 @@ function isInvalidTag(tag) {
               </span>
               <span v-if="currentMachine.issharedout">
                 <div
-                  class="inline-flex items-center align-middle justify-center font-medium border border-orange-50 bg-orange-50 text-orange-600 rounded-sm px-1 text-xs mr-1"
+                  class="inline-flex items-center align-middle justify-center font-medium border border-orange-50 bg-orange-50 text-orange-600 rounded-sm px-1 text-xs mr-1 tooltip"
+                  :data-tip="machineShareTooltip(currentMachine)"
                 >
-                  对外共享+1
+                  {{ machineShareBadgeText(currentMachine) }}
                 </div>
+              </span>
+              <span v-if="currentMachine.issharedout && shareTokenButtonText(currentMachine)">
+                <button
+                  @click="copyShareToken"
+                  class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-white text-gray-600 rounded-sm px-1 text-xs mr-1 hover:bg-gray-100"
+                  type="button"
+                >
+                  {{ shareTokenButtonText(currentMachine) }}
+                </button>
+              </span>
+              <span
+                v-if="currentMachine.issharedout && machineShareDetailText(currentMachine)"
+                class="text-xs text-gray-600 mr-1"
+              >
+                {{ machineShareDetailText(currentMachine) }}
               </span>
               <span v-if="currentMachine.expirydesc == '已过期'">
                 <div
@@ -522,7 +656,7 @@ function isInvalidTag(tag) {
         </div>
       </header>
       <section class="mb-8">
-        <header class="flex justify-between mb-4">
+        <header class="flex flex-col gap-3 mb-4 sm:flex-row sm:items-start sm:justify-between">
           <div class="max-w-xl">
             <h3 class="text-xl font-semibold tracking-tight mb-2">子网转发</h3>
             <p class="text-gray-600">
@@ -833,17 +967,28 @@ function isInvalidTag(tag) {
       :toleft="btnLeft"
       :totop="btnTop"
       :neverExpires="currentMachine.neverExpires"
+      :is-external="currentMachine.isExternal"
       @close="closeMachineMenu"
       @set-expires="setExpires"
       @showdialog-remove="showDelConfirm"
       @showdialog-edittags="showEditTags"
       @showdialog-updatehostname="showUpdateHostname"
       @showdialog-setsubnet="showSetSubnet"
+      @showdialog-share="showShareMachine"
     ></MachineMenu>
   </Teleport>
 
   <!-- 菜单弹出提示框显示 -->
   <Teleport to="body">
+    <ShareMachine
+      v-if="shareMachineShow"
+      :id="currentMID"
+      :machine-name="currentMachine.name"
+      :shares="machineActiveShares()"
+      @close="shareMachineShow = false"
+      @created="shareCreatedDone"
+      @revoked="shareRevokedDone"
+    ></ShareMachine>
     <!-- 删除设备提示框显示 -->
     <RemoveMachine
       v-if="delConfirmShow"
@@ -879,6 +1024,7 @@ function isInvalidTag(tag) {
       :current-machine="currentMachine"
       :tag-owners="tagOwners"
       :given-name="currentMachine.name"
+      :refresh-tag-owners="refreshTagOwners"
       @close="editTagsShow = false"
       @update-done="tagsUpdateDone"
       @update-fail="tagsUpdateFail"

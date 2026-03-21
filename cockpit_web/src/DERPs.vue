@@ -208,6 +208,16 @@ function secondsFormat(s) {
                     nr.Region.RegionName + " "
                   }}
                   共 {{ nr.Nodes ? nr.Nodes.length : 0 }} 个
+                  <span
+                    :class="
+                      nr.Region.OrgID == 0
+                        ? 'border-green-50 bg-green-50 text-green-600'
+                        : 'border-blue-50 bg-blue-50 text-blue-600'
+                    "
+                    class="inline-flex items-center align-middle justify-center font-medium border rounded-sm px-1 text-xs ml-1"
+                  >
+                    {{ nr.Region.OrgID == 0 ? "全局" : "组织 " + nr.Region.OrgID }}
+                  </span>
                 </div>
               </th>
               <th class="hidden md:table-cell md:w-1/4 pt-2 pb-1">IP</th>
