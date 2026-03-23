@@ -139,6 +139,402 @@ func TestGenerateACLRulesKeepsNonInternetDestinations(t *testing.T) {
 	}
 }
 
+func TestGenerateACLPolicyDestPreservesWildcardDestination(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+
+	got, err := h.generateACLPolicyDest(nil, 0, ACLPolicy{}, "*:*", false, false)
+	if err != nil {
+		t.Fatalf("generateACLPolicyDest returned error: %v", err)
+	}
+
+	want := []tailcfg.NetPortRange{{
+		IP:    "*",
+		Ports: tailcfg.PortRangeAny,
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected wildcard destination expansion: got %v want %v", got, want)
+	}
+}
+
+func TestGenerateACLRulesPreservesWildcardDestination(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	policy := ACLPolicy{
+		ACLs: []ACL{{
+			Action:       "accept",
+			Sources:      []string{"*"},
+			Destinations: []string{"*:*"},
+		}},
+	}
+
+	got, _, err := h.generateACLRules(nil, &User{}, policy, false)
+	if err != nil {
+		t.Fatalf("generateACLRules returned error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one filter rule, got %d", len(got))
+	}
+
+	want := tailcfg.FilterRule{
+		SrcIPs: []string{
+			tsaddr.CGNATRange().String(),
+			tsaddr.TailscaleULARange().String(),
+		},
+		DstPorts: []tailcfg.NetPortRange{{
+			IP:    "*",
+			Ports: tailcfg.PortRangeAny,
+		}},
+	}
+
+	if !reflect.DeepEqual(got[0].SrcIPs, want.SrcIPs) {
+		t.Fatalf("unexpected source IPs: got %v want %v", got[0].SrcIPs, want.SrcIPs)
+	}
+	if !reflect.DeepEqual(got[0].DstPorts, want.DstPorts) {
+		t.Fatalf("unexpected wildcard destination: got %v want %v", got[0].DstPorts, want.DstPorts)
+	}
+}
+
+func TestExitNodeInternetAccessRequiresEnabledRoutes(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	user := createTestUser(t, app, "alice@example.com", "Alice", "acl-org", "Mirage")
+	client := createTestMachine(t, app, user, "client", "100.64.0.1")
+	exitNode := createTestMachine(t, app, user, "exit-node", "100.64.0.2")
+	exitNode.HostInfo = HostInfo{
+		Hostname:    exitNode.Hostname,
+		RoutableIPs: []netip.Prefix{ExitRouteV4, ExitRouteV6},
+	}
+	if err := app.db.Save(exitNode).Error; err != nil {
+		t.Fatalf("Save(exit node hostinfo): %v", err)
+	}
+	createTestRoute(t, app, exitNode, ExitRouteV4.String(), false, false)
+	createTestRoute(t, app, exitNode, ExitRouteV6.String(), false, false)
+
+	org, err := app.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(): %v", err)
+	}
+	org.AclPolicy = &ACLPolicy{
+		ACLs: []ACL{{
+			Action:       "accept",
+			Sources:      []string{user.Name},
+			Destinations: []string{"autogroup:internet:*"},
+		}},
+	}
+	if err := app.SaveACLPolicyOfOrg(org); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(): %v", err)
+	}
+
+	enableSelf, err := app.UpdateACLRulesOfOrg(org, &client.User, client)
+	if err != nil {
+		t.Fatalf("UpdateACLRulesOfOrg(): %v", err)
+	}
+	client.User.Organization = *org
+
+	peers, _, err := app.getValidPeers(client, enableSelf)
+	if err != nil {
+		t.Fatalf("getValidPeers(disabled exit routes): %v", err)
+	}
+	for _, peer := range peers {
+		if peer.Hostname == exitNode.Hostname {
+			t.Fatalf("did not expect disabled exit node to be visible, got peers=%+v", peers)
+		}
+	}
+
+	reducedRules, packetFilters := packetFiltersForMachine(exitNode, org.AclRules)
+	if len(reducedRules) != 0 {
+		t.Fatalf("expected no reduced packet filter rules before exit routes are enabled, got %+v", reducedRules)
+	}
+	if baseRules, ok := packetFilters["base"]; !ok || len(baseRules) != 0 {
+		t.Fatalf("expected empty base packet filter chunk before exit routes are enabled, got %+v", packetFilters)
+	}
+
+	if err := app.enableRoutes(exitNode, ExitRouteV4.String(), ExitRouteV6.String()); err != nil {
+		t.Fatalf("enableRoutes(exit node): %v", err)
+	}
+
+	peers, _, err = app.getValidPeers(client, enableSelf)
+	if err != nil {
+		t.Fatalf("getValidPeers(enabled exit routes): %v", err)
+	}
+	visible := false
+	for _, peer := range peers {
+		if peer.Hostname == exitNode.Hostname {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		t.Fatalf("expected enabled exit node to be visible, got peers=%+v", peers)
+	}
+
+	reducedRules, packetFilters = packetFiltersForMachine(exitNode, org.AclRules)
+	if len(reducedRules) != 0 {
+		t.Fatalf("expected autogroup:internet to keep packet filter rules empty after exit routes are enabled, got %+v", reducedRules)
+	}
+	if baseRules, ok := packetFilters["base"]; !ok || len(baseRules) != 0 {
+		t.Fatalf("expected empty base packet filter chunk after exit routes are enabled, got %+v", packetFilters)
+	}
+}
+
+func TestSubnetRouterVisibilityRequiresEnabledRoutes(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	user := createTestUser(t, app, "alice@example.com", "Alice", "acl-org", "Mirage")
+	client := createTestMachine(t, app, user, "client", "100.64.0.1")
+	router := createTestMachine(t, app, user, "subnet-router", "100.64.0.2")
+	router.HostInfo = HostInfo{
+		Hostname:    router.Hostname,
+		RoutableIPs: []netip.Prefix{mustPrefix(t, "10.10.0.0/24")},
+	}
+	if err := app.db.Save(router).Error; err != nil {
+		t.Fatalf("Save(router hostinfo): %v", err)
+	}
+	createTestRoute(t, app, router, "10.10.0.0/24", false, false)
+
+	org, err := app.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(): %v", err)
+	}
+	org.AclPolicy = &ACLPolicy{
+		ACLs: []ACL{{
+			Action:       "accept",
+			Sources:      []string{user.Name},
+			Destinations: []string{"10.10.0.5:*"},
+		}},
+	}
+	if err := app.SaveACLPolicyOfOrg(org); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(): %v", err)
+	}
+
+	enableSelf, err := app.UpdateACLRulesOfOrg(org, &client.User, client)
+	if err != nil {
+		t.Fatalf("UpdateACLRulesOfOrg(): %v", err)
+	}
+	client.User.Organization = *org
+
+	peers, _, err := app.getValidPeers(client, enableSelf)
+	if err != nil {
+		t.Fatalf("getValidPeers(disabled subnet routes): %v", err)
+	}
+	for _, peer := range peers {
+		if peer.Hostname == router.Hostname {
+			t.Fatalf("did not expect disabled subnet router to be visible, got peers=%+v", peers)
+		}
+	}
+
+	if err := app.enableRoutes(router, "10.10.0.0/24"); err != nil {
+		t.Fatalf("enableRoutes(subnet router): %v", err)
+	}
+
+	peers, _, err = app.getValidPeers(client, enableSelf)
+	if err != nil {
+		t.Fatalf("getValidPeers(enabled subnet routes): %v", err)
+	}
+	visible := false
+	for _, peer := range peers {
+		if peer.Hostname == router.Hostname {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		t.Fatalf("expected enabled subnet router to be visible, got peers=%+v", peers)
+	}
+}
+
+func TestReduceFilterRulesKeepsSubnetDestinationsForRouter(t *testing.T) {
+	t.Parallel()
+
+	router := &Machine{
+		IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.2")},
+		HostInfo: HostInfo{
+			RoutableIPs: []netip.Prefix{mustPrefix(t, "10.10.0.0/24")},
+		},
+	}
+	rules := []tailcfg.FilterRule{{
+		SrcIPs: []string{"100.64.0.1"},
+		DstPorts: []tailcfg.NetPortRange{{
+			IP: "10.10.0.5",
+			Ports: tailcfg.PortRangeAny,
+		}},
+	}}
+
+	reduced := reduceFilterRulesForMachine(router, rules)
+	if len(reduced) != 1 {
+		t.Fatalf("expected subnet destination to survive reduction, got %+v", reduced)
+	}
+	if got := reduced[0].DstPorts[0].IP; got != "10.10.0.5" {
+		t.Fatalf("expected reduced destination to stay 10.10.0.5, got %q", got)
+	}
+}
+
+func TestReduceFilterRulesKeepsWildcardDestination(t *testing.T) {
+	t.Parallel()
+
+	machine := &Machine{
+		IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.2")},
+	}
+	rules := []tailcfg.FilterRule{{
+		SrcIPs: []string{"100.64.0.1"},
+		DstPorts: []tailcfg.NetPortRange{{
+			IP:    "*",
+			Ports: tailcfg.PortRangeAny,
+		}},
+	}}
+
+	reduced := reduceFilterRulesForMachine(machine, rules)
+	if len(reduced) != 1 {
+		t.Fatalf("expected wildcard destination to survive reduction, got %+v", reduced)
+	}
+	if got := reduced[0].DstPorts[0].IP; got != "*" {
+		t.Fatalf("expected wildcard destination to stay '*', got %q", got)
+	}
+}
+
+func TestExpandMachineRoutesReturnsOnlyServedRoutes(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	user := createTestUser(t, app, "alice@example.com", "Alice", "acl-org", "Mirage")
+	router := createTestMachine(t, app, user, "subnet-router", "100.64.0.2")
+
+	createTestRoute(t, app, router, "10.10.0.0/24", true, true)
+	createTestRoute(t, app, router, "10.20.0.0/24", true, false)
+	createTestRoute(t, app, router, "10.30.0.0/24", false, false)
+	createTestRoute(t, app, router, ExitRouteV4.String(), true, false)
+	createTestRoute(t, app, router, ExitRouteV6.String(), true, false)
+
+	got := app.expandMachineRoutes(*router)
+	want := []string{
+		"10.10.0.0/24",
+		ExitRouteV4.String(),
+		ExitRouteV6.String(),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected expanded routes: got %v want %v", got, want)
+	}
+}
+
+func TestDisableRouteMarksOrganizationStateChanged(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	user := createTestUser(t, app, "alice@example.com", "Alice", "acl-org", "Mirage")
+	router := createTestMachine(t, app, user, "subnet-router", "100.64.0.2")
+	route := createTestRoute(t, app, router, "10.10.0.0/24", true, true)
+
+	before := app.getOrgLastStateChange(user.OrganizationID)
+	if err := app.DisableRoute(route.ID); err != nil {
+		t.Fatalf("DisableRoute(): %v", err)
+	}
+	after := app.getOrgLastStateChange(user.OrganizationID)
+	if !after.After(before) {
+		t.Fatalf("expected organization state change timestamp to advance after disabling route, before=%v after=%v", before, after)
+	}
+
+	updatedRoute, err := app.GetRoute(route.ID)
+	if err != nil {
+		t.Fatalf("GetRoute(): %v", err)
+	}
+	if updatedRoute.Enabled {
+		t.Fatalf("expected route to be disabled, got %+v", updatedRoute)
+	}
+	if updatedRoute.IsPrimary {
+		t.Fatalf("expected disabled route to no longer be primary, got %+v", updatedRoute)
+	}
+}
+
+func TestProcessMachineRoutesWithdrawalMarksOrganizationStateChanged(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	user := createTestUser(t, app, "alice@example.com", "Alice", "acl-org", "Mirage")
+	router := createTestMachine(t, app, user, "subnet-router", "100.64.0.2")
+	createTestRoute(t, app, router, "10.10.0.0/24", true, true)
+	router.HostInfo = HostInfo{Hostname: router.Hostname}
+
+	before := app.getOrgLastStateChange(user.OrganizationID)
+	if err := app.processMachineRoutes(router); err != nil {
+		t.Fatalf("processMachineRoutes(): %v", err)
+	}
+	after := app.getOrgLastStateChange(user.OrganizationID)
+	if !after.After(before) {
+		t.Fatalf("expected organization state change timestamp to advance after route withdrawal, before=%v after=%v", before, after)
+	}
+
+	machineRoutes, err := app.GetMachineRoutes(router)
+	if err != nil {
+		t.Fatalf("GetMachineRoutes(): %v", err)
+	}
+	if len(machineRoutes) != 1 {
+		t.Fatalf("expected one machine route, got %d", len(machineRoutes))
+	}
+	if machineRoutes[0].Advertised {
+		t.Fatalf("expected route advertisement to be withdrawn, got %+v", machineRoutes[0])
+	}
+	if machineRoutes[0].Enabled {
+		t.Fatalf("expected withdrawn route to be disabled, got %+v", machineRoutes[0])
+	}
+}
+
+func TestHandlePrimarySubnetFailoverMarksBothOrganizationsChanged(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	ownerA := createTestUser(t, app, "alice@example.com", "Alice", "org-a", "Mirage")
+	ownerB := createTestUser(t, app, "bob@example.com", "Bob", "org-b", "Mirage")
+	routerA := createTestMachine(t, app, ownerA, "router-a", "100.64.0.2")
+	routerB := createTestMachine(t, app, ownerB, "router-b", "100.64.0.3")
+	createTestRoute(t, app, routerA, "10.10.0.0/24", true, true)
+	createTestRoute(t, app, routerB, "10.10.0.0/24", true, false)
+
+	offline := time.Now().Add(-2 * keepAliveInterval)
+	routerA.LastSeen = &offline
+	if err := app.db.Save(routerA).Error; err != nil {
+		t.Fatalf("Save(routerA): %v", err)
+	}
+	online := time.Now().UTC()
+	routerB.LastSeen = &online
+	if err := app.db.Save(routerB).Error; err != nil {
+		t.Fatalf("Save(routerB): %v", err)
+	}
+
+	beforeA := app.getOrgLastStateChange(ownerA.OrganizationID)
+	beforeB := app.getOrgLastStateChange(ownerB.OrganizationID)
+	if err := app.handlePrimarySubnetFailover(); err != nil {
+		t.Fatalf("handlePrimarySubnetFailover(): %v", err)
+	}
+	afterA := app.getOrgLastStateChange(ownerA.OrganizationID)
+	afterB := app.getOrgLastStateChange(ownerB.OrganizationID)
+	if !afterA.After(beforeA) {
+		t.Fatalf("expected org A state change timestamp to advance, before=%v after=%v", beforeA, afterA)
+	}
+	if !afterB.After(beforeB) {
+		t.Fatalf("expected org B state change timestamp to advance, before=%v after=%v", beforeB, afterB)
+	}
+
+	routesA, err := app.GetMachineRoutes(routerA)
+	if err != nil {
+		t.Fatalf("GetMachineRoutes(routerA): %v", err)
+	}
+	routesB, err := app.GetMachineRoutes(routerB)
+	if err != nil {
+		t.Fatalf("GetMachineRoutes(routerB): %v", err)
+	}
+	if len(routesA) != 1 || routesA[0].IsPrimary {
+		t.Fatalf("expected router A to lose primary route, got %+v", routesA)
+	}
+	if len(routesB) != 1 || !routesB[0].IsPrimary {
+		t.Fatalf("expected router B to become primary, got %+v", routesB)
+	}
+}
+
 func TestContainsAddressesMatchesPrefixes(t *testing.T) {
 	t.Parallel()
 

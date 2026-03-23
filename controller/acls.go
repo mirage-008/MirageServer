@@ -1109,16 +1109,24 @@ func (h *Mirage) generateACLPolicyDest(
 		alias = fmt.Sprintf("%s:%s", tokens[0], tokens[1])
 	}
 
-	expanded, err := h.expandAlias(
-		h.cfg.AllowRouteDueToMachine,
-		machines,
-		userId,
-		aclPolicy,
-		alias,
-		stripEmaildomain,
+	var (
+		expanded []string
+		err      error
 	)
-	if err != nil {
-		return nil, err
+	if alias == "*" {
+		expanded = []string{"*"}
+	} else {
+		expanded, err = h.expandAlias(
+			h.cfg.AllowRouteDueToMachine,
+			machines,
+			userId,
+			aclPolicy,
+			alias,
+			stripEmaildomain,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	ports, err := expandPorts(tokens[len(tokens)-1], needsWildcard)
 	if err != nil {
@@ -1196,6 +1204,12 @@ func (h *Mirage) expandMachineRoutes(machine Machine) []string {
 		return routeIPs
 	}
 	for _, route := range routeList {
+		if !route.Enabled {
+			continue
+		}
+		if !route.isExitRoute() && !route.IsPrimary {
+			continue
+		}
 		routeIPs = append(routeIPs, netip.Prefix(route.Prefix).String())
 	}
 

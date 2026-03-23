@@ -24,7 +24,10 @@ import (
 	"tailscale.com/types/key"
 )
 
-const smokeSubnetRoute = "10.123.45.0/24"
+const (
+	smokeSubnetRoute       = "10.123.45.0/24"
+	sharedSmokeSubnetRoute = "192.168.1.0/24"
+)
 
 type smokeServer struct {
 	app        *Mirage
@@ -32,28 +35,40 @@ type smokeServer struct {
 }
 
 type smokeNode struct {
-	hostname   string
-	socketPath string
+	hostname      string
+	socketPath    string
+	httpProxyAddr string
 }
 
 type smokeStatus struct {
-	BackendState string                     `json:"BackendState"`
-	TailscaleIPs []string                   `json:"TailscaleIPs"`
-	Self         smokePeerStatus            `json:"Self"`
-	Peer         map[string]smokePeerStatus `json:"Peer"`
+	BackendState   string                     `json:"BackendState"`
+	TailscaleIPs   []string                   `json:"TailscaleIPs"`
+	Self           *smokePeerStatus           `json:"Self"`
+	Peer           map[string]smokePeerStatus `json:"Peer"`
+	ExitNodeStatus *smokeExitNodeStatus       `json:"ExitNodeStatus,omitempty"`
+}
+
+type smokeExitNodeStatus struct {
+	ID           string   `json:"ID"`
+	Online       bool     `json:"Online"`
+	TailscaleIPs []string `json:"TailscaleIPs"`
 }
 
 type smokePeerStatus struct {
-	HostName      string   `json:"HostName"`
-	DNSName       string   `json:"DNSName"`
-	TailscaleIPs  []string `json:"TailscaleIPs"`
-	PrimaryRoutes []string `json:"PrimaryRoutes"`
-	Addrs         []string `json:"Addrs"`
-	CurAddr       string   `json:"CurAddr"`
-	Relay         string   `json:"Relay"`
-	PeerRelay     string   `json:"PeerRelay"`
-	Online        bool     `json:"Online"`
-	InNetworkMap  bool     `json:"InNetworkMap"`
+	ID             string   `json:"ID"`
+	HostName       string   `json:"HostName"`
+	DNSName        string   `json:"DNSName"`
+	TailscaleIPs   []string `json:"TailscaleIPs"`
+	AllowedIPs     []string `json:"AllowedIPs"`
+	PrimaryRoutes  []string `json:"PrimaryRoutes"`
+	Addrs          []string `json:"Addrs"`
+	CurAddr        string   `json:"CurAddr"`
+	Relay          string   `json:"Relay"`
+	PeerRelay      string   `json:"PeerRelay"`
+	Online         bool     `json:"Online"`
+	InNetworkMap   bool     `json:"InNetworkMap"`
+	ExitNode       bool     `json:"ExitNode"`
+	ExitNodeOption bool     `json:"ExitNodeOption"`
 }
 
 func TestOfficialClientSubnetRouteAutoApproveSmoke(t *testing.T) {
@@ -176,6 +191,264 @@ func TestOfficialClientSubnetRouteAutoApproveSmoke(t *testing.T) {
 	}
 
 	_ = waitForPeerVisible(t, nodeB.socketPath, nodeA.hostname)
+}
+
+func TestOfficialClientSubnetRouteReachabilitySmoke(t *testing.T) {
+	requireSmokeEnv(t)
+
+	targetIP := smokeLocalPrivateIPv4(t)
+	targetRoute := netip.PrefixFrom(targetIP, targetIP.BitLen()).String()
+
+	tempDir := t.TempDir()
+	server := startSmokeServer(t, tempDir)
+
+	user, err := server.app.CreateUser("smoke", "Smoke Test", "smoke-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(): %v", err)
+	}
+
+	org, err := server.app.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(): %v", err)
+	}
+	if org.AclPolicy == nil {
+		t.Fatal("expected organization ACL policy to be initialized")
+	}
+	org.AclPolicy.ACLs = []ACL{{
+		Action:       "accept",
+		Sources:      []string{user.Name},
+		Destinations: []string{targetIP.String() + ":*"},
+	}}
+	if org.AclPolicy.AutoApprovers.Routes == nil {
+		org.AclPolicy.AutoApprovers.Routes = make(map[string][]string)
+	}
+	org.AclPolicy.AutoApprovers.Routes[targetRoute] = []string{user.Name}
+	if err := server.app.SaveACLPolicyOfOrg(org); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(): %v", err)
+	}
+
+	expiration := time.Now().Add(2 * time.Hour)
+	routerAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(router): %v", err)
+	}
+	clientAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(client): %v", err)
+	}
+
+	routerNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "reachability-router"),
+		server.serverAddr,
+		routerAuthKey.Key,
+		"reachability-router",
+		"--advertise-routes="+targetRoute,
+	)
+	clientNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "reachability-client"),
+		server.serverAddr,
+		clientAuthKey.Key,
+		"reachability-client",
+	)
+
+	_ = waitForNodeRunning(t, routerNode.socketPath)
+	_ = waitForNodeRunning(t, clientNode.socketPath)
+
+	routerMachine := waitForMachineWithRouteState(t, server.app, routerNode.hostname, targetRoute, true)
+	routerMachine = waitForMachinePrimaryRoute(t, server.app, routerNode.hostname, targetRoute)
+	clientMachine := waitForMachine(t, server.app, clientNode.hostname)
+
+	org, err = server.app.GetOrgnaizationByID(routerMachine.User.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(router): %v", err)
+	}
+	enableSelf, err := server.app.UpdateACLRulesOfOrg(org, &clientMachine.User, clientMachine)
+	if err != nil {
+		t.Fatalf("UpdateACLRulesOfOrg(): %v", err)
+	}
+	routerMachine.User.Organization = *org
+	clientMachine.User.Organization = *org
+	peers, _, err := server.app.getValidPeers(clientMachine, enableSelf)
+	if err != nil {
+		t.Fatalf("getValidPeers(%s): %v", clientNode.hostname, err)
+	}
+	if len(peers) == 0 {
+		t.Fatalf("expected peers for %s after ACL update", clientNode.hostname)
+	}
+
+	peerNodes, err := server.app.toNodes(peers)
+	if err != nil {
+		t.Fatalf("toNodes(peers): %v", err)
+	}
+	var routerPeerNode *tailcfg.Node
+	for _, peerNode := range peerNodes {
+		if peerNode != nil && peerNode.ID == tailcfg.NodeID(routerMachine.ID) {
+			routerPeerNode = peerNode
+			break
+		}
+	}
+	if routerPeerNode == nil {
+		t.Fatalf("expected router node %s in client peer map, got %d peers", routerNode.hostname, len(peerNodes))
+	}
+	if !containsPrefix(routerPeerNode.AllowedIPs, smokeMustPrefix(t, targetRoute)) {
+		t.Fatalf("expected server peer allowed IPs to include %s, got %v", targetRoute, routerPeerNode.AllowedIPs)
+	}
+	if !containsPrefix(routerPeerNode.PrimaryRoutes, smokeMustPrefix(t, targetRoute)) {
+		t.Fatalf("expected server peer primary routes to include %s, got %v", targetRoute, routerPeerNode.PrimaryRoutes)
+	}
+
+	_ = waitForPeerVisible(t, clientNode.socketPath, routerNode.hostname)
+
+	preAcceptOutput, preAcceptErr := runCommand(
+		t,
+		15*time.Second,
+		"tailscale",
+		"--socket", clientNode.socketPath,
+		"ping",
+		"--c=1",
+		"--timeout=5s",
+		targetIP.String(),
+	)
+	if preAcceptErr == nil {
+		t.Skipf("subnet target %s is reachable before accepting routes; output=%s", targetIP, strings.TrimSpace(preAcceptOutput))
+	}
+
+	setOutput, err := runCommand(
+		t,
+		30*time.Second,
+		"tailscale",
+		"--socket", clientNode.socketPath,
+		"set",
+		"--accept-routes=true",
+	)
+	if err != nil {
+		t.Fatalf("tailscale set --accept-routes=true failed: %v\nstdout/stderr:\n%s", err, setOutput)
+	}
+
+	routePing := waitForRoutePing(t, clientNode.socketPath, targetIP.String())
+	t.Logf("subnet route ping to %s succeeded: %s", targetIP, strings.TrimSpace(routePing))
+}
+
+func TestOfficialClientSubnetRouteLiveUpdateSmoke(t *testing.T) {
+	requireSmokeEnv(t)
+
+	targetIP := smokeLocalPrivateIPv4(t)
+	targetRoute := netip.PrefixFrom(targetIP, targetIP.BitLen()).String()
+
+	tempDir := t.TempDir()
+	server := startSmokeServer(t, tempDir)
+
+	user, err := server.app.CreateUser("smoke", "Smoke Test", "smoke-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(): %v", err)
+	}
+
+	org, err := server.app.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(): %v", err)
+	}
+	if org.AclPolicy == nil {
+		t.Fatal("expected organization ACL policy to be initialized")
+	}
+	org.AclPolicy.ACLs = []ACL{{
+		Action:       "accept",
+		Sources:      []string{user.Name},
+		Destinations: []string{targetIP.String() + ":*"},
+	}}
+	org.AclPolicy.AutoApprovers.Routes = map[string][]string{}
+	if err := server.app.SaveACLPolicyOfOrg(org); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(): %v", err)
+	}
+
+	expiration := time.Now().Add(2 * time.Hour)
+	routerAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(router): %v", err)
+	}
+	clientAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(client): %v", err)
+	}
+
+	routerNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "live-update-router"),
+		server.serverAddr,
+		routerAuthKey.Key,
+		"live-update-router",
+		"--advertise-routes="+targetRoute,
+	)
+	clientNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "live-update-client"),
+		server.serverAddr,
+		clientAuthKey.Key,
+		"live-update-client",
+		"--accept-routes=true",
+	)
+
+	_ = waitForNodeRunning(t, routerNode.socketPath)
+	_ = waitForNodeRunning(t, clientNode.socketPath)
+
+	routerMachine := waitForMachineWithRouteState(t, server.app, routerNode.hostname, targetRoute, false)
+	clientMachine := waitForMachine(t, server.app, clientNode.hostname)
+	waitForPeerAbsent(t, clientNode.socketPath, routerNode.hostname)
+
+	preEnableOutput, preEnableErr := runCommand(
+		t,
+		15*time.Second,
+		"tailscale",
+		"--socket", clientNode.socketPath,
+		"ping",
+		"--c=1",
+		"--timeout=5s",
+		targetIP.String(),
+	)
+	if preEnableErr == nil {
+		t.Skipf("subnet target %s is reachable before enabling routes; output=%s", targetIP, strings.TrimSpace(preEnableOutput))
+	}
+
+	if err := server.app.enableRoutes(routerMachine, targetRoute); err != nil {
+		t.Fatalf("enableRoutes(%s): %v", targetRoute, err)
+	}
+	_ = waitForMachineWithRouteState(t, server.app, routerNode.hostname, targetRoute, true)
+	routerMachine = waitForMachinePrimaryRoute(t, server.app, routerNode.hostname, targetRoute)
+	clientMachine = waitForMachine(t, server.app, clientNode.hostname)
+
+	org, err = server.app.GetOrgnaizationByID(routerMachine.User.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(router): %v", err)
+	}
+	enableSelf, err := server.app.UpdateACLRulesOfOrg(org, &clientMachine.User, clientMachine)
+	if err != nil {
+		t.Fatalf("UpdateACLRulesOfOrg(): %v", err)
+	}
+	clientMachine.User.Organization = *org
+	peers, _, err := server.app.getValidPeers(clientMachine, enableSelf)
+	if err != nil {
+		t.Fatalf("getValidPeers(%s): %v", clientNode.hostname, err)
+	}
+	visibleServerSide := false
+	for _, peer := range peers {
+		if peer.ID == routerMachine.ID {
+			visibleServerSide = true
+			break
+		}
+	}
+	if !visibleServerSide {
+		t.Fatalf("expected %s to become visible server-side after enabling %s, peers=%+v", routerNode.hostname, targetRoute, peers)
+	}
+
+	peer := waitForPeerCondition(t, clientNode.socketPath, routerNode.hostname, func(peer smokePeerStatus, status smokeStatus) error {
+		if !peer.InNetworkMap {
+			return fmt.Errorf("peer %s not in network map yet: %+v status=%+v", routerNode.hostname, peer, status)
+		}
+		return nil
+	})
+	routePing := waitForRoutePing(t, clientNode.socketPath, targetIP.String())
+	t.Logf("live subnet route update propagated to %s: peer=%+v ping=%s", clientNode.hostname, peer, strings.TrimSpace(routePing))
 }
 
 func containsPrefix(prefixes []netip.Prefix, target netip.Prefix) bool {
@@ -457,6 +730,431 @@ func TestOfficialClientPeerSmoke(t *testing.T) {
 	)
 }
 
+func TestOfficialClientExitNodeSmoke(t *testing.T) {
+	requireSmokeEnv(t)
+
+	tempDir := t.TempDir()
+	server := startSmokeServer(t, tempDir)
+
+	user, err := server.app.CreateUser("smoke", "Smoke Test", "smoke-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(): %v", err)
+	}
+
+	org, err := server.app.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(): %v", err)
+	}
+	if org.AclPolicy == nil {
+		t.Fatal("expected organization ACL policy to be initialized")
+	}
+	org.AclPolicy.ACLs = []ACL{{
+		Action:       "accept",
+		Sources:      []string{user.Name},
+		Destinations: []string{"autogroup:internet:*"},
+	}}
+	org.AclPolicy.AutoApprovers.ExitNode = []string{user.Name}
+	if err := server.app.SaveACLPolicyOfOrg(org); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(): %v", err)
+	}
+
+	expiration := time.Now().Add(2 * time.Hour)
+	exitAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(exit): %v", err)
+	}
+	clientAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(client): %v", err)
+	}
+
+	exitNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "exit-node"),
+		server.serverAddr,
+		exitAuthKey.Key,
+		"exit-node",
+		"--advertise-exit-node",
+	)
+	clientNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "exit-client"),
+		server.serverAddr,
+		clientAuthKey.Key,
+		"exit-client",
+		"--accept-routes=true",
+	)
+
+	exitStatus := waitForNodeRunning(t, exitNode.socketPath)
+	clientStatus := waitForNodeRunning(t, clientNode.socketPath)
+	if len(exitStatus.TailscaleIPs) == 0 || len(clientStatus.TailscaleIPs) == 0 {
+		t.Fatalf("expected both nodes to have tailscale IPs, got exit=%v client=%v", exitStatus.TailscaleIPs, clientStatus.TailscaleIPs)
+	}
+
+	exitMachine := waitForMachineWithRouteState(t, server.app, exitNode.hostname, ExitRouteV4.String(), true)
+	_ = waitForMachineWithRouteState(t, server.app, exitNode.hostname, ExitRouteV6.String(), true)
+
+	enabledRoutes, err := server.app.GetEnabledRoutes(exitMachine)
+	if err != nil {
+		t.Fatalf("GetEnabledRoutes(%s): %v", exitNode.hostname, err)
+	}
+	if !containsPrefix(enabledRoutes, ExitRouteV4) || !containsPrefix(enabledRoutes, ExitRouteV6) {
+		t.Fatalf("expected enabled exit routes for %s, got %v", exitNode.hostname, enabledRoutes)
+	}
+
+	exitTailNode, err := server.app.toNode(*exitMachine, exitMachine.Shared)
+	if err != nil {
+		t.Fatalf("toNode(%s): %v", exitNode.hostname, err)
+	}
+	if !containsPrefix(exitTailNode.AllowedIPs, ExitRouteV4) || !containsPrefix(exitTailNode.AllowedIPs, ExitRouteV6) {
+		t.Fatalf("expected exit node allowed IPs to include exit routes, got %v", exitTailNode.AllowedIPs)
+	}
+
+	waitForCondition(t, 30*time.Second, func() error {
+		clientMachine := waitForMachine(t, server.app, clientNode.hostname)
+		org, err := server.app.GetOrgnaizationByID(clientMachine.User.OrganizationID)
+		if err != nil {
+			return err
+		}
+		enableSelf, err := server.app.UpdateACLRulesOfOrg(org, &clientMachine.User, clientMachine)
+		if err != nil {
+			return err
+		}
+		clientMachine.User.Organization = *org
+		peers, invalid, err := server.app.getValidPeers(clientMachine, enableSelf)
+		if err != nil {
+			return err
+		}
+		if len(peers) == 0 {
+			return fmt.Errorf("server-side peers for %s are empty; enableSelf=%v invalid=%v aclRules=%+v", clientNode.hostname, enableSelf, invalid, org.AclRules)
+		}
+		for _, peer := range peers {
+			if peer.Hostname == exitNode.hostname {
+				return nil
+			}
+		}
+		return fmt.Errorf("exit node %s not yet visible to %s; peers=%+v invalid=%v", exitNode.hostname, clientNode.hostname, peers, invalid)
+	})
+
+	exitPeer := waitForPeerVisible(t, clientNode.socketPath, exitNode.hostname)
+	if !exitPeer.ExitNodeOption {
+		t.Fatalf("expected %s to be an exit-node option, got %+v", exitNode.hostname, exitPeer)
+	}
+	if !containsString(exitPeer.AllowedIPs, ExitRouteV4.String()) || !containsString(exitPeer.AllowedIPs, ExitRouteV6.String()) {
+		t.Fatalf("expected peer allowed IPs to include exit routes, got %+v", exitPeer)
+	}
+
+	setOutput, err := runCommand(
+		t,
+		30*time.Second,
+		"tailscale",
+		"--socket", clientNode.socketPath,
+		"set",
+		"--exit-node="+exitNode.hostname,
+	)
+	if err != nil {
+		t.Fatalf("tailscale set --exit-node failed: %v\nstdout/stderr:\n%s", err, setOutput)
+	}
+
+	selectedPeer := waitForPeerCondition(t, clientNode.socketPath, exitNode.hostname, func(peer smokePeerStatus, status smokeStatus) error {
+		if !peer.ExitNode {
+			return fmt.Errorf("peer %s not selected as exit node yet: %+v", exitNode.hostname, peer)
+		}
+		if status.ExitNodeStatus == nil {
+			return fmt.Errorf("status missing ExitNodeStatus: %+v", status)
+		}
+		if status.ExitNodeStatus.ID != peer.ID {
+			return fmt.Errorf("exit node ID mismatch: status=%q peer=%q", status.ExitNodeStatus.ID, peer.ID)
+		}
+		return nil
+	})
+
+	clientStatus = waitForNodeRunning(t, clientNode.socketPath)
+	if clientStatus.ExitNodeStatus == nil {
+		t.Fatalf("expected client status to report selected exit node")
+	}
+	if clientStatus.ExitNodeStatus.ID != selectedPeer.ID {
+		t.Fatalf("expected selected exit node ID %q, got %+v", selectedPeer.ID, clientStatus.ExitNodeStatus)
+	}
+
+	debugRules := readSmokePacketFilterRules(t, exitNode.socketPath)
+	if strings.TrimSpace(debugRules) != "[]" {
+		t.Fatalf("expected exit node packet filter rules to stay empty for autogroup:internet, got:\n%s", debugRules)
+	}
+
+	httpOutput := smokeHTTPViaProxy(t, clientNode.httpProxyAddr)
+	t.Logf("exit-node proxy egress succeeded via %s: %s", clientNode.httpProxyAddr, strings.TrimSpace(httpOutput))
+}
+
+func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
+	requireSmokeEnv(t)
+
+	tempDir := t.TempDir()
+	server := startSmokeServer(t, tempDir)
+
+	sourceUser, err := server.app.CreateUser("shared-source", "Shared Source", "shared-source-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(source): %v", err)
+	}
+	targetUser, err := server.app.CreateUser("shared-target", "Shared Target", "shared-target-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(target): %v", err)
+	}
+
+	sourceOrg, err := server.app.GetOrgnaizationByID(sourceUser.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(source): %v", err)
+	}
+	if sourceOrg.AclPolicy == nil {
+		t.Fatal("expected source organization ACL policy to be initialized")
+	}
+	sourceOrg.AclPolicy.ACLs = []ACL{{
+		Action:       "accept",
+		Sources:      []string{"*"},
+		Destinations: []string{"*:*"},
+	}}
+	if sourceOrg.AclPolicy.AutoApprovers.Routes == nil {
+		sourceOrg.AclPolicy.AutoApprovers.Routes = make(map[string][]string)
+	}
+	sourceOrg.AclPolicy.AutoApprovers.Routes[sharedSmokeSubnetRoute] = []string{sourceUser.Name}
+	sourceOrg.AclPolicy.AutoApprovers.ExitNode = []string{sourceUser.Name}
+	if err := server.app.SaveACLPolicyOfOrg(sourceOrg); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(source): %v", err)
+	}
+
+	targetOrg, err := server.app.GetOrgnaizationByID(targetUser.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(target): %v", err)
+	}
+	if targetOrg.AclPolicy == nil {
+		t.Fatal("expected target organization ACL policy to be initialized")
+	}
+	targetOrg.AclPolicy.ACLs = []ACL{{
+		Action:       "accept",
+		Sources:      []string{"*"},
+		Destinations: []string{"*:*"},
+	}}
+	targetOrg.AclPolicy.AutoApprovers.Routes = map[string][]string{}
+	targetOrg.AclPolicy.AutoApprovers.ExitNode = []string{}
+	if err := server.app.SaveACLPolicyOfOrg(targetOrg); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(target): %v", err)
+	}
+
+	expiration := time.Now().Add(2 * time.Hour)
+	routerAuthKey, err := server.app.CreatePreAuthKey(sourceUser, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(router): %v", err)
+	}
+	clientAuthKey, err := server.app.CreatePreAuthKey(targetUser, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(client): %v", err)
+	}
+
+	routerNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "shared-router"),
+		server.serverAddr,
+		routerAuthKey.Key,
+		"shared-router",
+		"--advertise-routes="+sharedSmokeSubnetRoute,
+		"--advertise-exit-node",
+	)
+	clientNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "shared-client"),
+		server.serverAddr,
+		clientAuthKey.Key,
+		"shared-client",
+		"--accept-routes=true",
+	)
+
+	_ = waitForNodeRunning(t, routerNode.socketPath)
+	_ = waitForNodeRunning(t, clientNode.socketPath)
+
+	routerMachine := waitForMachineWithRouteState(t, server.app, routerNode.hostname, sharedSmokeSubnetRoute, true)
+	_ = waitForMachineWithRouteState(t, server.app, routerNode.hostname, ExitRouteV4.String(), true)
+	_ = waitForMachineWithRouteState(t, server.app, routerNode.hostname, ExitRouteV6.String(), true)
+	routerMachine = waitForMachinePrimaryRoute(t, server.app, routerNode.hostname, sharedSmokeSubnetRoute)
+	clientMachine := waitForMachine(t, server.app, clientNode.hostname)
+
+	share, err := server.app.CreateMachineShare(routerMachine, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(): %v", err)
+	}
+	if _, err := server.app.AcceptMachineShareByToken(share.ShareToken, targetUser); err != nil {
+		t.Fatalf("AcceptMachineShareByToken(): %v", err)
+	}
+
+	waitForCondition(t, 30*time.Second, func() error {
+		clientMachine = waitForMachine(t, server.app, clientNode.hostname)
+		targetOrg, err := server.app.GetOrgnaizationByID(clientMachine.User.OrganizationID)
+		if err != nil {
+			return err
+		}
+		enableSelf, err := server.app.UpdateACLRulesOfOrg(targetOrg, &clientMachine.User, clientMachine)
+		if err != nil {
+			return err
+		}
+		clientMachine.User.Organization = *targetOrg
+		peers, invalid, err := server.app.getValidPeers(clientMachine, enableSelf)
+		if err != nil {
+			return err
+		}
+		if len(peers) == 0 {
+			return fmt.Errorf("server-side peers for %s are empty; enableSelf=%v invalid=%v aclRules=%+v", clientNode.hostname, enableSelf, invalid, targetOrg.AclRules)
+		}
+		for _, peer := range peers {
+			if peer.Hostname == routerNode.hostname {
+				if !peer.Shared {
+					return fmt.Errorf("peer %s is visible but not marked shared: %+v", routerNode.hostname, peer)
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("shared peer %s not yet visible to %s; peers=%+v invalid=%v", routerNode.hostname, clientNode.hostname, peers, invalid)
+	})
+
+	sharedPeer := waitForPeerCondition(t, clientNode.socketPath, routerNode.hostname, func(peer smokePeerStatus, status smokeStatus) error {
+		if !peer.ExitNodeOption {
+			return fmt.Errorf("peer %s missing exit-node option: %+v", routerNode.hostname, peer)
+		}
+		if !containsString(peer.AllowedIPs, ExitRouteV4.String()) || !containsString(peer.AllowedIPs, ExitRouteV6.String()) {
+			return fmt.Errorf("peer %s missing exit routes in AllowedIPs: %+v", routerNode.hostname, peer)
+		}
+		if !containsString(peer.AllowedIPs, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("peer %s missing subnet route %s in AllowedIPs: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
+		}
+		if !containsString(peer.PrimaryRoutes, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("peer %s missing subnet route %s in PrimaryRoutes: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
+		}
+		_ = status
+		return nil
+	})
+
+	setOutput, err := runCommand(
+		t,
+		30*time.Second,
+		"tailscale",
+		"--socket", clientNode.socketPath,
+		"set",
+		"--exit-node="+routerNode.hostname,
+	)
+	if err != nil {
+		t.Fatalf("tailscale set --exit-node(shared) failed: %v\nstdout/stderr:\n%s", err, setOutput)
+	}
+
+	selectedPeer := waitForPeerCondition(t, clientNode.socketPath, routerNode.hostname, func(peer smokePeerStatus, status smokeStatus) error {
+		if !peer.ExitNode {
+			return fmt.Errorf("peer %s not selected as exit node yet: %+v", routerNode.hostname, peer)
+		}
+		if status.ExitNodeStatus == nil {
+			return fmt.Errorf("status missing ExitNodeStatus: %+v", status)
+		}
+		if status.ExitNodeStatus.ID != peer.ID {
+			return fmt.Errorf("exit node ID mismatch: status=%q peer=%q", status.ExitNodeStatus.ID, peer.ID)
+		}
+		return nil
+	})
+	if selectedPeer.ID != sharedPeer.ID {
+		t.Fatalf("expected shared peer ID %q to be selected, got %q", sharedPeer.ID, selectedPeer.ID)
+	}
+
+	clientStatus := waitForNodeRunning(t, clientNode.socketPath)
+	if clientStatus.ExitNodeStatus == nil || clientStatus.ExitNodeStatus.ID != sharedPeer.ID {
+		t.Fatalf("expected client status to report selected shared exit node %q, got %+v", sharedPeer.ID, clientStatus.ExitNodeStatus)
+	}
+
+	debugRules := readSmokePacketFilterRules(t, routerNode.socketPath)
+	t.Logf("shared router packet filter rules: %s", strings.TrimSpace(debugRules))
+
+	httpOutput := smokeHTTPViaProxy(t, clientNode.httpProxyAddr)
+	t.Logf("shared exit-node proxy egress succeeded via %s: %s", clientNode.httpProxyAddr, strings.TrimSpace(httpOutput))
+
+	routePing := waitForRoutePing(t, clientNode.socketPath, "192.168.1.1")
+	t.Logf("shared subnet route ping to 192.168.1.1 succeeded: %s", strings.TrimSpace(routePing))
+}
+
+func readSmokePacketFilterRules(t *testing.T, socketPath string) string {
+	t.Helper()
+
+	output, err := runCommand(
+		t,
+		30*time.Second,
+		"tailscale",
+		"--socket", socketPath,
+		"debug",
+		"localapi",
+		"/localapi/v0/debug-packet-filter-rules",
+	)
+	if err != nil {
+		t.Fatalf("tailscale debug localapi /localapi/v0/debug-packet-filter-rules failed: %v\nstdout/stderr:\n%s", err, output)
+	}
+
+	return output
+}
+
+func waitForTailscaledLogAddr(t *testing.T, logBuf *strings.Builder, prefix string) string {
+	t.Helper()
+
+	var addr string
+	waitForCondition(t, 10*time.Second, func() error {
+		for _, line := range strings.Split(logBuf.String(), "\n") {
+			if idx := strings.Index(line, prefix); idx >= 0 {
+				addr = strings.TrimSpace(line[idx+len(prefix):])
+				if addr != "" {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("log prefix %q not found yet", prefix)
+	})
+
+	return addr
+}
+
+func smokeHTTPViaProxy(t *testing.T, proxyAddr string) string {
+	t.Helper()
+
+	output, err := runCommand(
+		t,
+		30*time.Second,
+		"curl",
+		"--proxy", "http://"+proxyAddr,
+		"--max-time", "15",
+		"-fsS",
+		"http://1.1.1.1",
+	)
+	if err != nil {
+		t.Fatalf("curl via exit proxy %s failed: %v\nstdout/stderr:\n%s", proxyAddr, err, output)
+	}
+
+	return output
+}
+
+func waitForPeerCondition(t *testing.T, socketPath string, expectedHostname string, check func(smokePeerStatus, smokeStatus) error) smokePeerStatus {
+	t.Helper()
+
+	var matched smokePeerStatus
+	waitForCondition(t, 45*time.Second, func() error {
+		status, err := readSmokeStatus(t, socketPath)
+		if err != nil {
+			return err
+		}
+		for _, candidate := range status.Peer {
+			if candidate.HostName == expectedHostname || strings.Contains(candidate.DNSName, expectedHostname) {
+				if err := check(candidate, status); err != nil {
+					return err
+				}
+				matched = candidate
+				return nil
+			}
+		}
+		return fmt.Errorf("peer %s not visible yet; current peers=%+v self=%+v", expectedHostname, status.Peer, status.Self)
+	})
+
+	return matched
+}
+
 func openSmokeDB(t *testing.T, path string) *gorm.DB {
 	t.Helper()
 
@@ -513,6 +1211,38 @@ func mustFreeTCPAddr(t *testing.T) string {
 	defer ln.Close()
 
 	return ln.Addr().String()
+}
+
+func smokeLocalPrivateIPv4(t *testing.T) netip.Addr {
+	t.Helper()
+
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatalf("Interfaces(): %v", err)
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			prefix, err := netip.ParsePrefix(addr.String())
+			if err != nil {
+				continue
+			}
+			ip := prefix.Addr()
+			if !ip.Is4() || !ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			return ip
+		}
+	}
+
+	t.Skip("no non-loopback private IPv4 available for subnet smoke test")
+	return netip.Addr{}
 }
 
 func waitForHTTPReady(t *testing.T, rawURL string, timeout time.Duration) {
@@ -693,6 +1423,7 @@ func startSmokeNode(t *testing.T, tempDir, serverAddr, authKey, hostname string,
 		"--statedir", stateDir,
 		"--port", "0",
 		"--verbose", "1",
+		"--outbound-http-proxy-listen", "127.0.0.1:0",
 	)
 	daemonCmd.Stdout = &tailscaledLog
 	daemonCmd.Stderr = &tailscaledLog
@@ -706,6 +1437,7 @@ func startSmokeNode(t *testing.T, tempDir, serverAddr, authKey, hostname string,
 
 	waitForSocketReady(t, socketPath, 30*time.Second)
 	waitForTailDaemon(t, socketPath, 30*time.Second)
+	httpProxyAddr := waitForTailscaledLogAddr(t, &tailscaledLog, "HTTP proxy listening on ")
 
 	loginServer := "http://" + serverAddr
 	upArgs := []string{
@@ -731,8 +1463,9 @@ func startSmokeNode(t *testing.T, tempDir, serverAddr, authKey, hostname string,
 	}
 
 	return &smokeNode{
-		hostname:   hostname,
-		socketPath: socketPath,
+		hostname:      hostname,
+		socketPath:    socketPath,
+		httpProxyAddr: httpProxyAddr,
 	}
 }
 
@@ -825,6 +1558,23 @@ func waitForPeerVisible(t *testing.T, socketPath string, expectedHostname string
 	})
 
 	return peer
+}
+
+func waitForPeerAbsent(t *testing.T, socketPath string, expectedHostname string) {
+	t.Helper()
+
+	waitForCondition(t, 20*time.Second, func() error {
+		status, err := readSmokeStatus(t, socketPath)
+		if err != nil {
+			return err
+		}
+		for _, candidate := range status.Peer {
+			if candidate.HostName == expectedHostname || strings.Contains(candidate.DNSName, expectedHostname) {
+				return fmt.Errorf("peer %s still visible: %+v self=%+v", expectedHostname, candidate, status.Self)
+			}
+		}
+		return nil
+	})
 }
 
 func waitForTailPing(t *testing.T, socketPath string, target string) string {

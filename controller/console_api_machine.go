@@ -69,13 +69,13 @@ type machineItem struct {
 	LastSeen               string   `json:"lastSeen"`               //done
 	Created                string   `json:"created"`                //done
 
-	IsExternal         bool                  `json:"isExternal"`
-	IsEphemeral        bool                  `json:"isEphemeral"`
-	IsSharedOut        bool                  `json:"issharedout"`
-	ShareID            string                `json:"shareID"`
-	AcceptedShareCount int                   `json:"acceptedShareCount"`
+	IsExternal         bool                    `json:"isExternal"`
+	IsEphemeral        bool                    `json:"isEphemeral"`
+	IsSharedOut        bool                    `json:"issharedout"`
+	ShareID            string                  `json:"shareID"`
+	AcceptedShareCount int                     `json:"acceptedShareCount"`
 	ActiveShares       []*machineShareResponse `json:"activeShares"`
-	NeverExpires       bool                  `json:"neverExpires"` //done
+	NeverExpires       bool                    `json:"neverExpires"` //done
 
 	AllowedIPs         []string `json:"allowedIPs"`
 	ExtraIPs           []string `json:"extraIPs"`
@@ -221,29 +221,27 @@ func (h *Mirage) ConsoleMachinesAPI(
 		if machine.User.Organization.EnableMagic {
 			tmpMachine.Fqdn = machine.GivenName + "." + machine.User.Organization.MagicDnsDomain
 		}
-		if !tmpMachine.IsExternal {
-			machineRoutes, err := h.GetMachineRoutes(&machine)
-			if err != nil {
-				h.doAPIResponse(w, "查询设备路由失败", nil)
-				return
-			}
-			for _, route := range machineRoutes {
-				if route.isExitRoute() {
-					if route.Advertised {
-						tmpMachine.AdvertisedExitNode = true
-						if route.Enabled {
-							tmpMachine.AllowedExitNode = true
-						}
-					}
-				} else if route.Advertised {
-					tmpMachine.HasSubnets = true
-					routeV := netip.Prefix(route.Prefix).String()
-					tmpMachine.AdvertisedIPs = append(tmpMachine.AdvertisedIPs, routeV)
+		machineRoutes, err := h.GetMachineRoutes(&machine)
+		if err != nil {
+			h.doAPIResponse(w, "查询设备路由失败", nil)
+			return
+		}
+		for _, route := range machineRoutes {
+			if route.isExitRoute() {
+				if route.Advertised {
+					tmpMachine.AdvertisedExitNode = true
 					if route.Enabled {
-						tmpMachine.AllowedIPs = append(tmpMachine.AllowedIPs, routeV)
-					} else {
-						tmpMachine.ExtraIPs = append(tmpMachine.ExtraIPs, routeV)
+						tmpMachine.AllowedExitNode = true
 					}
+				}
+			} else if route.Advertised {
+				tmpMachine.HasSubnets = true
+				routeV := netip.Prefix(route.Prefix).String()
+				tmpMachine.AdvertisedIPs = append(tmpMachine.AdvertisedIPs, routeV)
+				if route.Enabled {
+					tmpMachine.AllowedIPs = append(tmpMachine.AllowedIPs, routeV)
+				} else {
+					tmpMachine.ExtraIPs = append(tmpMachine.ExtraIPs, routeV)
 				}
 			}
 		}
@@ -310,16 +308,16 @@ func mapShareErrorMessage(err error, creating bool) string {
 }
 
 type machineShareResponse struct {
-	Id             string     `json:"id"`
-	StableId       string     `json:"stableId"`
-	ShareToken     string     `json:"shareToken"`
-	TargetIdentity string     `json:"targetIdentity"`
-	Status         string     `json:"status"`
-	SourceMachineID string    `json:"sourceMachineID"`
-	TargetOrgID    string     `json:"targetOrgID"`
-	AcceptedAt     *time.Time `json:"acceptedAt"`
-	RevokedAt      *time.Time `json:"revokedAt"`
-	CreatedAt      time.Time  `json:"createdAt"`
+	Id              string     `json:"id"`
+	StableId        string     `json:"stableId"`
+	ShareToken      string     `json:"shareToken"`
+	TargetIdentity  string     `json:"targetIdentity"`
+	Status          string     `json:"status"`
+	SourceMachineID string     `json:"sourceMachineID"`
+	TargetOrgID     string     `json:"targetOrgID"`
+	AcceptedAt      *time.Time `json:"acceptedAt"`
+	RevokedAt       *time.Time `json:"revokedAt"`
+	CreatedAt       time.Time  `json:"createdAt"`
 }
 
 func (h *Mirage) buildMachineShareResponse(share *MachineShare) *machineShareResponse {

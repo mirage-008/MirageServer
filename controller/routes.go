@@ -77,7 +77,7 @@ func (h *Mirage) GetMachineRoutes(m *Machine) ([]Route, error) {
 
 func (h *Mirage) GetRoute(id uint64) (*Route, error) {
 	var route Route
-	err := h.db.Preload("Machine").First(&route, id).Error
+	err := h.db.Preload("Machine").Preload("Machine.User").First(&route, id).Error
 	if err != nil {
 		return nil, err
 	}
@@ -113,6 +113,8 @@ func (h *Mirage) DisableRoute(id uint64) error {
 	if err != nil {
 		return err
 	}
+
+	h.setOrgLastStateChangeToNow(route.Machine.User.OrganizationID)
 
 	return h.handlePrimarySubnetFailover()
 }
@@ -169,6 +171,7 @@ func (h *Mirage) processMachineRoutes(machine *Machine) error {
 		return err
 	}
 
+	changed := false
 	advertisedRoutes := map[netip.Prefix]bool{}
 	for _, prefix := range machine.HostInfo.RoutableIPs {
 		advertisedRoutes[prefix] = false
@@ -182,15 +185,18 @@ func (h *Mirage) processMachineRoutes(machine *Machine) error {
 				if err != nil {
 					return err
 				}
+				changed = true
 			}
 			advertisedRoutes[netip.Prefix(route.Prefix)] = true
 		} else if route.Advertised {
 			currentRoutes[pos].Advertised = false
 			currentRoutes[pos].Enabled = false
+			currentRoutes[pos].IsPrimary = false
 			err := h.db.Save(&currentRoutes[pos]).Error
 			if err != nil {
 				return err
 			}
+			changed = true
 		}
 	}
 
@@ -206,7 +212,12 @@ func (h *Mirage) processMachineRoutes(machine *Machine) error {
 			if err != nil {
 				return err
 			}
+			changed = true
 		}
+	}
+
+	if changed {
+		h.setOrgLastStateChangeToNow(machine.User.OrganizationID)
 	}
 
 	return nil
@@ -263,7 +274,7 @@ func (h *Mirage) handlePrimarySubnetFailover() error {
 			// find a new primary route
 			var newPrimaryRoutes []Route
 			err := h.db.
-				Preload("Machine").
+				Preload("Machine").Preload("Machine.User").
 				Where("prefix = ? AND machine_id != ? AND advertised = ? AND enabled = ?",
 					route.Prefix,
 					route.MachineID,
@@ -318,6 +329,7 @@ func (h *Mirage) handlePrimarySubnetFailover() error {
 			}
 
 			routesChangedOrgSet.SetKey(route.Machine.User.OrganizationID)
+			routesChangedOrgSet.SetKey(newPrimaryRoute.Machine.User.OrganizationID)
 		}
 	}
 

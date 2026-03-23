@@ -204,6 +204,35 @@ func containsAddress(inputs []string, addr string) bool {
 	return false
 }
 
+func inputsOverlapPrefix(inputs []string, target netip.Prefix) bool {
+	for _, input := range inputs {
+		if input == "*" {
+			return true
+		}
+		if prefix, err := netip.ParsePrefix(input); err == nil {
+			if prefix.Overlaps(target) || target.Overlaps(prefix) {
+				return true
+			}
+			continue
+		}
+		if addr, err := netip.ParseAddr(input); err == nil && target.Contains(addr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func inputsOverlapPrefixes(inputs []string, targets []netip.Prefix) bool {
+	for _, target := range targets {
+		if inputsOverlapPrefix(inputs, target) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // matchSourceAndDestinationWithRule.
 func matchSourceAndDestinationWithRule(
 	ruleSources []string,
@@ -215,10 +244,109 @@ func matchSourceAndDestinationWithRule(
 		containsAddresses(ruleDestinations, destination)
 }
 
+func hasExitRoutes(prefixes []netip.Prefix) bool {
+	var hasV4, hasV6 bool
+	for _, prefix := range prefixes {
+		switch prefix {
+		case ExitRouteV4:
+			hasV4 = true
+		case ExitRouteV6:
+			hasV6 = true
+		}
+	}
+
+	return hasV4 && hasV6
+}
+
+func (h *Mirage) machineHasEnabledExitRoutes(machine *Machine) bool {
+	if machine == nil {
+		return false
+	}
+
+	enabledRoutes, err := h.GetEnabledRoutes(machine)
+	if err != nil {
+		log.Warn().
+			Caller().
+			Err(err).
+			Str("machine", machine.Hostname).
+			Msg("Could not get enabled routes for exit node detection")
+
+		return false
+	}
+
+	return hasExitRoutes(enabledRoutes)
+}
+
+func enabledSubnetRoutes(prefixes []netip.Prefix) []netip.Prefix {
+	routes := make([]netip.Prefix, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		if prefix == ExitRouteV4 || prefix == ExitRouteV6 {
+			continue
+		}
+		routes = append(routes, prefix)
+	}
+
+	return routes
+}
+
+func (h *Mirage) machineEnabledSubnetRoutes(machine *Machine) []netip.Prefix {
+	if machine == nil {
+		return nil
+	}
+
+	enabledRoutes, err := h.GetEnabledRoutes(machine)
+	if err != nil {
+		log.Warn().
+			Caller().
+			Err(err).
+			Str("machine", machine.Hostname).
+			Msg("Could not get enabled routes for subnet detection")
+
+		return nil
+	}
+
+	return enabledSubnetRoutes(enabledRoutes)
+}
+
+func (h *Mirage) machineCanAccessInternet(machines []Machine, machine *Machine, aclPolicy *ACLPolicy) bool {
+	if machine == nil || aclPolicy == nil {
+		return false
+	}
+
+	machineIPs := machine.IPAddresses.ToStringSlice()
+	for _, acl := range aclPolicy.ACLs {
+		if acl.Action != "accept" {
+			continue
+		}
+		hasInternetDestination := false
+		for _, dest := range acl.Destinations {
+			if isAutoGroupInternetDestination(dest) {
+				hasInternetDestination = true
+				break
+			}
+		}
+		if !hasInternetDestination {
+			continue
+		}
+		for _, src := range acl.Sources {
+			srcIPs, err := h.generateACLPolicySrc(machines, machine.UserID, *aclPolicy, src, h.cfg.OIDC.StripEmaildomain)
+			if err != nil {
+				continue
+			}
+			if containsAddresses(srcIPs, machineIPs) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // getFilteredByACLPeerss should return the list of peers authorized to be accessed from machine.
-func getFilteredByACLPeers(
+func (h *Mirage) getFilteredByACLPeers(
 	machines []Machine,
 	rules []tailcfg.FilterRule,
+	aclPolicy *ACLPolicy,
 	enableSelf bool,
 	machine *Machine,
 ) (Machines, []tailcfg.NodeID) {
@@ -232,6 +360,10 @@ func getFilteredByACLPeers(
 	// for match between rule SrcIPs and DstPorts. If the rule is a match we allow the machine to be viewable.
 	machineIPs := machine.IPAddresses.ToStringSlice()
 
+	machineCanUseInternet := h.machineCanAccessInternet(machines, machine, aclPolicy)
+	machineIsEnabledExitNode := h.machineHasEnabledExitRoutes(machine)
+	machineEnabledSubnetRoutes := h.machineEnabledSubnetRoutes(machine)
+
 	for _, peer := range machines {
 		if peer.ID == machine.ID {
 			continue
@@ -241,12 +373,31 @@ func getFilteredByACLPeers(
 			peers[peer.ID] = peer
 			continue
 		}
+
+		peerIPs := peer.IPAddresses.ToStringSlice()
+		authorized := false
+		peerIsEnabledExitNode := h.machineHasEnabledExitRoutes(&peer)
+		peerEnabledSubnetRoutes := h.machineEnabledSubnetRoutes(&peer)
+		if machineCanUseInternet && peerIsEnabledExitNode {
+			authorized = true
+		}
+		if !authorized && machineIsEnabledExitNode && h.machineCanAccessInternet(machines, &peer, aclPolicy) {
+			authorized = true
+		}
 		for _, rule := range rules {
 			var dst []string
 			for _, d := range rule.DstPorts {
 				dst = append(dst, d.IP)
 			}
-			peerIPs := peer.IPAddresses.ToStringSlice()
+			if !authorized && len(peerEnabledSubnetRoutes) > 0 && containsAddresses(rule.SrcIPs, machineIPs) && inputsOverlapPrefixes(dst, peerEnabledSubnetRoutes) {
+				authorized = true
+			}
+			if !authorized && len(machineEnabledSubnetRoutes) > 0 && containsAddresses(rule.SrcIPs, peerIPs) && inputsOverlapPrefixes(dst, machineEnabledSubnetRoutes) {
+				authorized = true
+			}
+			if authorized {
+				break
+			}
 			var starInSrc, starInDst bool
 			starInSrc = containsAddresses(rule.SrcIPs, []string{"*"})
 			starInDst = containsAddresses(dst, []string{"*"})
@@ -256,8 +407,10 @@ func getFilteredByACLPeers(
 				(starInDst && containsAddresses(rule.SrcIPs, machineIPs)) ||
 				(starInSrc && containsAddresses(dst, peerIPs)) ||
 				(starInDst && containsAddresses(rule.SrcIPs, peerIPs)) {
-				peers[peer.ID] = peer
-			} else if !starInSrc && !starInDst &&
+				authorized = true
+				break
+			}
+			if !starInSrc && !starInDst &&
 				(matchSourceAndDestinationWithRule(
 					rule.SrcIPs,
 					dst,
@@ -270,10 +423,14 @@ func getFilteredByACLPeers(
 						machineIPs,
 						peerIPs,
 					)) {
-				peers[peer.ID] = peer
-			} else {
-				invalidNodeIDs = append(invalidNodeIDs, tailcfg.NodeID(peer.ID))
+				authorized = true
+				break
 			}
+		}
+		if authorized {
+			peers[peer.ID] = peer
+		} else {
+			invalidNodeIDs = append(invalidNodeIDs, tailcfg.NodeID(peer.ID))
 		}
 	}
 	authorizedPeers := make([]Machine, 0, len(peers))
@@ -351,13 +508,14 @@ func (h *Mirage) getPeers(machine *Machine, enableSelf bool) (Machines, []tailcf
 	// else use the classic user scope
 	if machine.User.Organization.AclPolicy != nil {
 		var machines []Machine
-		machines, err = h.ListVisibleMachinesByOrgID(org.ID)
+		machines, err = h.ListPeers(machine)
 		if err != nil {
 			log.Error().Err(err).Msg("Error retrieving list of machines")
 
 			return Machines{}, []tailcfg.NodeID{}, err
 		}
-		peers, invalidNodeIDs = getFilteredByACLPeers(machines, org.AclRules, enableSelf, machine)
+		machines = mergeMachines(machines, []Machine{*machine})
+		peers, invalidNodeIDs = h.getFilteredByACLPeers(machines, org.AclRules, org.AclPolicy, enableSelf, machine)
 	} else {
 		peers, err = h.ListPeers(machine)
 		if err != nil {
@@ -929,8 +1087,9 @@ func (h *Mirage) toNodes(
 	return nodes, nil
 }
 
-// toNode converts a Machine into a Tailscale Node. includeRoutes is false for shared nodes
-// as per the expected behaviour in the official SaaS.
+// toNode converts a Machine into a Tailscale Node.
+// Shared peers keep their enabled exit-node and subnet-route capabilities so
+// clients can use them the same way they use owned peers.
 func (h *Mirage) toNode(
 	machine Machine,
 	shared bool,
@@ -980,23 +1139,25 @@ func (h *Mirage) toNode(
 		[]netip.Prefix{},
 		addrs...) // we append the node own IP, as it is required by the clients
 
-	primaryPrefixes := []netip.Prefix{}
-	if !shared {
-		primaryRoutes, err := h.getMachinePrimaryRoutes(&machine)
-		if err != nil {
-			return nil, err
-		}
-		primaryPrefixes = Routes(primaryRoutes).toPrefixes()
+	primaryRoutes, err := h.getMachinePrimaryRoutes(&machine)
+	if err != nil {
+		return nil, err
+	}
+	primaryPrefixes := Routes(primaryRoutes).toPrefixes()
 
-		machineRoutes, err := h.GetMachineRoutes(&machine)
-		if err != nil {
-			return nil, err
+	machineRoutes, err := h.GetMachineRoutes(&machine)
+	if err != nil {
+		return nil, err
+	}
+	for _, route := range machineRoutes {
+		if route.Enabled && (route.IsPrimary || route.isExitRoute()) {
+			allowedIPs = append(allowedIPs, netip.Prefix(route.Prefix))
 		}
-		for _, route := range machineRoutes {
-			if route.Enabled && (route.IsPrimary || route.isExitRoute()) {
-				allowedIPs = append(allowedIPs, netip.Prefix(route.Prefix))
-			}
-		}
+	}
+
+	if shared {
+		allowedIPs = append([]netip.Prefix{}, allowedIPs...)
+		primaryPrefixes = append([]netip.Prefix{}, primaryPrefixes...)
 	}
 
 	homeDERP := 0
@@ -1085,7 +1246,7 @@ func (h *Mirage) toNode(
 		Expired:           expired,
 
 		Capabilities: capabilities,
-		CapMap: capMap,
+		CapMap:       capMap,
 	}
 
 	return &node, nil

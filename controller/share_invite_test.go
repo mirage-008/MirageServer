@@ -116,13 +116,13 @@ func createTestRoute(t *testing.T, app *Mirage, machine *Machine, prefix string,
 		t.Fatalf("ParsePrefix(%q): %v", prefix, err)
 	}
 	route := Route{
-		MachineID:   machine.ID,
-		Prefix:      IPPrefix(parsed),
-		Advertised:  true,
-		Enabled:     enabled,
-		IsPrimary:   primary,
-		CreatedAt:   time.Now().UTC(),
-		UpdatedAt:   time.Now().UTC(),
+		MachineID:  machine.ID,
+		Prefix:     IPPrefix(parsed),
+		Advertised: true,
+		Enabled:    enabled,
+		IsPrimary:  primary,
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
 	}
 	if err := app.db.Create(&route).Error; err != nil {
 		t.Fatalf("Create(route %q): %v", prefix, err)
@@ -409,7 +409,7 @@ func TestAcceptPendingMachineSharesForUserAcceptsByIdentity(t *testing.T) {
 	}
 }
 
-func TestSharedNodeStripsRoutesAndExitNodeCapabilities(t *testing.T) {
+func TestSharedNodeKeepsRoutesAndExitNodeCapabilities(t *testing.T) {
 	t.Parallel()
 
 	app := newShareInviteTestMirage(t)
@@ -446,14 +446,14 @@ func TestSharedNodeStripsRoutesAndExitNodeCapabilities(t *testing.T) {
 		t.Fatalf("expected owned node allowed IPs to include exit routes, got %v", ownedNode.AllowedIPs)
 	}
 
-	if containsPrefix(sharedNode.AllowedIPs, subnetPrefix) {
-		t.Fatalf("did not expect shared node allowed IPs to include subnet route, got %v", sharedNode.AllowedIPs)
+	if !containsPrefix(sharedNode.AllowedIPs, subnetPrefix) {
+		t.Fatalf("expected shared node allowed IPs to include subnet route, got %v", sharedNode.AllowedIPs)
 	}
-	if containsPrefix(sharedNode.AllowedIPs, ExitRouteV4) || containsPrefix(sharedNode.AllowedIPs, ExitRouteV6) {
-		t.Fatalf("did not expect shared node allowed IPs to include exit routes, got %v", sharedNode.AllowedIPs)
+	if !containsPrefix(sharedNode.AllowedIPs, ExitRouteV4) || !containsPrefix(sharedNode.AllowedIPs, ExitRouteV6) {
+		t.Fatalf("expected shared node allowed IPs to include exit routes, got %v", sharedNode.AllowedIPs)
 	}
-	if len(sharedNode.PrimaryRoutes) != 0 {
-		t.Fatalf("expected shared node primary routes to be empty, got %v", sharedNode.PrimaryRoutes)
+	if !containsPrefix(sharedNode.PrimaryRoutes, subnetPrefix) {
+		t.Fatalf("expected shared node primary routes to include subnet route, got %v", sharedNode.PrimaryRoutes)
 	}
 	selfPrefix := netip.PrefixFrom(machine.IPAddresses[0], machine.IPAddresses[0].BitLen())
 	if !containsPrefix(sharedNode.AllowedIPs, selfPrefix) {
@@ -513,6 +513,16 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
 	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
 	targetMachine := createTestMachine(t, app, targetUser, "target-node", "100.64.0.2")
+	sourceMachine.HostInfo = HostInfo{
+		Hostname:    sourceMachine.Hostname,
+		RoutableIPs: []netip.Prefix{mustPrefix(t, "10.10.0.0/24"), ExitRouteV4, ExitRouteV6},
+	}
+	if err := app.db.Save(sourceMachine).Error; err != nil {
+		t.Fatalf("Save(sourceMachine hostinfo): %v", err)
+	}
+	createTestRoute(t, app, sourceMachine, "10.10.0.0/24", true, true)
+	createTestRoute(t, app, sourceMachine, "0.0.0.0/0", true, false)
+	createTestRoute(t, app, sourceMachine, "::/0", true, false)
 
 	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
 	if err != nil {
@@ -551,6 +561,16 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	}
 	targetMachine.User.Organization = *targetOrg
 
+	sourceOrg, err := app.GetOrgnaizationByID(sourceUser.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(source): %v", err)
+	}
+	sourceAllowSelf, err := app.UpdateACLRulesOfOrg(sourceOrg, sourceUser, sourceMachine)
+	if err != nil {
+		t.Fatalf("UpdateACLRulesOfOrg(source): %v", err)
+	}
+	sourceMachine.User.Organization = *sourceOrg
+
 	peers, invalidNodeIDs, err := app.getPeers(targetMachine, allowSelf)
 	if err != nil {
 		t.Fatalf("getPeers(): %v", err)
@@ -563,6 +583,34 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	}
 	if !peers[0].Shared {
 		t.Fatal("expected ACL peer to be marked shared")
+	}
+
+	sourcePeers, sourceInvalidNodeIDs, err := app.getPeers(sourceMachine, sourceAllowSelf)
+	if err != nil {
+		t.Fatalf("getPeers(source): %v", err)
+	}
+	if len(sourceInvalidNodeIDs) != 0 {
+		t.Fatalf("expected no invalid source node IDs, got %v", sourceInvalidNodeIDs)
+	}
+	if len(sourcePeers) != 1 || sourcePeers[0].ID != targetMachine.ID {
+		t.Fatalf("expected one connected target peer via ACL visibility, got %+v", sourcePeers)
+	}
+	if sourcePeers[0].Shared {
+		t.Fatalf("expected connected target peer to stay owned, got %+v", sourcePeers[0])
+	}
+
+	sharedNode, err := app.toNode(peers[0], peers[0].Shared)
+	if err != nil {
+		t.Fatalf("toNode(shared peer): %v", err)
+	}
+	if !containsPrefix(sharedNode.AllowedIPs, mustPrefix(t, "10.10.0.0/24")) {
+		t.Fatalf("expected shared peer allowed IPs to include subnet route, got %v", sharedNode.AllowedIPs)
+	}
+	if !containsPrefix(sharedNode.AllowedIPs, ExitRouteV4) || !containsPrefix(sharedNode.AllowedIPs, ExitRouteV6) {
+		t.Fatalf("expected shared peer allowed IPs to include exit routes, got %v", sharedNode.AllowedIPs)
+	}
+	if !containsPrefix(sharedNode.PrimaryRoutes, mustPrefix(t, "10.10.0.0/24")) {
+		t.Fatalf("expected shared peer primary routes to include subnet route, got %v", sharedNode.PrimaryRoutes)
 	}
 }
 
@@ -680,4 +728,3 @@ func TestListExternalSharedUsersByOrgIDDeduplicatesSourceUsers(t *testing.T) {
 		t.Fatalf("expected one deduplicated external user, got %+v", externalUsers)
 	}
 }
-
