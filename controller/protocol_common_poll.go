@@ -244,6 +244,9 @@ func (h *Mirage) pollNetMapStream(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	sessionID := h.startPollSession(machine.ID)
+	defer h.finishPollSession(machine.ID, sessionID)
+
 	go h.scheduledPollWorker(
 		ctx,
 		updateChan,
@@ -265,6 +268,9 @@ func (h *Mirage) pollNetMapStream(
 	for {
 		select {
 		case data := <-pollDataChan:
+			if h.shouldStopStalePollSession(machine, sessionID, "pollData") {
+				return
+			}
 			log.Trace().
 				Str("handler", "PollNetMapStream").
 				Str("machine", machine.Hostname).
@@ -341,6 +347,9 @@ func (h *Mirage) pollNetMapStream(
 				Msg("Machine entry in database updated successfully after sending data")
 
 		case data := <-keepAliveChan:
+			if h.shouldStopStalePollSession(machine, sessionID, "keepAlive") {
+				return
+			}
 			log.Trace().
 				Str("handler", "PollNetMapStream").
 				Str("machine", machine.Hostname).
@@ -414,6 +423,9 @@ func (h *Mirage) pollNetMapStream(
 				Msg("Machine updated successfully after sending keep alive")
 
 		case <-updateChan:
+			if h.shouldStopStalePollSession(machine, sessionID, "update") {
+				return
+			}
 			log.Trace().
 				Str("handler", "PollNetMapStream").
 				Str("machine", machine.Hostname).
@@ -528,9 +540,12 @@ func (h *Mirage) pollNetMapStream(
 				Str("handler", "PollNetMapStream").
 				Str("machine", machine.Hostname).
 				Msg("The client has closed the connection")
-				// TODO: Abstract away all the database calls, this can cause race conditions
-				// when an outdated machine object is kept alive, e.g. db is update from
-				// command line, but then overwritten.
+			if h.shouldStopStalePollSession(machine, sessionID, "done") {
+				return
+			}
+			// TODO: Abstract away all the database calls, this can cause race conditions
+			// when an outdated machine object is kept alive, e.g. db is update from
+			// command line, but then overwritten.
 			err := h.UpdateMachineFromDatabase(machine)
 			if err != nil {
 				log.Error().
@@ -576,6 +591,20 @@ func (h *Mirage) pollNetMapStream(
 			return
 		}
 	}
+}
+
+func (h *Mirage) shouldStopStalePollSession(machine *Machine, sessionID uint64, channel string) bool {
+	if h.isCurrentPollSession(machine.ID, sessionID) {
+		return false
+	}
+
+	log.Debug().
+		Str("handler", "PollNetMapStream").
+		Str("machine", machine.Hostname).
+		Str("channel", channel).
+		Msg("Stopping stale poll session after replacement")
+
+	return true
 }
 
 func (h *Mirage) scheduledPollWorker(

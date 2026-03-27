@@ -55,6 +55,190 @@ func TestExpandAliasAutogroupMemberSkipsTaggedMachines(t *testing.T) {
 	}
 }
 
+func TestExpandAliasAutogroupMemberSkipsRequestTaggedMachines(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	machines := []Machine{
+		{
+			User:        User{Name: "alice"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.1")},
+		},
+		{
+			User:        User{Name: "alice"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.2")},
+			HostInfo: HostInfo{
+				RequestTags: []string{"tag:prod"},
+			},
+		},
+	}
+	policy := ACLPolicy{
+		TagOwners: TagOwners{
+			"tag:prod": []string{"alice"},
+		},
+	}
+
+	got, err := h.expandAlias(false, machines, 0, policy, AutoGroupMember, false)
+	if err != nil {
+		t.Fatalf("expandAlias returned error: %v", err)
+	}
+
+	want := []string{"100.64.0.1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected autogroup:member expansion: got %v want %v", got, want)
+	}
+}
+
+func TestExpandAliasAutogroupSelfSkipsRequestTaggedMachines(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	user := createTestUser(t, app, "alice@example.com", "Alice", "acl-org", "Mirage")
+	untagged := createTestMachine(t, app, user, "alice-laptop", "100.64.0.1")
+	tagged := createTestMachine(t, app, user, "alice-server", "100.64.0.2")
+	tagged.HostInfo = HostInfo{
+		Hostname:    tagged.Hostname,
+		RequestTags: []string{"tag:prod"},
+	}
+	if err := app.db.Save(tagged).Error; err != nil {
+		t.Fatalf("Save(tagged): %v", err)
+	}
+
+	policy := ACLPolicy{
+		TagOwners: TagOwners{
+			"tag:prod": []string{user.Name},
+		},
+	}
+
+	got, err := app.expandAlias(false, nil, user.ID, policy, AutoGroupSelf, false)
+	if err != nil {
+		t.Fatalf("expandAlias returned error: %v", err)
+	}
+
+	want := []string{untagged.IPAddresses.ToStringSlice()[0]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected autogroup:self expansion: got %v want %v", got, want)
+	}
+}
+
+func TestExpandAliasAutogroupTaggedIncludesTaggedMachines(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	machines := []Machine{
+		{
+			User:        User{Name: "alice"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.1")},
+		},
+		{
+			User:        User{Name: "alice"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.2")},
+			HostInfo: HostInfo{
+				RequestTags: []string{"tag:prod"},
+			},
+		},
+		{
+			User:        User{Name: "bob"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.3")},
+			ForcedTags:  StringList{"tag:db"},
+		},
+		{
+			User:        User{Name: "carol"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.4")},
+			HostInfo: HostInfo{
+				RequestTags: []string{"tag:prod"},
+			},
+		},
+		{
+			User:        User{Name: "dave"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.5")},
+			HostInfo: HostInfo{
+				RequestTags: []string{"tag:ghost"},
+			},
+		},
+	}
+	policy := ACLPolicy{
+		TagOwners: TagOwners{
+			"tag:prod": []string{"alice"},
+			"tag:db":   []string{"bob"},
+		},
+	}
+
+	got, err := h.expandAlias(false, machines, 0, policy, AutoGroupTagged, false)
+	if err != nil {
+		t.Fatalf("expandAlias returned error: %v", err)
+	}
+
+	want := []string{"100.64.0.2", "100.64.0.3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected autogroup:tagged expansion: got %v want %v", got, want)
+	}
+}
+
+func TestGenerateACLRulesExpandsAutogroupTaggedSource(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	machines := []Machine{
+		{
+			User:        User{Name: "alice"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.1")},
+		},
+		{
+			User:        User{Name: "alice"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.2")},
+			HostInfo: HostInfo{
+				RequestTags: []string{"tag:prod"},
+			},
+		},
+		{
+			User:        User{Name: "bob"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.3")},
+			ForcedTags:  StringList{"tag:db"},
+		},
+		{
+			User:        User{Name: "carol"},
+			IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.4")},
+			HostInfo: HostInfo{
+				RequestTags: []string{"tag:ghost"},
+			},
+		},
+	}
+	policy := ACLPolicy{
+		TagOwners: TagOwners{
+			"tag:prod": []string{"alice"},
+			"tag:db":   []string{"bob"},
+		},
+		ACLs: []ACL{{
+			Action:       "accept",
+			Sources:      []string{AutoGroupTagged},
+			Destinations: []string{"*:*"},
+		}},
+	}
+
+	got, _, err := h.generateACLRules(machines, &User{}, policy, false)
+	if err != nil {
+		t.Fatalf("generateACLRules returned error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one filter rule, got %d", len(got))
+	}
+
+	want := tailcfg.FilterRule{
+		SrcIPs: []string{"100.64.0.2", "100.64.0.3"},
+		DstPorts: []tailcfg.NetPortRange{{
+			IP:    "*",
+			Ports: tailcfg.PortRangeAny,
+		}},
+	}
+	if !reflect.DeepEqual(got[0].SrcIPs, want.SrcIPs) {
+		t.Fatalf("unexpected source IPs: got %v want %v", got[0].SrcIPs, want.SrcIPs)
+	}
+	if !reflect.DeepEqual(got[0].DstPorts, want.DstPorts) {
+		t.Fatalf("unexpected destination ports: got %v want %v", got[0].DstPorts, want.DstPorts)
+	}
+}
+
 func TestGenerateACLRulesRejectsInvalidAutogroupSelfSource(t *testing.T) {
 	t.Parallel()
 
@@ -360,7 +544,7 @@ func TestReduceFilterRulesKeepsSubnetDestinationsForRouter(t *testing.T) {
 	rules := []tailcfg.FilterRule{{
 		SrcIPs: []string{"100.64.0.1"},
 		DstPorts: []tailcfg.NetPortRange{{
-			IP: "10.10.0.5",
+			IP:    "10.10.0.5",
 			Ports: tailcfg.PortRangeAny,
 		}},
 	}}
@@ -781,6 +965,176 @@ func TestGenerateSSHRulesWithPolicyRejectsInvalidDestinationAlias(t *testing.T) 
 	}}, &machines[1])
 	if !errors.Is(err, errInvalidGroup) {
 		t.Fatalf("expected invalid group error, got %v", err)
+	}
+}
+
+func TestGenerateSSHRulesWithPolicyAcceptsAutogroupTaggedAlias(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	machines := sshTestMachines(t)
+	policy := sshTestPolicy()
+	rule := SSH{
+		Action:       "accept",
+		Sources:      []string{AutoGroupTagged},
+		Destinations: []string{"tag:prod"},
+		Users:        []string{"root"},
+	}
+
+	if err := h.validateSSHRulesForPolicy(machines, machines[0].User.ID, policy, []SSH{rule}); err != nil {
+		t.Fatalf("validateSSHRulesForPolicy returned error: %v", err)
+	}
+
+	rules, err := h.generateSSHRulesWithPolicy(machines, machines[0].User.ID, policy, []SSH{rule}, &machines[1])
+	if err != nil {
+		t.Fatalf("generateSSHRulesWithPolicy returned error: %v", err)
+	}
+	if sshRulesNone(rules) {
+		t.Fatalf("expected ssh rule to match autogroup:tagged source")
+	}
+	if !sshRuleHasPrincipals(sshRulesGet(rules, 0), []string{"100.64.0.2"}) {
+		t.Fatalf("unexpected principals for autogroup:tagged source: %v", sshRulePrincipalList(sshRulesGet(rules, 0)))
+	}
+}
+
+func TestGenerateSSHRulesWithPolicyRejectsAutogroupTaggedSourceToUsernameDestination(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	machines := sshTestMachines(t)
+	policy := sshTestPolicy()
+	rule := SSH{
+		Action:       "accept",
+		Sources:      []string{AutoGroupTagged},
+		Destinations: []string{"alice"},
+		Users:        []string{"root"},
+	}
+
+	err := h.validateSSHRulesForPolicy(machines, machines[0].User.ID, policy, []SSH{rule})
+	if err == nil {
+		t.Fatalf("expected validation error for autogroup:tagged source to username destination")
+	}
+}
+
+func TestGenerateSSHRulesWithPolicyRejectsAutogroupTaggedSourceToAutoGroupSelfDestination(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	machines := sshTestMachines(t)
+	policy := sshTestPolicy()
+	rule := SSH{
+		Action:       "accept",
+		Sources:      []string{AutoGroupTagged},
+		Destinations: []string{AutoGroupSelf},
+		Users:        []string{"root"},
+	}
+
+	err := h.validateSSHRulesForPolicy(machines, machines[0].User.ID, policy, []SSH{rule})
+	if err == nil {
+		t.Fatalf("expected validation error for autogroup:tagged source to autogroup:self destination")
+	}
+}
+
+func TestGenerateSSHRulesWithPolicyRejectsAutogroupTaggedSourceToAutoGroupMemberDestination(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	machines := sshTestMachines(t)
+	policy := sshTestPolicy()
+	rule := SSH{
+		Action:       "accept",
+		Sources:      []string{AutoGroupTagged},
+		Destinations: []string{AutoGroupMember},
+		Users:        []string{"root"},
+	}
+
+	err := h.validateSSHRulesForPolicy(machines, machines[0].User.ID, policy, []SSH{rule})
+	if err == nil {
+		t.Fatalf("expected validation error for autogroup:tagged source to autogroup:member destination")
+	}
+}
+
+func TestGenerateSSHRulesWithPolicyRejectsTagSourceRestrictedDestinations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		dst  string
+	}{
+		{name: "username", dst: "alice"},
+		{name: "autogroup self", dst: AutoGroupSelf},
+		{name: "autogroup member", dst: AutoGroupMember},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := &Mirage{cfg: &Config{}}
+			machines := sshTestMachines(t)
+			policy := sshTestPolicy()
+			rule := SSH{
+				Action:       "accept",
+				Sources:      []string{"tag:prod"},
+				Destinations: []string{tt.dst},
+				Users:        []string{"root"},
+			}
+
+			err := h.validateSSHRulesForPolicy(machines, machines[0].User.ID, policy, []SSH{rule})
+			if err == nil {
+				t.Fatalf("expected validation error for tag source to destination %q", tt.dst)
+			}
+		})
+	}
+}
+
+func TestGenerateSSHRulesWithPolicyMatchesAutogroupTaggedDestinationOnlyForTaggedTargets(t *testing.T) {
+	t.Parallel()
+
+	h := &Mirage{cfg: &Config{}}
+	machines := sshTestMachines(t)
+	machines = append(machines, Machine{
+		ID:          14,
+		UserID:      machines[0].User.ID,
+		User:        machines[0].User,
+		GivenName:   "tagged-node",
+		Hostname:    "tagged-node",
+		IPAddresses: MachineAddresses{mustAddr(t, "100.64.0.4")},
+		HostInfo: HostInfo{
+			RequestTags: []string{"tag:prod"},
+		},
+		LastSuccessfulUpdate: machines[0].LastSuccessfulUpdate,
+	})
+	policy := sshTestPolicy()
+	rule := SSH{
+		Action:       "accept",
+		Sources:      []string{"alice"},
+		Destinations: []string{AutoGroupTagged},
+		Users:        []string{"root"},
+	}
+
+	if err := h.validateSSHRulesForPolicy(machines, machines[0].User.ID, policy, []SSH{rule}); err != nil {
+		t.Fatalf("validateSSHRulesForPolicy returned error: %v", err)
+	}
+
+	rules, err := h.generateSSHRulesWithPolicy(machines, machines[0].User.ID, policy, []SSH{rule}, &machines[3])
+	if err != nil {
+		t.Fatalf("generateSSHRulesWithPolicy(tagged target) returned error: %v", err)
+	}
+	if sshRulesNone(rules) {
+		t.Fatalf("expected ssh rule to match autogroup:tagged destination")
+	}
+	if !sshRuleHasPrincipals(sshRulesGet(rules, 0), []string{"100.64.0.1"}) {
+		t.Fatalf("unexpected principals for autogroup:tagged destination: %v", sshRulePrincipalList(sshRulesGet(rules, 0)))
+	}
+
+	rules, err = h.generateSSHRulesWithPolicy(machines, machines[0].User.ID, policy, []SSH{rule}, &machines[0])
+	if err != nil {
+		t.Fatalf("generateSSHRulesWithPolicy(untagged target) returned error: %v", err)
+	}
+	if sshRulesAny(rules) {
+		t.Fatalf("did not expect autogroup:tagged destination to match untagged target, got %+v", rules)
 	}
 }
 

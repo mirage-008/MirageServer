@@ -45,6 +45,19 @@ const (
 	smsCacheCleanup    = time.Minute * 5
 )
 
+const minimumEphemeralNodeInactivityTimeout = keepAliveInterval + 5*time.Second
+
+func normalizeEphemeralNodeInactivityTimeout(timeout time.Duration) time.Duration {
+	switch {
+	case timeout <= 0:
+		return EphemeralNodeInactivityTimeout
+	case timeout < minimumEphemeralNodeInactivityTimeout:
+		return minimumEphemeralNodeInactivityTimeout
+	default:
+		return timeout
+	}
+}
+
 // Mirage represents the base app of the service.
 type Mirage struct {
 	cfg    *Config
@@ -82,9 +95,48 @@ type Mirage struct {
 	longPollChanPool map[string]chan string
 
 	ipAllocationMutex sync.Mutex
+	pollSessionMu     sync.Mutex
+	pollSessionSeq    uint64
+	pollSessions      map[int64]uint64
 
 	shutdownChan       chan struct{}
 	pollNetMapStreamWG sync.WaitGroup
+}
+
+func (h *Mirage) startPollSession(machineID int64) uint64 {
+	h.pollSessionMu.Lock()
+	defer h.pollSessionMu.Unlock()
+
+	if h.pollSessions == nil {
+		h.pollSessions = make(map[int64]uint64)
+	}
+
+	h.pollSessionSeq++
+	sessionID := h.pollSessionSeq
+	h.pollSessions[machineID] = sessionID
+
+	return sessionID
+}
+
+func (h *Mirage) isCurrentPollSession(machineID int64, sessionID uint64) bool {
+	h.pollSessionMu.Lock()
+	defer h.pollSessionMu.Unlock()
+
+	currentSessionID, ok := h.pollSessions[machineID]
+	return ok && currentSessionID == sessionID
+}
+
+func (h *Mirage) finishPollSession(machineID int64, sessionID uint64) bool {
+	h.pollSessionMu.Lock()
+	defer h.pollSessionMu.Unlock()
+
+	currentSessionID, ok := h.pollSessions[machineID]
+	if !ok || currentSessionID != sessionID {
+		return false
+	}
+
+	delete(h.pollSessions, machineID)
+	return true
 }
 
 func NewMirage(cfg *Config, db *gorm.DB) (*Mirage, error) {
@@ -127,6 +179,7 @@ func NewMirage(cfg *Config, db *gorm.DB) (*Mirage, error) {
 		machineControlCodeCache: machineControlCodeCache,
 		tcdCache:                cache.New(0, 0),
 		longPollChanPool:        longPollChanPool,
+		pollSessions:            make(map[int64]uint64),
 		smsCodeCache:            smsCodeCache,
 		shutdownChan:            make(chan struct{}),
 		pollNetMapStreamWG:      sync.WaitGroup{},
@@ -208,10 +261,14 @@ func (h *Mirage) expireEphemeralNodesWorker() {
 		}
 
 		expiredFound := false
+		timeout := normalizeEphemeralNodeInactivityTimeout(0)
+		if h.cfg != nil {
+			timeout = normalizeEphemeralNodeInactivityTimeout(h.cfg.EphemeralNodeInactivityTimeout)
+		}
 		for _, machine := range machines {
 			if machine.isEphemeral() && machine.LastSeen != nil &&
 				time.Now().
-					After(machine.LastSeen.Add(EphemeralNodeInactivityTimeout)) {
+					After(machine.LastSeen.Add(timeout)) {
 				expiredFound = true
 				log.Info().
 					Str("machine", machine.Hostname).

@@ -16,14 +16,15 @@ type SysConfig struct {
 	gorm.Model
 	//	AdminCredential AdminCredential `gorm:"not null"`
 
-	ServerURL             string
-	ServerKey             string
-	Addr                  string   `gorm:"default:':8080'"`               // default port
-	Mip4                  IPPrefix `gorm:"default:'100.64.0.0/10'"`       // default prefix
-	Mip6                  IPPrefix `gorm:"default:'fd7a:115c:a1e0::/48'"` // default prefix
-	Basedomain            string   `gorm:"default:'mira.net'"`            // default domain
-	DerpUrl               string   `gorm:"default:'https://controlplane.tailscale.com/derpmap/default'"`
-	RouteAccessDueMachine bool     `gorm:"default:false"`
+	ServerURL                      string
+	ServerKey                      string
+	Addr                           string   `gorm:"default:':8080'"`               // default port
+	Mip4                           IPPrefix `gorm:"default:'100.64.0.0/10'"`       // default prefix
+	Mip6                           IPPrefix `gorm:"default:'fd7a:115c:a1e0::/48'"` // default prefix
+	Basedomain                     string   `gorm:"default:'mira.net'"`            // default domain
+	DerpUrl                        string   `gorm:"default:'https://controlplane.tailscale.com/derpmap/default'"`
+	EphemeralNodeInactivityTimeout time.Duration
+	RouteAccessDueMachine          bool `gorm:"default:false"`
 
 	EsUrl string
 	EsKey string
@@ -53,13 +54,14 @@ type SysConfig struct {
 }
 
 type GeneralCfg struct {
-	SrvAddr               string `json:"srvaddr"`
-	ServerURL             string `json:"server_url"`
-	MIPV4                 string `json:"mipv4"`
-	MIPV6                 string `json:"mipv6"`
-	BaseDomain            string `json:"basedomain"`
-	DERPURL               string `json:"derp_url"`
-	RouteAccessDueMachine bool   `json:"route_access_due_machine"`
+	SrvAddr                        string        `json:"srvaddr"`
+	ServerURL                      string        `json:"server_url"`
+	MIPV4                          string        `json:"mipv4"`
+	MIPV6                          string        `json:"mipv6"`
+	BaseDomain                     string        `json:"basedomain"`
+	DERPURL                        string        `json:"derp_url"`
+	EphemeralNodeInactivityTimeout time.Duration `json:"ephemeral_node_inactivity_timeout"`
+	RouteAccessDueMachine          bool          `json:"route_access_due_machine"`
 
 	ESURL string `json:"es_url"`
 	ESKey string `json:"es_key"`
@@ -82,13 +84,14 @@ type GeneralCfg struct {
 
 func (s *SysConfig) toGeneralCfg() GeneralCfg {
 	return GeneralCfg{
-		SrvAddr:               s.Addr,
-		ServerURL:             s.ServerURL,
-		MIPV4:                 s.Mip4.String(),
-		MIPV6:                 s.Mip6.String(),
-		BaseDomain:            s.Basedomain,
-		DERPURL:               normalizeDERPMapURL(s.DerpUrl),
-		RouteAccessDueMachine: s.RouteAccessDueMachine,
+		SrvAddr:                        s.Addr,
+		ServerURL:                      s.ServerURL,
+		MIPV4:                          s.Mip4.String(),
+		MIPV6:                          s.Mip6.String(),
+		BaseDomain:                     s.Basedomain,
+		DERPURL:                        normalizeDERPMapURL(s.DerpUrl),
+		EphemeralNodeInactivityTimeout: normalizeEphemeralNodeInactivityTimeout(s.EphemeralNodeInactivityTimeout),
+		RouteAccessDueMachine:          s.RouteAccessDueMachine,
 
 		ESURL: s.EsUrl,
 		ESKey: s.EsKey,
@@ -161,12 +164,13 @@ func (s *SysConfig) toSrvConfig() (*Config, error) {
 	}
 
 	return &Config{
-		ServerURL:              s.ServerURL,
-		Addr:                   s.Addr,
-		IPPrefixes:             []netip.Prefix{netip.Prefix(s.Mip4), netip.Prefix(s.Mip6)},
-		BaseDomain:             s.Basedomain,
-		DERPURL:                normalizeDERPMapURL(s.DerpUrl),
-		AllowRouteDueToMachine: s.RouteAccessDueMachine,
+		ServerURL:                      s.ServerURL,
+		Addr:                           s.Addr,
+		IPPrefixes:                     []netip.Prefix{netip.Prefix(s.Mip4), netip.Prefix(s.Mip6)},
+		BaseDomain:                     s.Basedomain,
+		DERPURL:                        normalizeDERPMapURL(s.DerpUrl),
+		EphemeralNodeInactivityTimeout: normalizeEphemeralNodeInactivityTimeout(s.EphemeralNodeInactivityTimeout),
+		AllowRouteDueToMachine:         s.RouteAccessDueMachine,
 
 		ESURL: s.EsUrl,
 		ESKey: s.EsKey,

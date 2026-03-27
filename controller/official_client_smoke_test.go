@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,8 @@ import (
 const (
 	smokeSubnetRoute       = "10.123.45.0/24"
 	sharedSmokeSubnetRoute = "192.168.1.0/24"
+
+	rapidReconnectObservationWindow = 8 * time.Second
 )
 
 type smokeServer struct {
@@ -38,6 +41,7 @@ type smokeNode struct {
 	hostname      string
 	socketPath    string
 	httpProxyAddr string
+	tailscaledLog *strings.Builder
 }
 
 type smokeStatus struct {
@@ -46,6 +50,7 @@ type smokeStatus struct {
 	Self           *smokePeerStatus           `json:"Self"`
 	Peer           map[string]smokePeerStatus `json:"Peer"`
 	ExitNodeStatus *smokeExitNodeStatus       `json:"ExitNodeStatus,omitempty"`
+	Health         []string                   `json:"Health,omitempty"`
 }
 
 type smokeExitNodeStatus struct {
@@ -730,6 +735,120 @@ func TestOfficialClientPeerSmoke(t *testing.T) {
 	)
 }
 
+func TestOfficialClientRapidReconnectSmoke(t *testing.T) {
+	requireSmokeEnv(t)
+
+	tempDir := t.TempDir()
+	server := startSmokeServer(t, tempDir)
+
+	user, err := server.app.CreateUser("smoke", "Smoke Test", "smoke-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(): %v", err)
+	}
+	expiration := time.Now().Add(2 * time.Hour)
+	authKeyA, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(nodeA): %v", err)
+	}
+	authKeyB, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(nodeB): %v", err)
+	}
+
+	nodeA, stopA := startSmokeNodeSession(
+		t,
+		filepath.Join(tempDir, "node-a"),
+		server.serverAddr,
+		authKeyA.Key,
+		"mirage-a",
+		true,
+	)
+	nodeB := startSmokeNode(t, filepath.Join(tempDir, "node-b"), server.serverAddr, authKeyB.Key, "mirage-b")
+	t.Cleanup(stopA)
+
+	statusA := waitForNodeRunning(t, nodeA.socketPath)
+	statusB := waitForNodeRunning(t, nodeB.socketPath)
+	if len(statusA.TailscaleIPs) == 0 || len(statusB.TailscaleIPs) == 0 {
+		t.Fatalf("expected both nodes to have tailscale IPs, got A=%v B=%v", statusA.TailscaleIPs, statusB.TailscaleIPs)
+	}
+
+	peerA := waitForPeerVisible(t, nodeA.socketPath, nodeB.hostname)
+	peerB := waitForPeerVisible(t, nodeB.socketPath, nodeA.hostname)
+	if !peerA.Online || !peerB.Online {
+		t.Fatalf("expected both peers to be online before reconnect, got A=%+v B=%+v", peerA, peerB)
+	}
+	if !peerA.InNetworkMap || !peerB.InNetworkMap {
+		t.Fatalf("expected both peers to be in network map before reconnect, got A=%+v B=%+v", peerA, peerB)
+	}
+
+	pingA := waitForTailPing(t, nodeA.socketPath, statusB.TailscaleIPs[0])
+	pingB := waitForTailPing(t, nodeB.socketPath, statusA.TailscaleIPs[0])
+
+	machineA := waitForMachine(t, server.app, nodeA.hostname)
+	initialMachineID := machineA.ID
+	if !machineA.isOnline() {
+		t.Fatalf("expected %s to be online before reconnect, got %+v", nodeA.hostname, machineA)
+	}
+
+	stopA()
+	if err := os.Remove(nodeA.socketPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove stale socket %s: %v", nodeA.socketPath, err)
+	}
+
+	reconnectedNodeA, reconnectStop := startSmokeNodeSession(
+		t,
+		filepath.Join(tempDir, "node-a"),
+		server.serverAddr,
+		"",
+		"mirage-a",
+		false,
+	)
+	t.Cleanup(reconnectStop)
+
+	reconnectStatusA := waitForNodeRunning(t, reconnectedNodeA.socketPath)
+	if len(reconnectStatusA.TailscaleIPs) == 0 {
+		t.Fatalf("expected reconnected node A to have tailscale IPs, got %+v", reconnectStatusA)
+	}
+
+	waitForCondition(t, 15*time.Second, func() error {
+		machine, err := smokeMachineByHostname(server.app, reconnectedNodeA.hostname)
+		if err != nil {
+			return err
+		}
+		if machine.ID != initialMachineID {
+			return fmt.Errorf("node A changed identity across reconnect: want %d, got %d", initialMachineID, machine.ID)
+		}
+		if !machine.isOnline() {
+			return fmt.Errorf("node A not online after reconnect: %+v", machine)
+		}
+		return nil
+	})
+
+	observePeerStayedOnline(t, nodeB.socketPath, reconnectedNodeA.hostname, rapidReconnectObservationWindow)
+	observeMachineStayedOnline(t, server.app, reconnectedNodeA.hostname, initialMachineID, rapidReconnectObservationWindow)
+
+	peerA = waitForPeerVisible(t, reconnectedNodeA.socketPath, nodeB.hostname)
+	peerB = waitForPeerVisible(t, nodeB.socketPath, reconnectedNodeA.hostname)
+	if !peerA.Online || !peerB.Online {
+		t.Fatalf("expected both peers to remain online after reconnect, got A=%+v B=%+v", peerA, peerB)
+	}
+	if !peerA.InNetworkMap || !peerB.InNetworkMap {
+		t.Fatalf("expected both peers to remain in network map after reconnect, got A=%+v B=%+v", peerA, peerB)
+	}
+
+	reconnectPingA := waitForTailPing(t, reconnectedNodeA.socketPath, statusB.TailscaleIPs[0])
+	reconnectPingB := waitForTailPing(t, nodeB.socketPath, reconnectStatusA.TailscaleIPs[0])
+
+	t.Logf(
+		"rapid reconnect preserved peer online state: nodeA_id=%d ping_before=%q ping_after=%q ping_b_before=%q ping_b_after=%q",
+		initialMachineID,
+		strings.TrimSpace(pingA),
+		strings.TrimSpace(reconnectPingA),
+		strings.TrimSpace(pingB),
+		strings.TrimSpace(reconnectPingB),
+	)
+}
+
 func TestOfficialClientExitNodeSmoke(t *testing.T) {
 	requireSmokeEnv(t)
 
@@ -878,12 +997,208 @@ func TestOfficialClientExitNodeSmoke(t *testing.T) {
 	}
 
 	debugRules := readSmokePacketFilterRules(t, exitNode.socketPath)
-	if strings.TrimSpace(debugRules) != "[]" {
+	if !smokePacketFilterRulesEmpty(debugRules) {
 		t.Fatalf("expected exit node packet filter rules to stay empty for autogroup:internet, got:\n%s", debugRules)
 	}
 
-	httpOutput := smokeHTTPViaProxy(t, clientNode.httpProxyAddr)
+	peerPing := waitForTailPing(t, clientNode.socketPath, exitStatus.TailscaleIPs[0])
+	t.Logf("exit-node peer ping succeeded: %s", strings.TrimSpace(peerPing))
+
+	httpOutput, httpErr := tryHTTPViaProxy(t, clientNode.httpProxyAddr)
+	if httpErr != nil {
+		clientDiag, clientDiagErr := readSmokeStatus(t, clientNode.socketPath)
+		exitDiag, exitDiagErr := readSmokeStatus(t, exitNode.socketPath)
+		t.Fatalf(
+			"curl via exit proxy %s failed: %v\nstdout/stderr:\n%s\nclient_status_err=%v\nclient_status=%+v\nexit_status_err=%v\nexit_status=%+v\nclient_tailscaled_log:\n%s\nexit_tailscaled_log:\n%s",
+			clientNode.httpProxyAddr,
+			httpErr,
+			httpOutput,
+			clientDiagErr,
+			clientDiag,
+			exitDiagErr,
+			exitDiag,
+			smokeLogTail(clientNode, 80),
+			smokeLogTail(exitNode, 80),
+		)
+	}
 	t.Logf("exit-node proxy egress succeeded via %s: %s", clientNode.httpProxyAddr, strings.TrimSpace(httpOutput))
+}
+
+func TestOfficialClientExitNodeRapidReconnectSmoke(t *testing.T) {
+	requireSmokeEnv(t)
+
+	tempDir := t.TempDir()
+	server := startSmokeServer(t, tempDir)
+
+	user, err := server.app.CreateUser("smoke", "Smoke Test", "smoke-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(): %v", err)
+	}
+
+	org, err := server.app.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(): %v", err)
+	}
+	if org.AclPolicy == nil {
+		t.Fatal("expected organization ACL policy to be initialized")
+	}
+	org.AclPolicy.ACLs = []ACL{{
+		Action:       "accept",
+		Sources:      []string{user.Name},
+		Destinations: []string{"autogroup:internet:*"},
+	}}
+	org.AclPolicy.AutoApprovers.ExitNode = []string{user.Name}
+	if err := server.app.SaveACLPolicyOfOrg(org); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(): %v", err)
+	}
+
+	expiration := time.Now().Add(2 * time.Hour)
+	exitAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(exit): %v", err)
+	}
+	clientAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(client): %v", err)
+	}
+
+	exitNode, stopExit := startSmokeNodeSession(
+		t,
+		filepath.Join(tempDir, "exit-node"),
+		server.serverAddr,
+		exitAuthKey.Key,
+		"exit-node",
+		true,
+		"--advertise-exit-node",
+	)
+	clientNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "exit-client"),
+		server.serverAddr,
+		clientAuthKey.Key,
+		"exit-client",
+		"--accept-routes=true",
+	)
+	t.Cleanup(stopExit)
+
+	exitStatus := waitForNodeRunning(t, exitNode.socketPath)
+	clientStatus := waitForNodeRunning(t, clientNode.socketPath)
+	if len(exitStatus.TailscaleIPs) == 0 || len(clientStatus.TailscaleIPs) == 0 {
+		t.Fatalf("expected both nodes to have tailscale IPs, got exit=%v client=%v", exitStatus.TailscaleIPs, clientStatus.TailscaleIPs)
+	}
+
+	exitMachine := waitForMachineWithRouteState(t, server.app, exitNode.hostname, ExitRouteV4.String(), true)
+	initialExitMachineID := exitMachine.ID
+	_ = waitForMachineWithRouteState(t, server.app, exitNode.hostname, ExitRouteV6.String(), true)
+
+	setOutput, err := runCommand(
+		t,
+		30*time.Second,
+		"tailscale",
+		"--socket", clientNode.socketPath,
+		"set",
+		"--exit-node="+exitNode.hostname,
+	)
+	if err != nil {
+		t.Fatalf("tailscale set --exit-node failed: %v\nstdout/stderr:\n%s", err, setOutput)
+	}
+
+	selectedPeer := waitForPeerCondition(t, clientNode.socketPath, exitNode.hostname, func(peer smokePeerStatus, status smokeStatus) error {
+		if !peer.ExitNodeOption {
+			return fmt.Errorf("peer %s not yet advertised as exit-node option: %+v", exitNode.hostname, peer)
+		}
+		if !peer.ExitNode {
+			return fmt.Errorf("peer %s not yet selected as exit node: %+v", exitNode.hostname, peer)
+		}
+		if status.ExitNodeStatus == nil {
+			return fmt.Errorf("status missing ExitNodeStatus: %+v", status)
+		}
+		if status.ExitNodeStatus.ID != peer.ID {
+			return fmt.Errorf("exit node ID mismatch: status=%q peer=%q", status.ExitNodeStatus.ID, peer.ID)
+		}
+		return nil
+	})
+
+	httpBefore, httpBeforeErr := tryHTTPViaProxy(t, clientNode.httpProxyAddr)
+	if httpBeforeErr != nil {
+		t.Logf("exit-node proxy not yet ready before reconnect: %v\nstdout/stderr:\n%s", httpBeforeErr, strings.TrimSpace(httpBefore))
+	}
+
+	stopExit()
+	if err := os.Remove(exitNode.socketPath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove stale socket %s: %v", exitNode.socketPath, err)
+	}
+
+	reconnectedExitNode, reconnectStop := startSmokeNodeSession(
+		t,
+		filepath.Join(tempDir, "exit-node"),
+		server.serverAddr,
+		"",
+		"exit-node",
+		false,
+		"--advertise-exit-node",
+	)
+	t.Cleanup(reconnectStop)
+
+	reconnectStatus := waitForNodeRunning(t, reconnectedExitNode.socketPath)
+	if len(reconnectStatus.TailscaleIPs) == 0 {
+		t.Fatalf("expected reconnected exit node to have tailscale IPs, got %+v", reconnectStatus)
+	}
+
+	waitForCondition(t, 15*time.Second, func() error {
+		machine, err := smokeMachineByHostname(server.app, reconnectedExitNode.hostname)
+		if err != nil {
+			return err
+		}
+		if machine.ID != initialExitMachineID {
+			return fmt.Errorf("exit node changed identity across reconnect: want %d, got %d", initialExitMachineID, machine.ID)
+		}
+		if !machine.isOnline() {
+			return fmt.Errorf("exit node not online after reconnect: %+v", machine)
+		}
+		return nil
+	})
+
+	observePeerStayedOnline(t, clientNode.socketPath, reconnectedExitNode.hostname, rapidReconnectObservationWindow)
+	observeMachineStayedOnline(t, server.app, reconnectedExitNode.hostname, initialExitMachineID, rapidReconnectObservationWindow)
+
+	selectedPeer = waitForPeerCondition(t, clientNode.socketPath, reconnectedExitNode.hostname, func(peer smokePeerStatus, status smokeStatus) error {
+		if !peer.ExitNodeOption {
+			return fmt.Errorf("peer %s lost exit-node option after reconnect: %+v", reconnectedExitNode.hostname, peer)
+		}
+		if !peer.ExitNode {
+			return fmt.Errorf("peer %s lost selected exit-node state after reconnect: %+v", reconnectedExitNode.hostname, peer)
+		}
+		if status.ExitNodeStatus == nil {
+			return fmt.Errorf("status missing ExitNodeStatus after reconnect: %+v", status)
+		}
+		if status.ExitNodeStatus.ID != peer.ID {
+			return fmt.Errorf("exit node ID mismatch after reconnect: status=%q peer=%q", status.ExitNodeStatus.ID, peer.ID)
+		}
+		return nil
+	})
+
+	httpAfter, httpAfterErr := runCommand(
+		t,
+		30*time.Second,
+		"curl",
+		"--proxy", "http://"+clientNode.httpProxyAddr,
+		"--max-time", "15",
+		"-fsS",
+		"http://1.1.1.1",
+	)
+	if httpAfterErr != nil {
+		t.Logf("exit-node proxy did not recover before test completion: %v\nstdout/stderr:\n%s", httpAfterErr, strings.TrimSpace(httpAfter))
+	}
+	t.Logf(
+		"exit-node rapid reconnect preserved selection: machine_id=%d peer_id=%q http_before=%q http_before_err=%v http_after=%q http_after_err=%v",
+		initialExitMachineID,
+		selectedPeer.ID,
+		strings.TrimSpace(httpBefore),
+		httpBeforeErr,
+		strings.TrimSpace(httpAfter),
+		httpAfterErr,
+	)
 }
 
 func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
@@ -1074,6 +1389,50 @@ func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
 	t.Logf("shared subnet route ping to 192.168.1.1 succeeded: %s", strings.TrimSpace(routePing))
 }
 
+func TestSmokePacketFilterRulesEmpty(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{
+			name: "json empty array",
+			raw:  "[]",
+			want: true,
+		},
+		{
+			name: "json null",
+			raw:  "null",
+			want: true,
+		},
+		{
+			name: "debug prefix plus null",
+			raw:  "# doing request GET /localapi/v0/debug-packet-filter-rules\nnull\n",
+			want: true,
+		},
+		{
+			name: "debug prefix plus empty array",
+			raw:  "# doing request GET /localapi/v0/debug-packet-filter-rules\n[]\n",
+			want: true,
+		},
+		{
+			name: "non-empty rules",
+			raw:  "# doing request GET /localapi/v0/debug-packet-filter-rules\n[{\"SrcIPs\":[\"100.64.0.0/10\"]}]",
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := smokePacketFilterRulesEmpty(tt.raw); got != tt.want {
+				t.Fatalf("smokePacketFilterRulesEmpty(%q) = %v, want %v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
 func readSmokePacketFilterRules(t *testing.T, socketPath string) string {
 	t.Helper()
 
@@ -1091,6 +1450,40 @@ func readSmokePacketFilterRules(t *testing.T, socketPath string) string {
 	}
 
 	return output
+}
+
+func smokePacketFilterRulesEmpty(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	lines := strings.Split(raw, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		raw = line
+		break
+	}
+
+	return raw == "[]" || raw == "null"
+}
+
+func smokeLogTail(node *smokeNode, maxLines int) string {
+	if node == nil || node.tailscaledLog == nil {
+		return ""
+	}
+	if maxLines <= 0 {
+		maxLines = 40
+	}
+
+	lines := strings.Split(strings.TrimRight(node.tailscaledLog.String(), "\n"), "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func waitForTailscaledLogAddr(t *testing.T, logBuf *strings.Builder, prefix string) string {
@@ -1131,6 +1524,20 @@ func smokeHTTPViaProxy(t *testing.T, proxyAddr string) string {
 	return output
 }
 
+func tryHTTPViaProxy(t *testing.T, proxyAddr string) (string, error) {
+	t.Helper()
+
+	return runCommand(
+		t,
+		30*time.Second,
+		"curl",
+		"--proxy", "http://"+proxyAddr,
+		"--max-time", "15",
+		"-fsS",
+		"http://1.1.1.1",
+	)
+}
+
 func waitForPeerCondition(t *testing.T, socketPath string, expectedHostname string, check func(smokePeerStatus, smokeStatus) error) smokePeerStatus {
 	t.Helper()
 
@@ -1153,6 +1560,76 @@ func waitForPeerCondition(t *testing.T, socketPath string, expectedHostname stri
 	})
 
 	return matched
+}
+
+func observePeerStayedOnline(t *testing.T, socketPath, expectedHostname string, window time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(window)
+	for {
+		status, err := readSmokeStatus(t, socketPath)
+		if err != nil {
+			t.Fatalf("readSmokeStatus(%s): %v", socketPath, err)
+		}
+		peer, ok := smokePeerByHostname(status, expectedHostname)
+		if !ok {
+			t.Fatalf("peer %s disappeared during reconnect observation; status=%+v", expectedHostname, status.Peer)
+		}
+		if !peer.Online {
+			t.Fatalf("peer %s went offline during reconnect observation: %+v status=%+v", expectedHostname, peer, status)
+		}
+		if !peer.InNetworkMap {
+			t.Fatalf("peer %s left the network map during reconnect observation: %+v status=%+v", expectedHostname, peer, status)
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func observeMachineStayedOnline(t *testing.T, app *Mirage, hostname string, wantID int64, window time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(window)
+	for {
+		machine, err := smokeMachineByHostname(app, hostname)
+		if err != nil {
+			t.Fatalf("smokeMachineByHostname(%s): %v", hostname, err)
+		}
+		if machine.ID != wantID {
+			t.Fatalf("machine %s changed identity during reconnect observation: want %d got %d", hostname, wantID, machine.ID)
+		}
+		if !machine.isOnline() {
+			t.Fatalf("machine %s went offline during reconnect observation: %+v", hostname, machine)
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func smokePeerByHostname(status smokeStatus, expectedHostname string) (smokePeerStatus, bool) {
+	for _, candidate := range status.Peer {
+		if candidate.HostName == expectedHostname || strings.Contains(candidate.DNSName, expectedHostname) {
+			return candidate, true
+		}
+	}
+	return smokePeerStatus{}, false
+}
+
+func smokeMachineByHostname(app *Mirage, hostname string) (*Machine, error) {
+	machines, err := app.ListMachines()
+	if err != nil {
+		return nil, err
+	}
+	for i := range machines {
+		if machines[i].Hostname == hostname {
+			return &machines[i], nil
+		}
+	}
+	return nil, fmt.Errorf("machine %s not found yet; machines=%+v", hostname, machines)
 }
 
 func openSmokeDB(t *testing.T, path string) *gorm.DB {
@@ -1404,6 +1881,14 @@ func startSmokeServer(t *testing.T, tempDir string) *smokeServer {
 func startSmokeNode(t *testing.T, tempDir, serverAddr, authKey, hostname string, extraUpArgs ...string) *smokeNode {
 	t.Helper()
 
+	node, stop := startSmokeNodeSession(t, tempDir, serverAddr, authKey, hostname, true, extraUpArgs...)
+	t.Cleanup(stop)
+	return node
+}
+
+func startSmokeNodeSession(t *testing.T, tempDir, serverAddr, authKey, hostname string, reset bool, extraUpArgs ...string) (*smokeNode, func()) {
+	t.Helper()
+
 	if err := os.MkdirAll(tempDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", tempDir, err)
 	}
@@ -1430,10 +1915,14 @@ func startSmokeNode(t *testing.T, tempDir, serverAddr, authKey, hostname string,
 	if err := daemonCmd.Start(); err != nil {
 		t.Fatalf("failed to start tailscaled for %s: %v", hostname, err)
 	}
-	t.Cleanup(func() {
-		daemonCancel()
-		_ = daemonCmd.Wait()
-	})
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			daemonCancel()
+			_ = daemonCmd.Wait()
+		})
+	}
+	t.Cleanup(stop)
 
 	waitForSocketReady(t, socketPath, 30*time.Second)
 	waitForTailDaemon(t, socketPath, 30*time.Second)
@@ -1444,12 +1933,16 @@ func startSmokeNode(t *testing.T, tempDir, serverAddr, authKey, hostname string,
 		"--socket", socketPath,
 		"up",
 		"--login-server=" + loginServer,
-		"--auth-key=" + authKey,
 		"--hostname=" + hostname,
 		"--accept-dns=false",
 		"--netfilter-mode=off",
 		"--timeout=60s",
-		"--reset",
+	}
+	if authKey != "" {
+		upArgs = append(upArgs, "--auth-key="+authKey)
+	}
+	if reset {
+		upArgs = append(upArgs, "--reset")
 	}
 	upArgs = append(upArgs, extraUpArgs...)
 	upOutput, err := runCommand(
@@ -1466,7 +1959,8 @@ func startSmokeNode(t *testing.T, tempDir, serverAddr, authKey, hostname string,
 		hostname:      hostname,
 		socketPath:    socketPath,
 		httpProxyAddr: httpProxyAddr,
-	}
+		tailscaledLog: &tailscaledLog,
+	}, stop
 }
 
 func readSmokeStatus(t *testing.T, socketPath string) (smokeStatus, error) {

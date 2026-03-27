@@ -29,6 +29,9 @@ const (
 	errInvalidPortFormat          = Error("invalid port format")
 	errWildcardIsNeeded           = Error("wildcard as port is required for the protocol")
 	errInvalidAutoGroupSelfSource = Error("autogroup:self destination requires sources to be users, groups, wildcard, or autogroup:member only")
+	errSSHAutogroupSelfSource     = Error("autogroup:self destination requires source to contain only users or groups, not tags or autogroup:tagged")
+	errSSHTagSourceToUserDest     = Error("tags in SSH source cannot access user destinations")
+	errSSHTagSourceToMemberDest   = Error("tags in SSH source cannot access autogroup:member")
 )
 
 const (
@@ -47,6 +50,7 @@ const (
 	AutoGroupSelf     = "autogroup:self"
 	AutoGroupOwner    = "autogroup:owner"
 	AutoGroupMember   = "autogroup:member"
+	AutoGroupTagged   = "autogroup:tagged"
 	AutoGroupInternet = "autogroup:internet"
 )
 
@@ -344,7 +348,7 @@ func validateSSHAliasReference(alias string, aclPolicy ACLPolicy, machines []Mac
 	}
 	if strings.HasPrefix(alias, AutoGroupPrefix) {
 		switch alias {
-		case AutoGroupSelf, AutoGroupMember, AutoGroupOwner, AutoGroupInternet:
+		case AutoGroupSelf, AutoGroupMember, AutoGroupOwner, AutoGroupTagged, AutoGroupInternet:
 			return nil
 		default:
 			return fmt.Errorf("SSH 别名无效")
@@ -387,7 +391,65 @@ func validateSSHRuleAliases(rule SSH, aclPolicy ACLPolicy, machines []Machine) e
 		}
 	}
 
+	return validateSSHSourceDestinationCombination(rule, aclPolicy)
+}
+
+func validateSSHSourceDestinationCombination(rule SSH, aclPolicy ACLPolicy) error {
+	srcHasTaggedEntities := false
+	for _, src := range rule.Sources {
+		switch {
+		case strings.HasPrefix(src, "tag:"):
+			srcHasTaggedEntities = true
+		case src == AutoGroupTagged:
+			srcHasTaggedEntities = true
+		}
+		if srcHasTaggedEntities {
+			break
+		}
+	}
+	if !srcHasTaggedEntities {
+		return nil
+	}
+
+	for _, dst := range rule.Destinations {
+		switch {
+		case dst == AutoGroupSelf:
+			return errSSHAutogroupSelfSource
+		case dst == AutoGroupMember:
+			return errSSHTagSourceToMemberDest
+		case isSSHUsernameAlias(dst, aclPolicy):
+			return errSSHTagSourceToUserDest
+		}
+	}
+
 	return nil
+}
+
+func isSSHUsernameAlias(alias string, aclPolicy ACLPolicy) bool {
+	alias = strings.TrimSpace(alias)
+	if alias == "" || alias == "*" {
+		return false
+	}
+	if _, err := netip.ParseAddr(alias); err == nil {
+		return false
+	}
+	if _, err := netip.ParsePrefix(alias); err == nil {
+		return false
+	}
+	if _, ok := aclPolicy.Hosts[alias]; ok {
+		return false
+	}
+	if strings.HasPrefix(alias, AutoGroupPrefix) {
+		return false
+	}
+	if strings.HasPrefix(alias, "group:") {
+		return false
+	}
+	if strings.HasPrefix(alias, "tag:") {
+		return false
+	}
+
+	return !strings.Contains(alias, ":")
 }
 
 func sshRuleValidationMessage(err error) string {
@@ -794,6 +856,9 @@ func (h *Mirage) generateSSHRulesWithPolicy(machines []Machine, userId int64, ac
 	for index, rawRule := range sshACLs {
 		sshACL := normalizeSSHRule(rawRule)
 		if err := validateSSHRuleShape(sshACL); err != nil {
+			return nil, err
+		}
+		if err := validateSSHRuleAliases(sshACL, aclPolicy, machines); err != nil {
 			return nil, err
 		}
 
@@ -1245,7 +1310,7 @@ func (h *Mirage) expandAlias(
 		Str("alias", alias).
 		Msg("Expanding")
 
-	// autogroup
+		// autogroup
 	if strings.HasPrefix(alias, AutoGroupPrefix) {
 		// 处理 autogroup:self
 		if alias == AutoGroupSelf {
@@ -1255,7 +1320,7 @@ func (h *Mirage) expandAlias(
 				return
 			}
 			for _, node := range nodes {
-				if len(node.ForcedTags) > 0 {
+				if machineHasTagIdentity(aclPolicy, node, stripEmailDomain) {
 					continue
 				}
 				ips = append(ips, node.IPAddresses.ToStringSlice()...)
@@ -1265,7 +1330,17 @@ func (h *Mirage) expandAlias(
 			}
 		} else if alias == AutoGroupMember {
 			for _, machine := range machines {
-				if len(machine.ForcedTags) > 0 {
+				if machineHasTagIdentity(aclPolicy, machine, stripEmailDomain) {
+					continue
+				}
+				ips = append(ips, machine.IPAddresses.ToStringSlice()...)
+				if autoAddRoute {
+					ips = append(ips, h.expandMachineRoutes(machine)...)
+				}
+			}
+		} else if alias == AutoGroupTagged {
+			for _, machine := range machines {
+				if !machineHasTagIdentity(aclPolicy, machine, stripEmailDomain) {
 					continue
 				}
 				ips = append(ips, machine.IPAddresses.ToStringSlice()...)
@@ -1411,6 +1486,15 @@ func (h *Mirage) expandAlias(
 	log.Debug().Msgf("No IPs found with the alias %v", alias)
 
 	return
+}
+
+func machineHasTagIdentity(aclPolicy ACLPolicy, machine Machine, stripEmailDomain bool) bool {
+	if len(machine.ForcedTags) > 0 {
+		return true
+	}
+
+	validTags, _ := getTags(&aclPolicy, machine, stripEmailDomain)
+	return len(validTags) > 0
 }
 
 // excludeCorrectlyTaggedNodes will remove from the list of input nodes the ones
