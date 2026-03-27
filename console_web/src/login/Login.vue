@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, watch, ref } from "vue";
+import { computed, onMounted, watch, ref } from "vue";
 import { useGetURLQuery } from "../utils";
 import Register from "./Register.vue";
 import RegisterDone from "./RegisterDone.vue";
@@ -18,6 +18,7 @@ watch(toastShow, () => {
 });
 
 const next_url = useGetURLQuery("next_url");
+const wantRegister = useGetURLQuery("register");
 
 const showRegister = ref(false);
 const closeRegister = ref(false);
@@ -30,6 +31,12 @@ const showWXMiniCode = ref(false);
 
 const IDPs = ref([]);
 const aggregateLoginTypes = ref([]);
+const registration = ref({
+  enabled: false,
+});
+const registrationEnabled = computed(() => {
+  return registration.value?.enabled === true;
+});
 
 function normalizeAggregateLoginTypes(loginTypes) {
   if (!Array.isArray(loginTypes)) {
@@ -86,7 +93,6 @@ function doRegSuccess(data) {
   showRegSuccess.value = true;
 }
 function closeRegSuccess() {
-  regSuccessMsg.value = data;
   showRegSuccess.value = false;
 }
 function closeWXMini() {
@@ -122,6 +128,10 @@ onMounted(() => {
         aggregateLoginTypes.value = normalizeAggregateLoginTypes(
           (data["aggregate"] || {})["login_types"]
         );
+        registration.value = data["registration"] || { enabled: false };
+        if ((wantRegister || "") === "1" && registration.value?.enabled === true) {
+          showRegister.value = true;
+        }
       } else {
         toastMsg.value = response.data["status"].substring(6);
         toastShow.value = true;
@@ -411,13 +421,13 @@ onMounted(() => {
     </button>
   </form>
   <div
-    v-if="hasIDP('Ali') && !showRegister && !showRegSuccess && !showWXMiniCode"
+    v-if="registrationEnabled && !showRegister && !showRegSuccess && !showWXMiniCode"
     class="mt-3 mb-2 text-stone-500 text-xs"
   >
     还没有账号？
   </div>
   <Register
-    v-if="hasIDP('Ali')"
+    v-if="registrationEnabled"
     :wantMeClose="closeRegister"
     :show="showRegister"
     @close="doCloseRegister"
@@ -426,7 +436,7 @@ onMounted(() => {
   </Register>
 
   <Transition
-    v-if="hasIDP('Ali')"
+    v-if="registrationEnabled"
     enter-from-class="opacity-0"
     enter-active-class="transition ease-in-out duration-75 delay-150"
   >

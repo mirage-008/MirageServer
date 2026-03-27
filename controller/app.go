@@ -88,6 +88,7 @@ type Mirage struct {
 	stateCodeCache          *cache.Cache
 	controlCodeCache        *cache.Cache
 	machineControlCodeCache *cache.Cache
+	inviteAuthCache         *cache.Cache
 	//organizationCache       *cache.Cache
 
 	tcdCache *cache.Cache
@@ -177,6 +178,7 @@ func NewMirage(cfg *Config, db *gorm.DB) (*Mirage, error) {
 		stateCodeCache:          stateCodeCache,
 		controlCodeCache:        controlCodeCache,
 		machineControlCodeCache: machineControlCodeCache,
+		inviteAuthCache:         cache.New(0, 0),
 		tcdCache:                cache.New(0, 0),
 		longPollChanPool:        longPollChanPool,
 		pollSessions:            make(map[int64]uint64),
@@ -389,6 +391,8 @@ func (h *Mirage) initRouter(router *mux.Router) {
 	//注册
 	router.PathPrefix("/api/register").HandlerFunc(h.RegisterUserAPI).Methods(http.MethodPost)
 	router.PathPrefix("/api/idps").HandlerFunc(h.ListIdps).Methods(http.MethodGet)
+	router.HandleFunc("/invite/org/{inviteToken}", h.OrgInvitePortal).Methods(http.MethodGet, http.MethodPost)
+	router.HandleFunc("/invite/device/{shareToken}", h.DeviceSharePortal).Methods(http.MethodGet, http.MethodPost)
 
 	//登录
 	router.PathPrefix("/login").HandlerFunc(h.doLogin).Methods(http.MethodPost)

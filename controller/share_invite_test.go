@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"net/netip"
 	"path/filepath"
 	"testing"
@@ -726,5 +727,134 @@ func TestListExternalSharedUsersByOrgIDDeduplicatesSourceUsers(t *testing.T) {
 	}
 	if len(externalUsers) != 1 || !containsUserID(externalUsers, sourceUser.ID) {
 		t.Fatalf("expected one deduplicated external user, got %+v", externalUsers)
+	}
+}
+
+func TestAcceptOrgInviteByTokenCreatesUserAndMarksAccepted(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	owner := createTestUser(t, app, "owner@example.com", "Owner", "invited-org", "Mirage")
+
+	invite, err := app.CreateOrgInvite(owner.OrganizationID, owner.ID, "new-user@example.com")
+	if err != nil {
+		t.Fatalf("CreateOrgInvite(): %v", err)
+	}
+
+	acceptedInvite, invitedUser, err := app.AcceptOrgInviteByToken(invite.InviteToken, "new-user@example.com", "New User")
+	if err != nil {
+		t.Fatalf("AcceptOrgInviteByToken(): %v", err)
+	}
+	if invitedUser == nil {
+		t.Fatal("expected accepted invite to create a user")
+	}
+	if invitedUser.OrganizationID != owner.OrganizationID {
+		t.Fatalf("expected invited user org %d, got %d", owner.OrganizationID, invitedUser.OrganizationID)
+	}
+	if acceptedInvite.Status != OrgInviteStatusAccepted {
+		t.Fatalf("expected accepted invite status, got %q", acceptedInvite.Status)
+	}
+	if acceptedInvite.AcceptedAt == nil {
+		t.Fatal("expected accepted invite timestamp to be set")
+	}
+}
+
+func TestRejectOrgInviteByTokenMarksRejectedAndBlocksAcceptance(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	owner := createTestUser(t, app, "owner@example.com", "Owner", "invited-org", "Mirage")
+
+	invite, err := app.CreateOrgInvite(owner.OrganizationID, owner.ID, "new-user@example.com")
+	if err != nil {
+		t.Fatalf("CreateOrgInvite(): %v", err)
+	}
+
+	rejectedInvite, err := app.RejectOrgInviteByToken(invite.InviteToken, invite.TargetIdentity)
+	if err != nil {
+		t.Fatalf("RejectOrgInviteByToken(): %v", err)
+	}
+	if rejectedInvite.Status != OrgInviteStatusRejected {
+		t.Fatalf("expected rejected invite status, got %q", rejectedInvite.Status)
+	}
+	if rejectedInvite.RejectedAt == nil {
+		t.Fatal("expected rejected invite timestamp to be set")
+	}
+
+	if _, _, err := app.AcceptOrgInviteByToken(invite.InviteToken, invite.TargetIdentity, "New User"); err != ErrOrgInviteAlreadyRejected {
+		t.Fatalf("expected ErrOrgInviteAlreadyRejected after reject, got %v", err)
+	}
+	if err := app.RevokeOrgInvite(invite.ID, owner.OrganizationID); err != ErrOrgInviteAlreadyRejected {
+		t.Fatalf("expected revoke after reject to return ErrOrgInviteAlreadyRejected, got %v", err)
+	}
+}
+
+func TestRejectMachineShareByTokenMarksRejectedAndBlocksFurtherChanges(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
+	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
+
+	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(): %v", err)
+	}
+
+	rejectedShare, err := app.RejectMachineShareByToken(share.ShareToken, targetUser)
+	if err != nil {
+		t.Fatalf("RejectMachineShareByToken(): %v", err)
+	}
+	if rejectedShare.Status != MachineShareStatusRejected {
+		t.Fatalf("expected rejected share status, got %q", rejectedShare.Status)
+	}
+	if rejectedShare.RejectedAt == nil {
+		t.Fatal("expected rejected share timestamp to be set")
+	}
+
+	if _, err := app.AcceptMachineShareByToken(share.ShareToken, targetUser); err != ErrMachineShareAlreadyRejected {
+		t.Fatalf("expected ErrMachineShareAlreadyRejected after reject, got %v", err)
+	}
+	if err := app.RevokeMachineShare(share.ID, sourceUser.OrganizationID); err != ErrMachineShareAlreadyRejected {
+		t.Fatalf("expected revoke after reject to return ErrMachineShareAlreadyRejected, got %v", err)
+	}
+}
+
+func TestBuildMachineShareResponseIncludesShareURL(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
+	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
+
+	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(): %v", err)
+	}
+	if _, err := app.RejectMachineShareByToken(share.ShareToken, targetUser); err != nil {
+		t.Fatalf("RejectMachineShareByToken(): %v", err)
+	}
+
+	response := app.buildMachineShareResponse(getMachineShareByID(t, app, share.ID))
+	raw, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("json.Marshal(response): %v", err)
+	}
+
+	payload := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(response): %v", err)
+	}
+
+	if payload["shareURL"] != "https://ctrl.example.test/invite/device/"+share.ShareToken {
+		t.Fatalf("unexpected shareURL: %#v", payload["shareURL"])
+	}
+	if payload["status"] != MachineShareStatusRejected {
+		t.Fatalf("unexpected share status: %#v", payload["status"])
+	}
+	if payload["rejectedAt"] == nil {
+		t.Fatalf("expected rejectedAt to be serialized, got %#v", payload["rejectedAt"])
 	}
 }

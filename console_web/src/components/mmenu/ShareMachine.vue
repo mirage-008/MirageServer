@@ -24,6 +24,7 @@ const normalizedShares = computed(() => {
     ...share,
     createdAtText: share.createdAt ? new Date(share.createdAt).toLocaleString() : "",
     acceptedAtText: share.acceptedAt ? new Date(share.acceptedAt).toLocaleString() : "",
+    rejectedAtText: share.rejectedAt ? new Date(share.rejectedAt).toLocaleString() : "",
     revokedAtText: share.revokedAt ? new Date(share.revokedAt).toLocaleString() : "",
   }));
 });
@@ -98,6 +99,57 @@ function revokeShare(share) {
       inputBlocking.value = false;
     });
 }
+
+function shareStatusText(status) {
+  switch (status) {
+    case "accepted":
+      return "已接受";
+    case "rejected":
+      return "已拒绝";
+    case "revoked":
+      return "已撤销";
+    default:
+      return "待处理";
+  }
+}
+
+function shareStatusClass(status) {
+  switch (status) {
+    case "accepted":
+      return "border-green-100 bg-green-50 text-green-700";
+    case "rejected":
+      return "border-orange-100 bg-orange-50 text-orange-700";
+    case "revoked":
+      return "border-stone-200 bg-stone-100 text-stone-600";
+    default:
+      return "border-blue-100 bg-blue-50 text-blue-700";
+  }
+}
+
+function shareDecisionText(share) {
+  if (share.acceptedAtText) {
+    return "接受于 " + share.acceptedAtText;
+  }
+  if (share.rejectedAtText) {
+    return "拒绝于 " + share.rejectedAtText;
+  }
+  if (share.revokedAtText) {
+    return "撤销于 " + share.revokedAtText;
+  }
+  return "";
+}
+
+function copyShareLink(share) {
+  const shareURL = share?.shareURL;
+  if (!shareURL) {
+    formError.value = "暂无可复制的邀请链接";
+    return;
+  }
+
+  navigator.clipboard.writeText(shareURL).then(function () {
+    formError.value = "";
+  });
+}
 </script>
 
 <template>
@@ -116,7 +168,7 @@ function revokeShare(share) {
 
       <form @submit.prevent="createShare">
         <p class="text-gray-700 mb-4">
-          输入目标身份后，将为该用户生成一条可接受的设备分享记录。
+          输入目标身份后，将生成一条设备分享邀请链接，对方打开后可明确接受或拒绝。
         </p>
         <label for="share-target-identity" class="block font-medium mb-2">目标身份</label>
         <div class="flex flex-col md:flex-row gap-3 md:items-center">
@@ -141,8 +193,8 @@ function revokeShare(share) {
 
       <section class="mt-8">
         <header class="mb-3">
-          <h3 class="font-semibold">当前分享</h3>
-          <p class="text-sm text-gray-600">可在这里查看和撤销尚未撤销的分享。</p>
+          <h3 class="font-semibold">分享记录</h3>
+          <p class="text-sm text-gray-600">可在这里查看邀请链接、接受结果和撤销状态。</p>
         </header>
         <div
           v-if="normalizedShares.length == 0"
@@ -158,17 +210,31 @@ function revokeShare(share) {
           >
             <div class="min-w-0">
               <div class="font-medium break-all">{{ share.targetIdentity }}</div>
-              <div class="text-sm text-gray-600 mt-1">
-                <span>
-                  {{ share.status == "accepted" ? "已接受" : "待接受" }}
+              <div class="flex flex-wrap items-center gap-2 text-sm text-gray-600 mt-1">
+                <span
+                  class="inline-flex items-center align-middle justify-center font-medium border rounded-sm px-2 py-0.5 text-xs"
+                  :class="shareStatusClass(share.status)"
+                >
+                  {{ shareStatusText(share.status) }}
                 </span>
                 <span v-if="share.createdAtText"> · 创建于 {{ share.createdAtText }}</span>
-                <span v-if="share.acceptedAtText"> · 接受于 {{ share.acceptedAtText }}</span>
+                <span v-if="shareDecisionText(share)"> · {{ shareDecisionText(share) }}</span>
               </div>
-              <div class="text-xs text-gray-500 mt-2 break-all">令牌：{{ share.shareToken }}</div>
+              <div v-if="share.shareURL" class="text-xs text-gray-500 mt-2 break-all">
+                链接：{{ share.shareURL }}
+              </div>
             </div>
-            <div class="flex shrink-0 justify-end">
+            <div class="flex shrink-0 justify-end gap-2">
               <button
+                v-if="share.shareURL"
+                @click="copyShareLink(share)"
+                class="btn border border-stone-200 bg-white hover:bg-stone-100 text-black h-9 min-h-fit"
+                type="button"
+              >
+                复制链接
+              </button>
+              <button
+                v-if="share.status != 'rejected' && share.status != 'revoked'"
                 :disabled="inputBlocking"
                 @click="revokeShare(share)"
                 class="btn border-0 bg-red-600 hover:bg-red-700 disabled:bg-red-600/60 text-white h-9 min-h-fit"

@@ -14,41 +14,51 @@ import (
 const (
 	MachineShareStatusPending  = "pending"
 	MachineShareStatusAccepted = "accepted"
+	MachineShareStatusRejected = "rejected"
 	MachineShareStatusRevoked  = "revoked"
 
 	OrgInviteStatusPending  = "pending"
 	OrgInviteStatusAccepted = "accepted"
+	OrgInviteStatusRejected = "rejected"
 	OrgInviteStatusRevoked  = "revoked"
 )
 
 const (
 	ErrMachineShareNotFound             = Error("machine share not found")
 	ErrMachineShareTargetInvalid        = Error("machine share target is invalid")
+	ErrMachineShareTargetMismatch       = Error("machine share target identity does not match current user")
+	ErrMachineShareAlreadyAccepted      = Error("machine share has already been accepted")
+	ErrMachineShareAlreadyRejected      = Error("machine share has already been rejected")
 	ErrMachineShareAlreadyRevoked       = Error("machine share has been revoked")
 	ErrMachineShareTargetAlreadyInOrg   = Error("machine share target already belongs to this organization")
 	ErrOrgInviteNotFound                = Error("organization invite not found")
 	ErrOrgInviteTargetInvalid           = Error("organization invite target is invalid")
+	ErrOrgInviteTargetMismatch          = Error("organization invite target identity does not match current user")
+	ErrOrgInviteAlreadyAccepted         = Error("organization invite has already been accepted")
+	ErrOrgInviteAlreadyRejected         = Error("organization invite has already been rejected")
+	ErrOrgInviteAlreadyRevoked          = Error("organization invite has been revoked")
 	ErrOrgInviteTargetAlreadyInOrg      = Error("organization invite target already belongs to this organization")
 	ErrOrgInviteTargetHasPendingInvite  = Error("organization invite target already has a pending invite")
 	ErrOrgInviteTargetBelongsToOtherOrg = Error("organization invite target already belongs to another organization")
 )
 
 type MachineShare struct {
-	ID             int64  `gorm:"primary_key;unique;not null"`
-	StableID       string `gorm:"unique"`
-	SourceMachineID int64 `gorm:"index"`
-	SourceMachine  Machine `gorm:"foreignKey:SourceMachineID"`
-	SourceOrgID    int64  `gorm:"index"`
-	SourceUserID   int64  `gorm:"index"`
-	TargetIdentity string `gorm:"index"`
-	TargetUserID   int64  `gorm:"index"`
-	TargetOrgID    int64  `gorm:"index"`
-	Status         string `gorm:"index"`
-	ShareToken     string `gorm:"uniqueIndex"`
-	AcceptedAt     *time.Time
-	RevokedAt      *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID              int64   `gorm:"primary_key;unique;not null"`
+	StableID        string  `gorm:"unique"`
+	SourceMachineID int64   `gorm:"index"`
+	SourceMachine   Machine `gorm:"foreignKey:SourceMachineID"`
+	SourceOrgID     int64   `gorm:"index"`
+	SourceUserID    int64   `gorm:"index"`
+	TargetIdentity  string  `gorm:"index"`
+	TargetUserID    int64   `gorm:"index"`
+	TargetOrgID     int64   `gorm:"index"`
+	Status          string  `gorm:"index"`
+	ShareToken      string  `gorm:"uniqueIndex"`
+	AcceptedAt      *time.Time
+	RejectedAt      *time.Time
+	RevokedAt       *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 func (share *MachineShare) BeforeCreate(tx *gorm.DB) error {
@@ -76,16 +86,17 @@ func (share *MachineShare) BeforeCreate(tx *gorm.DB) error {
 }
 
 type OrgInvite struct {
-	ID             int64  `gorm:"primary_key;unique;not null"`
-	StableID       string `gorm:"unique"`
-	OrgID          int64  `gorm:"index"`
+	ID             int64        `gorm:"primary_key;unique;not null"`
+	StableID       string       `gorm:"unique"`
+	OrgID          int64        `gorm:"index"`
 	Org            Organization `gorm:"foreignKey:OrgID"`
-	InviterUserID  int64  `gorm:"index"`
-	TargetIdentity string `gorm:"index"`
-	AcceptedUserID int64  `gorm:"index"`
-	Status         string `gorm:"index"`
-	InviteToken    string `gorm:"uniqueIndex"`
+	InviterUserID  int64        `gorm:"index"`
+	TargetIdentity string       `gorm:"index"`
+	AcceptedUserID int64        `gorm:"index"`
+	Status         string       `gorm:"index"`
+	InviteToken    string       `gorm:"uniqueIndex"`
 	AcceptedAt     *time.Time
+	RejectedAt     *time.Time
 	RevokedAt      *time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -117,6 +128,65 @@ func (invite *OrgInvite) BeforeCreate(tx *gorm.DB) error {
 
 func normalizeExternalIdentity(identity string) string {
 	return strings.ToLower(strings.TrimSpace(identity))
+}
+
+func normalizePublicBaseURL(raw string) string {
+	baseURL := strings.TrimSpace(raw)
+	if baseURL == "" {
+		return ""
+	}
+	if strings.HasPrefix(baseURL, "http://") || strings.HasPrefix(baseURL, "https://") {
+		return strings.TrimRight(baseURL, "/")
+	}
+
+	return "https://" + strings.TrimRight(baseURL, "/")
+}
+
+func (h *Mirage) buildPublicURL(path string) string {
+	if h == nil || h.cfg == nil {
+		return path
+	}
+
+	baseURL := normalizePublicBaseURL(h.cfg.ServerURL)
+	if baseURL == "" {
+		return path
+	}
+
+	return baseURL + path
+}
+
+func (h *Mirage) buildOrgInviteURL(inviteToken string) string {
+	return h.buildPublicURL("/invite/org/" + strings.TrimSpace(inviteToken))
+}
+
+func (h *Mirage) buildMachineShareURL(shareToken string) string {
+	return h.buildPublicURL("/invite/device/" + strings.TrimSpace(shareToken))
+}
+
+func orgInviteStatusError(status string) error {
+	switch status {
+	case OrgInviteStatusAccepted:
+		return ErrOrgInviteAlreadyAccepted
+	case OrgInviteStatusRejected:
+		return ErrOrgInviteAlreadyRejected
+	case OrgInviteStatusRevoked:
+		return ErrOrgInviteAlreadyRevoked
+	default:
+		return ErrOrgInviteNotFound
+	}
+}
+
+func machineShareStatusError(status string) error {
+	switch status {
+	case MachineShareStatusAccepted:
+		return ErrMachineShareAlreadyAccepted
+	case MachineShareStatusRejected:
+		return ErrMachineShareAlreadyRejected
+	case MachineShareStatusRevoked:
+		return ErrMachineShareAlreadyRevoked
+	default:
+		return ErrMachineShareNotFound
+	}
 }
 
 func mergeMachines(machineSets ...[]Machine) []Machine {
@@ -282,6 +352,16 @@ func (h *Mirage) ListPendingOrgInvitesByOrgID(orgID int64) ([]OrgInvite, error) 
 	return invites, nil
 }
 
+func (h *Mirage) ListOrgInvitesByOrgID(orgID int64) ([]OrgInvite, error) {
+	invites := []OrgInvite{}
+	err := h.db.Preload("Org").Where("org_id = ?", orgID).Order("created_at desc").Find(&invites).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return invites, nil
+}
+
 func (h *Mirage) listPendingOrgInvitesByIdentity(identity string) ([]OrgInvite, error) {
 	invites := []OrgInvite{}
 	err := h.db.Preload("Org").Where("target_identity = ? AND status = ?", normalizeExternalIdentity(identity), OrgInviteStatusPending).Order("created_at asc").Find(&invites).Error
@@ -307,6 +387,18 @@ func (h *Mirage) ListUsersByNormalizedName(name string) ([]User, error) {
 	}
 
 	return matched, nil
+}
+
+func (h *Mirage) GetOrgInviteByToken(inviteToken string) (*OrgInvite, error) {
+	invite := OrgInvite{}
+	if err := h.db.Preload("Org").First(&invite, "invite_token = ?", strings.TrimSpace(inviteToken)).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrOrgInviteNotFound
+		}
+		return nil, err
+	}
+
+	return &invite, nil
 }
 
 func createUserInOrganizationInTx(tx *gorm.DB, name string, disName string, org *Organization) (*User, error) {
@@ -384,7 +476,7 @@ func (h *Mirage) RevokeOrgInvite(inviteID int64, orgID int64) error {
 		return ErrOrgInviteNotFound
 	}
 	if invite.Status != OrgInviteStatusPending {
-		return nil
+		return orgInviteStatusError(invite.Status)
 	}
 
 	now := time.Now().UTC()
@@ -410,6 +502,132 @@ func (h *Mirage) resolvePendingInviteForIdentity(identity string) (*OrgInvite, *
 	}
 
 	return &invite, org, nil
+}
+
+func (h *Mirage) AcceptOrgInviteByToken(inviteToken string, userName string, userDisName string) (*OrgInvite, *User, error) {
+	normalizedIdentity := normalizeExternalIdentity(userName)
+	if normalizedIdentity == "" {
+		return nil, nil, ErrOrgInviteTargetInvalid
+	}
+	if strings.TrimSpace(userDisName) == "" {
+		userDisName = userName
+	}
+
+	invite, err := h.GetOrgInviteByToken(inviteToken)
+	if err != nil {
+		return nil, nil, err
+	}
+	if invite.TargetIdentity != normalizedIdentity {
+		return nil, nil, ErrOrgInviteTargetMismatch
+	}
+
+	var invitedUser *User
+	err = h.db.Transaction(func(tx *gorm.DB) error {
+		lockedInvite := OrgInvite{}
+		if err := tx.Preload("Org").First(&lockedInvite, "id = ?", invite.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrOrgInviteNotFound
+			}
+			return err
+		}
+		if lockedInvite.TargetIdentity != normalizedIdentity {
+			return ErrOrgInviteTargetMismatch
+		}
+		if lockedInvite.Status != OrgInviteStatusPending {
+			return orgInviteStatusError(lockedInvite.Status)
+		}
+
+		existingUsers, err := h.ListUsersByNormalizedName(normalizedIdentity)
+		if err != nil {
+			return err
+		}
+		for _, existingUser := range existingUsers {
+			if existingUser.OrganizationID == lockedInvite.OrgID {
+				return ErrOrgInviteTargetAlreadyInOrg
+			}
+			return ErrOrgInviteTargetBelongsToOtherOrg
+		}
+
+		org := Organization{}
+		if err := tx.First(&org, "id = ?", lockedInvite.OrgID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrOrgNotFound
+			}
+			return err
+		}
+
+		invitedUser, err = createUserInOrganizationInTx(tx, normalizedIdentity, userDisName, &org)
+		if err != nil {
+			return err
+		}
+
+		now := time.Now().UTC()
+		lockedInvite.Status = OrgInviteStatusAccepted
+		lockedInvite.AcceptedUserID = invitedUser.ID
+		lockedInvite.AcceptedAt = &now
+		lockedInvite.RejectedAt = nil
+		if err := tx.Save(&lockedInvite).Error; err != nil {
+			return err
+		}
+
+		*invite = lockedInvite
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	h.setOrgLastStateChangeToNow(invite.OrgID)
+	return invite, invitedUser, nil
+}
+
+func (h *Mirage) RejectOrgInviteByToken(inviteToken string, identity string) (*OrgInvite, error) {
+	normalizedIdentity := normalizeExternalIdentity(identity)
+	if normalizedIdentity == "" {
+		return nil, ErrOrgInviteTargetInvalid
+	}
+
+	invite, err := h.GetOrgInviteByToken(inviteToken)
+	if err != nil {
+		return nil, err
+	}
+	if invite.TargetIdentity != normalizedIdentity {
+		return nil, ErrOrgInviteTargetMismatch
+	}
+
+	err = h.db.Transaction(func(tx *gorm.DB) error {
+		lockedInvite := OrgInvite{}
+		if err := tx.Preload("Org").First(&lockedInvite, "id = ?", invite.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrOrgInviteNotFound
+			}
+			return err
+		}
+		if lockedInvite.TargetIdentity != normalizedIdentity {
+			return ErrOrgInviteTargetMismatch
+		}
+		if lockedInvite.Status != OrgInviteStatusPending {
+			return orgInviteStatusError(lockedInvite.Status)
+		}
+
+		now := time.Now().UTC()
+		lockedInvite.Status = OrgInviteStatusRejected
+		lockedInvite.RejectedAt = &now
+		lockedInvite.AcceptedAt = nil
+		lockedInvite.AcceptedUserID = 0
+		if err := tx.Save(&lockedInvite).Error; err != nil {
+			return err
+		}
+
+		*invite = lockedInvite
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	h.setOrgLastStateChangeToNow(invite.OrgID)
+	return invite, nil
 }
 
 func (h *Mirage) CreateUserFromInvite(invite *OrgInvite, org *Organization, userName string, userDisName string) (*User, error) {
@@ -577,6 +795,9 @@ func (h *Mirage) acceptMachineShare(share *MachineShare, user *User) error {
 	if share == nil || user == nil || user.CheckEmpty() {
 		return ErrMachineShareNotFound
 	}
+	if normalizeExternalIdentity(user.Name) != share.TargetIdentity {
+		return ErrMachineShareTargetMismatch
+	}
 
 	now := time.Now().UTC()
 	wasAccepted := false
@@ -588,21 +809,24 @@ func (h *Mirage) acceptMachineShare(share *MachineShare, user *User) error {
 			}
 			return err
 		}
+		if lockedShare.TargetIdentity != normalizeExternalIdentity(user.Name) {
+			return ErrMachineShareTargetMismatch
+		}
 		if lockedShare.Status == MachineShareStatusRevoked {
 			return ErrMachineShareAlreadyRevoked
 		}
 		if lockedShare.Status == MachineShareStatusAccepted {
-			share.TargetUserID = lockedShare.TargetUserID
-			share.TargetOrgID = lockedShare.TargetOrgID
-			share.AcceptedAt = lockedShare.AcceptedAt
-			share.Status = lockedShare.Status
-			return nil
+			return ErrMachineShareAlreadyAccepted
+		}
+		if lockedShare.Status == MachineShareStatusRejected {
+			return ErrMachineShareAlreadyRejected
 		}
 
 		lockedShare.Status = MachineShareStatusAccepted
 		lockedShare.TargetUserID = user.ID
 		lockedShare.TargetOrgID = user.OrganizationID
 		lockedShare.AcceptedAt = &now
+		lockedShare.RejectedAt = nil
 		if err := tx.Save(&lockedShare).Error; err != nil {
 			return err
 		}
@@ -621,6 +845,54 @@ func (h *Mirage) acceptMachineShare(share *MachineShare, user *User) error {
 		h.notifyMachineShareTopology(share, true)
 	}
 
+	return nil
+}
+
+func (h *Mirage) rejectMachineShare(share *MachineShare, user *User) error {
+	if share == nil || user == nil || user.CheckEmpty() {
+		return ErrMachineShareNotFound
+	}
+	if normalizeExternalIdentity(user.Name) != share.TargetIdentity {
+		return ErrMachineShareTargetMismatch
+	}
+
+	now := time.Now().UTC()
+	err := h.db.Transaction(func(tx *gorm.DB) error {
+		lockedShare := MachineShare{}
+		if err := tx.First(&lockedShare, "id = ?", share.ID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrMachineShareNotFound
+			}
+			return err
+		}
+		if lockedShare.TargetIdentity != normalizeExternalIdentity(user.Name) {
+			return ErrMachineShareTargetMismatch
+		}
+		if lockedShare.Status != MachineShareStatusPending {
+			return machineShareStatusError(lockedShare.Status)
+		}
+
+		lockedShare.Status = MachineShareStatusRejected
+		lockedShare.RejectedAt = &now
+		lockedShare.AcceptedAt = nil
+		lockedShare.TargetUserID = 0
+		lockedShare.TargetOrgID = 0
+		if err := tx.Save(&lockedShare).Error; err != nil {
+			return err
+		}
+
+		share.Status = lockedShare.Status
+		share.AcceptedAt = nil
+		share.RejectedAt = lockedShare.RejectedAt
+		share.TargetUserID = 0
+		share.TargetOrgID = 0
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	h.setOrgLastStateChangeToNow(share.SourceOrgID)
 	return nil
 }
 
@@ -660,6 +932,21 @@ func (h *Mirage) AcceptMachineShareByToken(shareToken string, user *User) (*Mach
 	return &share, nil
 }
 
+func (h *Mirage) RejectMachineShareByToken(shareToken string, user *User) (*MachineShare, error) {
+	share := MachineShare{}
+	if err := h.db.Preload("SourceMachine").Preload("SourceMachine.User").Preload("SourceMachine.User.Organization").First(&share, "share_token = ?", strings.TrimSpace(shareToken)).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrMachineShareNotFound
+		}
+		return nil, err
+	}
+	if err := h.rejectMachineShare(&share, user); err != nil {
+		return nil, err
+	}
+
+	return &share, nil
+}
+
 func (h *Mirage) RevokeMachineShare(shareID int64, sourceOrgID int64) error {
 	share := MachineShare{}
 	if err := h.db.Preload("SourceMachine").Preload("SourceMachine.User").Preload("SourceMachine.User.Organization").First(&share, "id = ?", shareID).Error; err != nil {
@@ -672,7 +959,10 @@ func (h *Mirage) RevokeMachineShare(shareID int64, sourceOrgID int64) error {
 		return ErrMachineShareNotFound
 	}
 	if share.Status == MachineShareStatusRevoked {
-		return nil
+		return ErrMachineShareAlreadyRevoked
+	}
+	if share.Status == MachineShareStatusRejected {
+		return ErrMachineShareAlreadyRejected
 	}
 
 	wasAccepted := share.Status == MachineShareStatusAccepted && share.TargetOrgID != 0
@@ -891,7 +1181,7 @@ func (h *Mirage) CountAcceptedSharesBySourceMachine(machineID int64) (int, error
 
 func (h *Mirage) CountActiveSharesBySourceMachine(machineID int64) (int, error) {
 	var count int64
-	if err := h.db.Model(&MachineShare{}).Where("source_machine_id = ? AND status <> ?", machineID, MachineShareStatusRevoked).Count(&count).Error; err != nil {
+	if err := h.db.Model(&MachineShare{}).Where("source_machine_id = ? AND status in ?", machineID, []string{MachineShareStatusPending, MachineShareStatusAccepted}).Count(&count).Error; err != nil {
 		return 0, err
 	}
 

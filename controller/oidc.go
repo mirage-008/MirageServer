@@ -349,13 +349,5 @@ func (h *Mirage) findOrCreateNewUserForOIDCCallback(
 			Msg("could not find or create user")
 		return nil, err
 	}
-	if _, err := h.AcceptPendingMachineSharesForUser(user); err != nil {
-		log.Error().
-			Caller().
-			Err(err).
-			Str("user", userName).
-			Msg("could not accept pending machine shares for user")
-		return nil, err
-	}
 	return user, nil
 }

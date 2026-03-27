@@ -354,6 +354,87 @@ func TestAggregateIdentityFromResponse(t *testing.T) {
 	}
 }
 
+func TestListIdpsIncludesRegistrationCapability(t *testing.T) {
+	t.Parallel()
+
+	m := &Mirage{
+		cfg: &Config{
+			IdpList: []string{"Ali"},
+			IDaaS: ALIConfig{
+				App:       "idaas-app",
+				ClientID:  "idaas-id",
+				ClientKey: "idaas-key",
+				Instance:  "idaas-instance",
+				OrgID:     "idaas-org",
+			},
+			SMS: SMSConfig{
+				ID:       "sms-id",
+				Key:      "sms-key",
+				Sign:     "sms-sign",
+				Template: "sms-template",
+			},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/idps", nil)
+	rec := httptest.NewRecorder()
+
+	m.ListIdps(rec, req)
+
+	var payload struct {
+		Status string                 `json:"status"`
+		Data   map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(response): %v", err)
+	}
+	if payload.Status != "success" {
+		t.Fatalf("unexpected response status: %q", payload.Status)
+	}
+
+	registration, ok := payload.Data["registration"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected registration capability object, got %#v", payload.Data["registration"])
+	}
+	if registration["enabled"] != true {
+		t.Fatalf("expected registration.enabled=true, got %#v", registration["enabled"])
+	}
+}
+
+func TestListIdpsDisablesRegistrationCapabilityWhenConfigMissing(t *testing.T) {
+	t.Parallel()
+
+	m := &Mirage{
+		cfg: &Config{
+			IdpList: []string{"Github"},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/idps", nil)
+	rec := httptest.NewRecorder()
+
+	m.ListIdps(rec, req)
+
+	var payload struct {
+		Status string                 `json:"status"`
+		Data   map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(response): %v", err)
+	}
+	if payload.Status != "success" {
+		t.Fatalf("unexpected response status: %q", payload.Status)
+	}
+
+	registration, ok := payload.Data["registration"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected registration capability object, got %#v", payload.Data["registration"])
+	}
+	if registration["enabled"] != false {
+		t.Fatalf("expected registration.enabled=false, got %#v", registration["enabled"])
+	}
+}
+
 func containsIDP(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

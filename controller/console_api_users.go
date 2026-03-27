@@ -41,11 +41,16 @@ type UserData struct {
 }
 
 type PendingInviteData struct {
-	Id             string    `json:"id"`
-	StableId       string    `json:"stableId"`
-	TargetIdentity string    `json:"targetIdentity"`
-	Created        time.Time `json:"created"`
-	Status         string    `json:"status"`
+	Id             string     `json:"id"`
+	StableId       string     `json:"stableId"`
+	TargetIdentity string     `json:"targetIdentity"`
+	Created        time.Time  `json:"created"`
+	Status         string     `json:"status"`
+	InviteToken    string     `json:"inviteToken"`
+	InviteURL      string     `json:"inviteURL"`
+	AcceptedAt     *time.Time `json:"acceptedAt"`
+	RejectedAt     *time.Time `json:"rejectedAt"`
+	RevokedAt      *time.Time `json:"revokedAt"`
 }
 
 // 请求报文：
@@ -93,7 +98,7 @@ func buildConsoleUserData(h *Mirage, u User, sharedDomain bool) UserData {
 	}
 }
 
-func buildPendingInviteData(invites []OrgInvite) []PendingInviteData {
+func buildPendingInviteData(h *Mirage, invites []OrgInvite) []PendingInviteData {
 	items := make([]PendingInviteData, 0, len(invites))
 	for _, invite := range invites {
 		items = append(items, PendingInviteData{
@@ -102,6 +107,11 @@ func buildPendingInviteData(invites []OrgInvite) []PendingInviteData {
 			TargetIdentity: invite.TargetIdentity,
 			Created:        invite.CreatedAt.UTC(),
 			Status:         invite.Status,
+			InviteToken:    invite.InviteToken,
+			InviteURL:      h.buildOrgInviteURL(invite.InviteToken),
+			AcceptedAt:     invite.AcceptedAt,
+			RejectedAt:     invite.RejectedAt,
+			RevokedAt:      invite.RevokedAt,
 		})
 	}
 	return items
@@ -136,11 +146,11 @@ func (h *Mirage) buildUsersData(user *User) (*UsersData, error) {
 		resData.ExternalUsers = append(resData.ExternalUsers, buildConsoleUserData(h, externalUser, true))
 	}
 
-	invites, err := h.ListPendingOrgInvitesByOrgID(user.OrganizationID)
+	invites, err := h.ListOrgInvitesByOrgID(user.OrganizationID)
 	if err != nil {
 		return nil, err
 	}
-	resData.PendingInvites = buildPendingInviteData(invites)
+	resData.PendingInvites = buildPendingInviteData(h, invites)
 
 	return resData, nil
 }
@@ -187,8 +197,16 @@ func mapInviteErrorMessage(err error) string {
 		return "目标身份已有待处理邀请"
 	case ErrOrgInviteTargetBelongsToOtherOrg:
 		return "目标身份已属于其他组织"
+	case ErrOrgInviteTargetMismatch:
+		return "登录身份与邀请目标不匹配"
 	case ErrOrgInviteNotFound:
 		return "邀请不存在"
+	case ErrOrgInviteAlreadyAccepted:
+		return "邀请已被接受"
+	case ErrOrgInviteAlreadyRejected:
+		return "邀请已被拒绝"
+	case ErrOrgInviteAlreadyRevoked:
+		return "邀请已被撤销"
 	default:
 		return err.Error()
 	}
@@ -266,6 +284,10 @@ func (h *Mirage) CAPIPostUsers(
 				"status":         invite.Status,
 				"created":        invite.CreatedAt.UTC(),
 				"inviteToken":    invite.InviteToken,
+				"inviteURL":      h.buildOrgInviteURL(invite.InviteToken),
+				"acceptedAt":     invite.AcceptedAt,
+				"rejectedAt":     invite.RejectedAt,
+				"revokedAt":      invite.RevokedAt,
 			},
 		})
 		return

@@ -21,6 +21,9 @@ func (h *Mirage) ListIdps(
 		"aggregate": map[string]interface{}{
 			"login_types": normalizeAggregateLoginTypes(h.cfg.AggregateLogin.LoginTypes),
 		},
+		"registration": map[string]interface{}{
+			"enabled": h.cfg.SelfRegistrationEnabled(),
+		},
 	})
 }
 

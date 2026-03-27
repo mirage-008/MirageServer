@@ -53,6 +53,11 @@ const inviteSubmitting = ref(false);
 const canManageInvites = computed(() => {
   return ownerId.value > 0 && currentUserId.value == ownerId.value;
 });
+const pendingInviteCount = computed(() => {
+  return pendingInvites.value.filter(function (invite) {
+    return invite.status == "pending";
+  }).length;
+});
 
 const selectUser = ref({});
 function mouseOnUser(u) {
@@ -212,12 +217,9 @@ function revokeInvite(invite) {
         toastShow.value = true;
         return;
       }
-
-      pendingInvites.value = pendingInvites.value.filter(function (item) {
-        return item.id != invite.id;
-      });
       toastMsg.value = "已撤销邀请";
       toastShow.value = true;
+      getUsers().then().catch();
     })
     .catch(function (error) {
       toastMsg.value = String(error);
@@ -233,6 +235,59 @@ function formatInviteTime(value) {
     return "";
   }
   return new Date(value).toLocaleString();
+}
+
+function inviteStatusText(status) {
+  switch (status) {
+    case "accepted":
+      return "已接受";
+    case "rejected":
+      return "已拒绝";
+    case "revoked":
+      return "已撤销";
+    default:
+      return "待处理";
+  }
+}
+
+function inviteStatusClass(status) {
+  switch (status) {
+    case "accepted":
+      return "border-green-100 bg-green-50 text-green-700";
+    case "rejected":
+      return "border-orange-100 bg-orange-50 text-orange-700";
+    case "revoked":
+      return "border-stone-200 bg-stone-100 text-stone-600";
+    default:
+      return "border-blue-100 bg-blue-50 text-blue-700";
+  }
+}
+
+function inviteDecisionText(invite) {
+  if (invite.acceptedAt) {
+    return "接受于 " + formatInviteTime(invite.acceptedAt);
+  }
+  if (invite.rejectedAt) {
+    return "拒绝于 " + formatInviteTime(invite.rejectedAt);
+  }
+  if (invite.revokedAt) {
+    return "撤销于 " + formatInviteTime(invite.revokedAt);
+  }
+  return "";
+}
+
+function copyInviteLink(invite) {
+  const inviteURL = invite?.inviteURL;
+  if (!inviteURL) {
+    toastMsg.value = "暂无可复制的邀请链接";
+    toastShow.value = true;
+    return;
+  }
+
+  navigator.clipboard.writeText(inviteURL).then(function () {
+    toastMsg.value = "邀请链接已复制到粘贴板！";
+    toastShow.value = true;
+  });
 }
 
 //数据填充控制部分
@@ -354,7 +409,7 @@ function getMachines() {
           v-if="pendingInvites.length > 0"
           class="inline-flex items-center align-middle justify-center font-medium border border-blue-100 bg-blue-50 text-blue-600 rounded-full px-2 py-1 leading-none text-sm"
         >
-          {{ pendingInvites.length }} 个待处理邀请
+          {{ pendingInviteCount }} 个待处理邀请
         </div>
       </div>
 
@@ -362,7 +417,7 @@ function getMachines() {
         <header class="mb-4">
           <h2 class="text-lg font-semibold tracking-tight mb-1">邀请用户</h2>
           <p class="text-sm text-gray-600">
-            输入目标身份后，用户下次登录时会自动加入当前组织。
+            输入目标身份后，系统会生成一条邀请链接，对方打开后可明确接受或拒绝。
           </p>
         </header>
         <form @submit.prevent="createInvite" class="flex flex-col gap-3 md:flex-row md:items-center">
@@ -385,14 +440,14 @@ function getMachines() {
 
         <div class="mt-6">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="font-medium">待处理邀请</h3>
+            <h3 class="font-medium">邀请记录</h3>
             <span class="text-sm text-gray-500">{{ pendingInvites.length }} 条</span>
           </div>
           <div
             v-if="pendingInvites.length == 0"
             class="rounded-md border border-stone-200 bg-stone-50 p-5 text-center text-gray-500"
           >
-            暂无待处理邀请
+            暂无邀请记录
           </div>
           <div v-else class="rounded-md border border-stone-200 divide-y divide-stone-200">
             <div
@@ -402,13 +457,31 @@ function getMachines() {
             >
               <div class="min-w-0">
                 <div class="font-medium break-all">{{ invite.targetIdentity }}</div>
-                <div class="text-sm text-gray-600 mt-1">
-                  <span>{{ invite.status == 'pending' ? '待接受' : invite.status }}</span>
+                <div class="flex flex-wrap items-center gap-2 text-sm text-gray-600 mt-1">
+                  <span
+                    class="inline-flex items-center align-middle justify-center font-medium border rounded-sm px-2 py-0.5 text-xs"
+                    :class="inviteStatusClass(invite.status)"
+                  >
+                    {{ inviteStatusText(invite.status) }}
+                  </span>
                   <span v-if="invite.created"> · 创建于 {{ formatInviteTime(invite.created) }}</span>
+                  <span v-if="inviteDecisionText(invite)"> · {{ inviteDecisionText(invite) }}</span>
+                </div>
+                <div v-if="invite.inviteURL" class="text-xs text-gray-500 mt-2 break-all">
+                  链接：{{ invite.inviteURL }}
                 </div>
               </div>
-              <div class="flex shrink-0 justify-end">
+              <div class="flex shrink-0 justify-end gap-2">
                 <button
+                  v-if="invite.inviteURL"
+                  @click="copyInviteLink(invite)"
+                  class="btn border border-stone-200 bg-white hover:bg-stone-100 text-black h-9 min-h-fit"
+                  type="button"
+                >
+                  复制链接
+                </button>
+                <button
+                  v-if="invite.status == 'pending'"
                   :disabled="!canManageInvites || inviteSubmitting"
                   @click="revokeInvite(invite)"
                   class="btn border-0 bg-red-600 hover:bg-red-700 disabled:bg-red-600/60 text-white h-9 min-h-fit"

@@ -26,6 +26,7 @@ func (h *Mirage) ConsoleLogout(
 		}
 		http.SetCookie(w, delCookie)
 	}
+	h.clearInviteAuthSession(w, r)
 	nextURL := r.URL.Query().Get("next_url")
 	if nextURL == "" {
 		nextURL = "/"

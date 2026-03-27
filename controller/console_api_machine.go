@@ -177,9 +177,6 @@ func (h *Mirage) ConsoleMachinesAPI(
 			}
 			for i := range shares {
 				share := &shares[i]
-				if share.Status == MachineShareStatusRevoked {
-					continue
-				}
 				if tmpMachine.ShareID == "" {
 					tmpMachine.ShareID = share.StableID
 				}
@@ -296,8 +293,14 @@ func mapShareErrorMessage(err error, creating bool) string {
 			return "目标身份无效"
 		}
 		return "分享信息无效"
+	case errors.Is(err, ErrMachineShareTargetMismatch):
+		return "登录身份与分享目标不匹配"
 	case errors.Is(err, ErrMachineShareTargetAlreadyInOrg):
 		return "目标身份已在当前组织中"
+	case errors.Is(err, ErrMachineShareAlreadyAccepted):
+		return "分享已被接受"
+	case errors.Is(err, ErrMachineShareAlreadyRejected):
+		return "分享已被拒绝"
 	case errors.Is(err, ErrMachineShareAlreadyRevoked):
 		return "分享已被撤销"
 	case errors.Is(err, ErrMachineShareNotFound):
@@ -311,11 +314,13 @@ type machineShareResponse struct {
 	Id              string     `json:"id"`
 	StableId        string     `json:"stableId"`
 	ShareToken      string     `json:"shareToken"`
+	ShareURL        string     `json:"shareURL"`
 	TargetIdentity  string     `json:"targetIdentity"`
 	Status          string     `json:"status"`
 	SourceMachineID string     `json:"sourceMachineID"`
 	TargetOrgID     string     `json:"targetOrgID"`
 	AcceptedAt      *time.Time `json:"acceptedAt"`
+	RejectedAt      *time.Time `json:"rejectedAt"`
 	RevokedAt       *time.Time `json:"revokedAt"`
 	CreatedAt       time.Time  `json:"createdAt"`
 }
@@ -329,10 +334,12 @@ func (h *Mirage) buildMachineShareResponse(share *MachineShare) *machineShareRes
 		Id:              strconv.FormatInt(share.ID, 10),
 		StableId:        share.StableID,
 		ShareToken:      share.ShareToken,
+		ShareURL:        h.buildMachineShareURL(share.ShareToken),
 		TargetIdentity:  share.TargetIdentity,
 		Status:          share.Status,
 		SourceMachineID: strconv.FormatInt(share.SourceMachineID, 10),
 		AcceptedAt:      share.AcceptedAt,
+		RejectedAt:      share.RejectedAt,
 		RevokedAt:       share.RevokedAt,
 		CreatedAt:       share.CreatedAt.UTC(),
 	}
@@ -509,6 +516,15 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 	case "accept_share", "accept-share":
 		shareToken := parseRequestString(reqData, "shareToken", "token")
 		share, err := h.AcceptMachineShareByToken(shareToken, user)
+		if err != nil {
+			h.doAPIResponse(writer, mapShareErrorMessage(err, false), nil)
+			return
+		}
+		h.doAPIResponse(writer, "", h.buildMachineShareResponse(share))
+		return
+	case "reject_share", "reject-share":
+		shareToken := parseRequestString(reqData, "shareToken", "token")
+		share, err := h.RejectMachineShareByToken(shareToken, user)
 		if err != nil {
 			h.doAPIResponse(writer, mapShareErrorMessage(err, false), nil)
 			return

@@ -124,8 +124,15 @@ function shareRevokedDone(share) {
     return;
   }
 
-  const currentShares = machineActiveShares(mid).filter(function (item) {
-    return item.id != share.id;
+  const currentShares = machineActiveShares(mid).map(function (item) {
+    if (item.id == share.id) {
+      return {
+        ...item,
+        status: "revoked",
+        revokedAt: new Date().toISOString(),
+      };
+    }
+    return item;
   });
   MList.value[mid]["activeShares"] = currentShares;
   MList.value[mid]["issharedout"] = currentShares.length > 0;
@@ -192,7 +199,18 @@ function machineShareBadgeText(m) {
     return "";
   }
   const accepted = m.acceptedShareCount || 0;
-  return accepted > 0 ? `对外共享+${accepted}` : "共享中";
+  const pending = pendingShareCount(m);
+  const rejected = rejectedShareCount(m);
+  if (accepted > 0) {
+    return `对外共享+${accepted}`;
+  }
+  if (pending > 0) {
+    return "待处理共享";
+  }
+  if (rejected > 0) {
+    return "共享被拒";
+  }
+  return "共享记录";
 }
 
 function machineShareTooltip(m) {
@@ -202,36 +220,42 @@ function machineShareTooltip(m) {
   }
   return shares
     .map(function (share) {
-      return `${share.targetIdentity}（${share.status == "accepted" ? "已接受" : "待接受"}）`;
+      return `${share.targetIdentity}（${shareStatusText(share.status)}）`;
     })
     .join("\n");
 }
 
-function firstMachineShareToken(m) {
-  return m?.activeShares?.[0]?.shareToken || "";
+function firstMachineShareLink(m) {
+  return m?.activeShares?.[0]?.shareURL || "";
 }
 
-function copyShareToken(m) {
-  const shareToken = firstMachineShareToken(m);
-  if (!shareToken) {
-    toastMsg.value = "暂无可复制的分享令牌";
+function copyShareLink(m) {
+  const shareLink = firstMachineShareLink(m);
+  if (!shareLink) {
+    toastMsg.value = "暂无可复制的邀请链接";
     toastShow.value = true;
     return;
   }
-  navigator.clipboard.writeText(shareToken).then(function () {
-    toastMsg.value = "分享令牌已复制到粘贴板！";
+  navigator.clipboard.writeText(shareLink).then(function () {
+    toastMsg.value = "邀请链接已复制到粘贴板！";
     toastShow.value = true;
   });
 }
 
-function shareTokenButtonText(m) {
-  return firstMachineShareToken(m) ? "复制令牌" : "";
+function shareLinkButtonText(m) {
+  return firstMachineShareLink(m) ? "复制链接" : "";
 }
 
 function pendingShareCount(m) {
-  const total = (m?.activeShares || []).length;
-  const accepted = m?.acceptedShareCount || 0;
-  return Math.max(total - accepted, 0);
+  return (m?.activeShares || []).filter(function (share) {
+    return share.status == "pending";
+  }).length;
+}
+
+function rejectedShareCount(m) {
+  return (m?.activeShares || []).filter(function (share) {
+    return share.status == "rejected";
+  }).length;
 }
 
 function machineShareDetailText(m) {
@@ -250,7 +274,24 @@ function machineShareDetailText(m) {
   if ((m.acceptedShareCount || 0) > 0) {
     detail.push(`${m.acceptedShareCount} 个已接受`);
   }
+  const rejected = rejectedShareCount(m);
+  if (rejected > 0) {
+    detail.push(`${rejected} 个已拒绝`);
+  }
   return detail.join(" · ");
+}
+
+function shareStatusText(status) {
+  switch (status) {
+    case "accepted":
+      return "已接受";
+    case "rejected":
+      return "已拒绝";
+    case "revoked":
+      return "已撤销";
+    default:
+      return "待处理";
+  }
 }
 
 function machineShareStatusClass(m) {
@@ -612,12 +653,12 @@ function copyMIPv6() {
               {{ m.connectedToControl ? "已连接" : m.lastSeen }}
             </span>
             <button
-              v-if="m.issharedout && shareTokenButtonText(m)"
-              @click.stop="copyShareToken(m)"
+              v-if="m.issharedout && shareLinkButtonText(m)"
+              @click.stop="copyShareLink(m)"
               class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-white text-gray-600 rounded-sm px-2 py-1 text-xs hover:bg-gray-100"
               type="button"
             >
-              {{ shareTokenButtonText(m) }}
+              {{ shareLinkButtonText(m) }}
             </button>
             <span v-if="m.issharedout && machineShareDetailText(m)" class="text-xs text-gray-600">
               {{ machineShareDetailText(m) }}
@@ -730,13 +771,13 @@ function copyMIPv6() {
                         {{ machineShareBadgeText(m) }}
                       </div>
                     </span>
-                    <span v-if="m.issharedout && shareTokenButtonText(m)">
+                    <span v-if="m.issharedout && shareLinkButtonText(m)">
                       <button
-                        @click.stop="copyShareToken(m)"
+                        @click.stop="copyShareLink(m)"
                         class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-white text-gray-600 rounded-sm px-1 text-xs mr-1 hover:bg-gray-100"
                         type="button"
                       >
-                        {{ shareTokenButtonText(m) }}
+                        {{ shareLinkButtonText(m) }}
                       </button>
                     </span>
                     <span

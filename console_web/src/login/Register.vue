@@ -227,8 +227,6 @@ function doRegister() {
       emit("reg-done", res.data["data"]);
     })
     .catch((err) => {
-      ccbejnchjvrvcdtlrhgbfbhncivnnlvjuleiighnr;
-
       preventAction.value = false;
       toastMsg.value = err;
       toastShow.value = true;

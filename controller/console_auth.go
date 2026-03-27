@@ -910,6 +910,10 @@ func (h *Mirage) finishOauthResponse(
 		http.Redirect(w, r, stateItem.nextURL, http.StatusFound)
 		return
 	}
+	if h.maybeBridgeInviteLogin(w, stateItem) {
+		http.Redirect(w, r, stateItem.nextURL, http.StatusFound)
+		return
+	}
 	// TODO:添加判断用户是否存在及自动创建逻辑
 	user, err := h.findOrCreateNewUserForOIDCCallback(stateItem.userName, stateItem.userDisName, OrgName, stateItem.provider)
 	if err != nil { // TODO: 后续这里理论上不会出错，因为会自动创建用户

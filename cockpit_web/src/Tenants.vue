@@ -61,12 +61,20 @@ function showRemoveTenant() {
   closeTenantMenu();
   removeTenantShow.value = true;
 }
+function showRemoveTenantFor(u) {
+  selectTenant.value = u;
+  showRemoveTenant();
+}
 
 const editTenantShow = ref(false);
 function showEditTenant() {
   tenantBtnShow.value = false;
   closeTenantMenu();
   editTenantShow.value = true;
+}
+function showEditTenantFor(u) {
+  selectTenant.value = u;
+  showEditTenant();
 }
 
 function doRemoveTenant() {
@@ -185,7 +193,74 @@ onBeforeRouteLeave(() => {
       >
         {{ TenantNum }} 个租户
       </div>
-      <table class="table w-full">
+      <div class="grid gap-3 md:hidden mb-8">
+        <div
+          v-for="u in TenantList"
+          :key="'mobile-' + u.id"
+          class="rounded-md border border-stone-200 bg-white p-4 shadow-sm"
+        >
+          <div class="flex items-start gap-3">
+            <div
+              class="relative shrink-0 overflow-hidden transition-all duration-300 w-10 h-10 text-xl"
+            >
+              <svg
+                v-if="u.provider == 'Microsoft'"
+                class="w-full h-full"
+                viewBox="0 0 16 16"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path d="M0 0H7.57886V7.57886H0V0Z" fill="#F25022"></path>
+                <path d="M0 8.42114H7.57886V16H0V8.42114Z" fill="#00A4EF"></path>
+                <path d="M8.42114 0H16V7.57886H8.42114V0Z" fill="#7FBA00"></path>
+                <path d="M8.42114 8.42114H16V16H8.42114V8.42114Z" fill="#FFB900"></path>
+              </svg>
+              <svg
+                v-else-if="u.provider == 'Github'"
+                class="w-full h-full"
+                t="1679387527759"
+                viewBox="0 0 1024 1024"
+                version="1.1"
+                xmlns="http://www.w3.org/2000/svg"
+                p-id="3364"
+              >
+                <path
+                  d="M0 524.714667c0 223.36 143.146667 413.269333 342.656 482.986666 26.88 6.826667 22.784-12.373333 22.784-25.344v-88.618666c-155.136 18.176-161.322667-84.48-171.818667-101.589334-21.077333-35.968-70.741333-45.141333-55.936-62.250666 35.328-18.176 71.338667 4.608 112.981334 66.261333 30.165333 44.672 89.002667 37.12 118.912 29.653333a144.64 144.64 0 0 1 39.68-69.546666c-160.682667-28.757333-227.712-126.848-227.712-243.541334 0-56.576 18.688-108.586667 55.253333-150.570666-23.296-69.205333 2.176-128.384 5.546667-137.173334 66.474667-5.973333 135.424 47.573333 140.8 51.754667 37.76-10.197333 80.810667-15.573333 128.981333-15.573333 48.426667 0 91.733333 5.546667 129.706667 15.872 12.8-9.813333 76.885333-55.765333 138.666666-50.133334 3.285333 8.789333 28.16 66.602667 6.272 134.826667 37.077333 42.069333 55.936 94.549333 55.936 151.296 0 116.864-67.413333 215.04-228.565333 243.456a145.92 145.92 0 0 1 43.52 104.106667v128.64c0.896 10.282667 0 20.48 17.194667 20.48 202.410667-68.224 348.16-259.541333 348.16-484.906667C1023.018667 242.176 793.941333 13.312 511.573333 13.312 228.864 13.184 0 242.090667 0 524.714667z"
+                  fill="#000000"
+                  p-id="3365"
+                ></path>
+              </svg>
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="font-semibold text-gray-900 break-all">{{ u.name }}</div>
+              <div class="text-sm text-gray-600 break-all mt-1">{{ u.magicDomain }}</div>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-sm text-gray-600 mt-4">
+            <div>所有者：{{ u.owner }}</div>
+            <div>用户：{{ u.userCount }}</div>
+            <div>管理员：{{ u.adminCount }}</div>
+            <div>设备：{{ u.deviceCount }}</div>
+          </div>
+          <div class="flex gap-2 mt-4">
+            <button
+              @click="showEditTenantFor(u)"
+              class="btn flex-1 border border-stone-200 bg-white hover:bg-stone-100 text-black h-9 min-h-fit"
+              type="button"
+            >
+              编辑租户
+            </button>
+            <button
+              @click="showRemoveTenantFor(u)"
+              class="btn flex-1 border-0 bg-red-600 hover:bg-red-700 text-white h-9 min-h-fit"
+              type="button"
+            >
+              移除租户
+            </button>
+          </div>
+        </div>
+      </div>
+      <table class="hidden md:table w-full">
         <thead>
           <tr>
             <th class="md:w-1/4 flex-auto md:flex-initial md:shrink-0 w-0 text-ellipsis">

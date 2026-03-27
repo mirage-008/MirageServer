@@ -53,6 +53,22 @@ func (c *Config) HasDexOIDCProvider() bool {
 	return c != nil && c.DexConfig != nil && c.OIDC.Issuer != ""
 }
 
+func (c *Config) SelfRegistrationEnabled() bool {
+	if c == nil {
+		return false
+	}
+
+	return strings.TrimSpace(c.IDaaS.App) != "" &&
+		strings.TrimSpace(c.IDaaS.ClientID) != "" &&
+		strings.TrimSpace(c.IDaaS.ClientKey) != "" &&
+		strings.TrimSpace(c.IDaaS.Instance) != "" &&
+		strings.TrimSpace(c.IDaaS.OrgID) != "" &&
+		strings.TrimSpace(c.SMS.ID) != "" &&
+		strings.TrimSpace(c.SMS.Key) != "" &&
+		strings.TrimSpace(c.SMS.Sign) != "" &&
+		strings.TrimSpace(c.SMS.Template) != ""
+}
+
 type SMSConfig struct {
 	ID       string `json:"id"`
 	Key      string `json:"key"`

@@ -109,7 +109,18 @@ function machineShareBadgeText(machine) {
     return "";
   }
   const accepted = machine.acceptedShareCount || 0;
-  return accepted > 0 ? `对外共享+${accepted}` : "共享中";
+  const pending = pendingShareCount(machine);
+  const rejected = rejectedShareCount(machine);
+  if (accepted > 0) {
+    return `对外共享+${accepted}`;
+  }
+  if (pending > 0) {
+    return "待处理共享";
+  }
+  if (rejected > 0) {
+    return "共享被拒";
+  }
+  return "共享记录";
 }
 
 function machineShareTooltip(machine) {
@@ -119,23 +130,29 @@ function machineShareTooltip(machine) {
   }
   return shares
     .map(function (share) {
-      return `${share.targetIdentity}（${share.status == "accepted" ? "已接受" : "待接受"}）`;
+      return `${share.targetIdentity}（${shareStatusText(share.status)}）`;
     })
     .join("\n");
 }
 
-function firstMachineShareToken(machine) {
-  return machine?.activeShares?.[0]?.shareToken || "";
+function firstMachineShareLink(machine) {
+  return machine?.activeShares?.[0]?.shareURL || "";
 }
 
-function shareTokenButtonText(machine) {
-  return firstMachineShareToken(machine) ? "复制令牌" : "";
+function shareLinkButtonText(machine) {
+  return firstMachineShareLink(machine) ? "复制链接" : "";
 }
 
 function pendingShareCount(machine) {
-  const total = (machine?.activeShares || []).length;
-  const accepted = machine?.acceptedShareCount || 0;
-  return Math.max(total - accepted, 0);
+  return (machine?.activeShares || []).filter(function (share) {
+    return share.status == "pending";
+  }).length;
+}
+
+function rejectedShareCount(machine) {
+  return (machine?.activeShares || []).filter(function (share) {
+    return share.status == "rejected";
+  }).length;
 }
 
 function machineShareDetailText(machine) {
@@ -153,6 +170,10 @@ function machineShareDetailText(machine) {
   }
   if ((machine.acceptedShareCount || 0) > 0) {
     detail.push(`${machine.acceptedShareCount} 个已接受`);
+  }
+  const rejected = rejectedShareCount(machine);
+  if (rejected > 0) {
+    detail.push(`${rejected} 个已拒绝`);
   }
   return detail.join(" · ");
 }
@@ -178,8 +199,15 @@ function shareCreatedDone(shareResponse) {
 }
 
 function shareRevokedDone(share) {
-  const currentShares = machineActiveShares().filter(function (item) {
-    return item.id != share.id;
+  const currentShares = machineActiveShares().map(function (item) {
+    if (item.id == share.id) {
+      return {
+        ...item,
+        status: "revoked",
+        revokedAt: new Date().toISOString(),
+      };
+    }
+    return item;
   });
   currentMachine.value["activeShares"] = currentShares;
   currentMachine.value["issharedout"] = currentShares.length > 0;
@@ -191,17 +219,30 @@ function shareRevokedDone(share) {
   toastShow.value = true;
 }
 
-function copyShareToken() {
-  const shareToken = firstMachineShareToken(currentMachine.value);
-  if (!shareToken) {
-    toastMsg.value = "暂无可复制的分享令牌";
+function copyShareLink() {
+  const shareLink = firstMachineShareLink(currentMachine.value);
+  if (!shareLink) {
+    toastMsg.value = "暂无可复制的邀请链接";
     toastShow.value = true;
     return;
   }
-  navigator.clipboard.writeText(shareToken).then(function () {
-    toastMsg.value = "分享令牌已复制到粘贴板！";
+  navigator.clipboard.writeText(shareLink).then(function () {
+    toastMsg.value = "邀请链接已复制到粘贴板！";
     toastShow.value = true;
   });
+}
+
+function shareStatusText(status) {
+  switch (status) {
+    case "accepted":
+      return "已接受";
+    case "rejected":
+      return "已拒绝";
+    case "revoked":
+      return "已撤销";
+    default:
+      return "待处理";
+  }
 }
 
 //数据填充控制部分
@@ -545,13 +586,13 @@ function isInvalidTag(tag) {
                   {{ machineShareBadgeText(currentMachine) }}
                 </div>
               </span>
-              <span v-if="currentMachine.issharedout && shareTokenButtonText(currentMachine)">
+              <span v-if="currentMachine.issharedout && shareLinkButtonText(currentMachine)">
                 <button
-                  @click="copyShareToken"
+                  @click="copyShareLink"
                   class="inline-flex items-center align-middle justify-center font-medium border border-gray-200 bg-white text-gray-600 rounded-sm px-1 text-xs mr-1 hover:bg-gray-100"
                   type="button"
                 >
-                  {{ shareTokenButtonText(currentMachine) }}
+                  {{ shareLinkButtonText(currentMachine) }}
                 </button>
               </span>
               <span

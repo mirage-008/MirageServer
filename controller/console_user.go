@@ -72,6 +72,10 @@ func (h *Mirage) RegisterUserAPI(
 	writer http.ResponseWriter,
 	req *http.Request,
 ) {
+	if !h.cfg.SelfRegistrationEnabled() {
+		h.doAPIResponse(writer, "当前未开启自助注册", nil)
+		return
+	}
 
 	reqData := make(map[string]string)
 	json.NewDecoder(req.Body).Decode(&reqData)
