@@ -95,6 +95,10 @@ function displayProtocol(rule) {
         每条规则会定义来源 <code>src</code>、目标 <code>dst</code>、协议 <code>proto</code>
         和动作 <code>action</code>，当前动作固定为 <code>accept</code>，保存后由后端按现有 ACL 语义进行校验。
       </p>
+      <p class="mt-2">
+        点击“Visual Editor…”或“编辑”后会进入条目式 visual editor；如需直接粘贴整份策略，请使用左侧的
+        <code>JSON 策略</code> 页面。
+      </p>
     </div>
     <div class="mt-10">
       <div class="flex justify-between items-center mt-16">
@@ -109,7 +113,7 @@ function displayProtocol(rule) {
           @click="showCreateRule"
           class="btn border border-stone-300 hover:border-stone-300 disabled:border-stone-300 bg-base-200 hover:bg-base-300 disabled:bg-base-200/60 text-black disabled:text-black/30 h-9 min-h-fit ml-3 font-normal"
         >
-          创建规则…
+          Visual Editor…
         </button>
       </div>
       <div
