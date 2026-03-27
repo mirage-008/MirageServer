@@ -5,6 +5,7 @@ import { onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import Tags from "./aclpart/Tags.vue";
 import Groups from "./aclpart/Groups.vue";
 import Hosts from "./aclpart/Hosts.vue";
+import Policy from "./aclpart/Policy.vue";
 import Rules from "./aclpart/Rules.vue";
 import SSH from "./aclpart/SSH.vue";
 import AutoApprovers from "./aclpart/AutoApprovers.vue";
@@ -15,6 +16,7 @@ const currentACLPart = ref("");
 const availableSections = ref([]);
 
 const aclPartContent = {
+  policy: Policy,
   tags: Tags,
   groups: Groups,
   hosts: Hosts,
@@ -24,6 +26,10 @@ const aclPartContent = {
 };
 
 const aclSectionMeta = {
+  policy: {
+    label: "JSON 策略",
+    icon: "code",
+  },
   rules: {
     label: "ACL 规则",
     icon: "list",
@@ -89,7 +95,7 @@ function loadACLMeta() {
       }
     })
     .catch(function () {
-      availableSections.value = ["rules", "auto-approvers", "tags", "groups", "hosts"];
+      availableSections.value = ["policy", "rules", "auto-approvers", "tags", "groups", "hosts"];
       ensureValidACLPart();
     });
 }
@@ -127,7 +133,23 @@ onMounted(() => {
           <template v-for="section in visibleSections" :key="section">
             <div class="flex flex-row items-center mb-2">
               <svg
-                v-if="aclSectionMeta[section].icon == 'tag'"
+                v-if="aclSectionMeta[section].icon == 'code'"
+                xmlns="http://www.w3.org/2000/svg"
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                :stroke-width="iconStrokeWidth(section)"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                :class="iconClass(section)"
+              >
+                <path d="m8 9-3 3 3 3"></path>
+                <path d="m16 9 3 3-3 3"></path>
+              </svg>
+              <svg
+                v-else-if="aclSectionMeta[section].icon == 'tag'"
                 viewBox="0 0 1024 1024"
                 xmlns="http://www.w3.org/2000/svg"
                 width="20"

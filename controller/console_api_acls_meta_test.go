@@ -6,7 +6,7 @@ func TestACLMetaDataDefaults(t *testing.T) {
 	t.Parallel()
 
 	data := ACLMetaData{
-		Sections:         []string{"rules", "auto-approvers", "tags", "groups", "hosts"},
+		Sections:         []string{"policy", "rules", "auto-approvers", "tags", "groups", "hosts"},
 		SSHEnabled:       false,
 		TestsImplemented: false,
 	}

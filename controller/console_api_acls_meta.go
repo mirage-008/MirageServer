@@ -18,7 +18,7 @@ func (h *Mirage) CAPIGetACLMeta(
 		return
 	}
 
-	sections := []string{"rules", "auto-approvers", "tags", "groups", "hosts"}
+	sections := []string{"policy", "rules", "auto-approvers", "tags", "groups", "hosts"}
 	if featureEnableSSH() {
 		sections = append(sections, "ssh")
 	}
