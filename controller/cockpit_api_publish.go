@@ -201,6 +201,13 @@ type PublishInfoData struct {
 	ClientVersion ClientVersionInfo `json:"client_version"`
 }
 
+func buildPublishUploadURL() string {
+	// Uploads must stay on the same origin as cockpit so the existing
+	// authenticated cookie is sent even when ServerURL differs from the
+	// address the admin is currently using to access the panel.
+	return "/cockpit/api/publish"
+}
+
 func (c *Cockpit) GetPublishInfo(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -211,7 +218,7 @@ func (c *Cockpit) GetPublishInfo(
 		return
 	}
 	c.doAPIResponse(w, "", PublishInfoData{
-		UploadURL:     "https://" + sysCfg.ServerURL + "/cockpit/api/publish",
+		UploadURL:     buildPublishUploadURL(),
 		ClientVersion: sysCfg.ClientVersion,
 	})
 }
