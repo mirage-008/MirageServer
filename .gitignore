@@ -9,6 +9,7 @@ __debug_bin
 /MirageServer
 /mirage-server
 /.claude
+/.worktrees
 
 # Test binary, built with `go test -c`
 *.test
