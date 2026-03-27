@@ -26,7 +26,7 @@ const aliasLoading = ref(false);
 const action = ref("accept");
 const protocol = ref("");
 const sourceItems = ref([""]);
-const destinationItems = ref([""]);
+const destinationRows = ref([createDestinationRow()]);
 const wrongSources = ref(false);
 const wrongDestinations = ref(false);
 
@@ -44,7 +44,7 @@ const normalizedSources = computed(() => {
 });
 
 const normalizedDestinations = computed(() => {
-  return normalizeRuleItems(destinationItems.value);
+  return normalizeDestinationRows(destinationRows.value);
 });
 
 const sourceSuggestions = computed(() => {
@@ -58,18 +58,27 @@ const sourceSuggestions = computed(() => {
   ]);
 });
 
-const destinationSuggestions = computed(() => {
+const destinationTargetSuggestions = computed(() => {
   return uniqueSortedList([
-    "*:*",
-    "autogroup:self:*",
-    "autogroup:internet:*",
-    ...availableHosts.value.map(function (item) {
-      return item + ":*";
-    }),
-    ...availableTags.value.map(function (item) {
-      return item + ":*";
-    }),
+    "*",
+    "autogroup:self",
+    "autogroup:internet",
+    ...availableHosts.value,
+    ...availableTags.value,
   ]);
+});
+
+const destinationPortSuggestions = ["*", "443", "80", "53", "22", "3389"];
+
+const destinationRowIssues = computed(() => {
+  return destinationRows.value.map(function (row) {
+    const target = normalizeRuleItem(row.target);
+    const ports = normalizeRuleItem(row.ports);
+    return {
+      missingTarget: target == "" && ports != "",
+      missingPorts: target != "" && ports == "",
+    };
+  });
 });
 
 const previewText = computed(() => {
@@ -93,7 +102,7 @@ watch(
 );
 
 watch(
-  () => destinationItems.value,
+  () => destinationRows.value,
   () => {
     wrongDestinations.value = false;
   },
@@ -105,13 +114,17 @@ onMounted(() => {
     action.value = props.rule.action || "accept";
     protocol.value = props.rule.proto || "";
     sourceItems.value = props.rule.src && props.rule.src.length > 0 ? props.rule.src.slice() : [""];
-    destinationItems.value =
-      props.rule.dst && props.rule.dst.length > 0 ? props.rule.dst.slice() : [""];
+    destinationRows.value =
+      props.rule.dst && props.rule.dst.length > 0
+        ? props.rule.dst.map(function (item) {
+            return parseDestinationItem(item);
+          })
+        : [createDestinationRow()];
   } else {
     action.value = "accept";
     protocol.value = "";
     sourceItems.value = [""];
-    destinationItems.value = [""];
+    destinationRows.value = [createDestinationRow()];
   }
 
   loadAliasCatalog();
@@ -136,10 +149,51 @@ function uniqueSortedList(items) {
 function normalizeRuleItems(items) {
   return items
     .map(function (item) {
-      return String(item || "").trim();
+      return normalizeRuleItem(item);
     })
     .filter(function (item) {
       return item != "";
+    });
+}
+
+function normalizeRuleItem(item) {
+  return String(item || "").trim();
+}
+
+function createDestinationRow(target = "", ports = "") {
+  return {
+    target: normalizeRuleItem(target),
+    ports: normalizeRuleItem(ports),
+  };
+}
+
+function parseDestinationItem(item) {
+  item = normalizeRuleItem(item);
+  if (item == "") {
+    return createDestinationRow();
+  }
+
+  const separator = item.lastIndexOf(":");
+  if (separator == -1) {
+    return createDestinationRow(item, "");
+  }
+
+  return createDestinationRow(item.slice(0, separator), item.slice(separator + 1));
+}
+
+function normalizeDestinationRows(rows) {
+  return rows
+    .map(function (row) {
+      return createDestinationRow(row.target, row.ports);
+    })
+    .filter(function (row) {
+      return row.target != "" || row.ports != "";
+    })
+    .filter(function (row) {
+      return row.target != "" && row.ports != "";
+    })
+    .map(function (row) {
+      return row.target + ":" + row.ports;
     });
 }
 
@@ -147,12 +201,16 @@ function ensureOneEditableRow(items) {
   return items.length > 0 ? items : [""];
 }
 
+function ensureOneDestinationRow(rows) {
+  return rows.length > 0 ? rows : [createDestinationRow()];
+}
+
 function addSourceRow(value = "") {
   sourceItems.value = sourceItems.value.concat(value);
 }
 
-function addDestinationRow(value = "") {
-  destinationItems.value = destinationItems.value.concat(value);
+function addDestinationRow(target = "", ports = "") {
+  destinationRows.value = destinationRows.value.concat(createDestinationRow(target, ports));
 }
 
 function removeSourceRow(index) {
@@ -164,8 +222,8 @@ function removeSourceRow(index) {
 }
 
 function removeDestinationRow(index) {
-  destinationItems.value = ensureOneEditableRow(
-    destinationItems.value.filter(function (_, currentIndex) {
+  destinationRows.value = ensureOneDestinationRow(
+    destinationRows.value.filter(function (_, currentIndex) {
       return currentIndex != index;
     })
   );
@@ -186,23 +244,29 @@ function addUniqueSource(value) {
   addSourceRow(value);
 }
 
-function addUniqueDestination(value) {
+function addSuggestedDestinationTarget(value) {
   value = String(value || "").trim();
   if (value == "") {
     return;
   }
-  if (normalizedDestinations.value.includes(value)) {
+
+  const blankRowIndex = destinationRows.value.findIndex(function (row) {
+    return normalizeRuleItem(row.target) == "" && normalizeRuleItem(row.ports) == "";
+  });
+  if (blankRowIndex != -1) {
+    destinationRows.value[blankRowIndex].target = value;
+    destinationRows.value[blankRowIndex].ports = "*";
     return;
   }
-  if (destinationItems.value.length == 1 && destinationItems.value[0].trim() == "") {
-    destinationItems.value = [value];
-    return;
-  }
-  addDestinationRow(value);
+  addDestinationRow(value, "*");
 }
 
 function useProtocolPreset(value) {
   protocol.value = value;
+}
+
+function useDestinationPortPreset(index, value) {
+  destinationRows.value[index].ports = value;
 }
 
 function loadAliasCatalog() {
@@ -270,6 +334,14 @@ function saveRule() {
     return;
   }
   if (destinations.length == 0) {
+    wrongDestinations.value = true;
+    return;
+  }
+  if (
+    destinationRowIssues.value.some(function (issue) {
+      return issue.missingTarget || issue.missingPorts;
+    })
+  ) {
     wrongDestinations.value = true;
     return;
   }
@@ -451,8 +523,7 @@ function saveRule() {
                 <div>
                   <div class="font-semibold text-lg">目标（dst）</div>
                   <p class="text-sm text-gray-500 mt-1">
-                    目标必须带端口，例如 <code>tag:web:443</code>、<code>internal-db:5432</code>、
-                    <code>autogroup:self:*</code>。
+                    每行拆成“目标选择器 + 端口”两列，更接近官方 visual editor 的填写方式。
                   </p>
                 </div>
                 <button
@@ -468,50 +539,101 @@ function saveRule() {
             <div class="p-4">
               <div class="space-y-3">
                 <div
-                  v-for="(item, index) in destinationItems"
+                  v-for="(row, index) in destinationRows"
                   :key="'dst-' + index"
-                  class="flex items-center gap-3"
+                  class="rounded-lg border border-stone-200 bg-stone-50 p-3"
                 >
-                  <div class="w-8 shrink-0 text-right text-xs text-gray-400">
-                    {{ index + 1 }}
+                  <div class="grid gap-3 lg:grid-cols-[2rem_minmax(0,1fr)_9rem_auto] items-start">
+                    <div class="pt-3 text-right text-xs text-gray-400">
+                      {{ index + 1 }}
+                    </div>
+                    <div>
+                      <label class="block text-xs font-medium text-gray-500 mb-2">目标选择器</label>
+                      <input
+                        v-model="destinationRows[index].target"
+                        list="acl-rule-destination-target-suggestions"
+                        class="input w-full border focus:outline-blue-500/60 hover:border disabled:hover:border-stone-200 disabled:border-stone-200 rounded-md h-10 min-h-fit"
+                        :class="
+                          destinationRowIssues[index]?.missingTarget
+                            ? 'border-red-400 hover:border-red-400 focus:outline-red-500/60'
+                            : 'border-stone-200 hover:border-stone-400'
+                        "
+                        :disabled="inputBlocking"
+                        type="text"
+                        placeholder="例如 tag:web / internal-db / autogroup:self / *"
+                      />
+                    </div>
+                    <div>
+                      <label class="block text-xs font-medium text-gray-500 mb-2">端口</label>
+                      <input
+                        v-model="destinationRows[index].ports"
+                        class="input w-full border focus:outline-blue-500/60 hover:border disabled:hover:border-stone-200 disabled:border-stone-200 rounded-md h-10 min-h-fit"
+                        :class="
+                          destinationRowIssues[index]?.missingPorts
+                            ? 'border-red-400 hover:border-red-400 focus:outline-red-500/60'
+                            : 'border-stone-200 hover:border-stone-400'
+                        "
+                        :disabled="inputBlocking"
+                        type="text"
+                        placeholder="例如 * / 443 / 80,443"
+                      />
+                    </div>
+                    <div class="pt-7">
+                      <button
+                        type="button"
+                        :disabled="inputBlocking"
+                        @click="removeDestinationRow(index)"
+                        class="btn btn-sm btn-ghost shrink-0 border-0 bg-base-0 hover:bg-base-200"
+                      >
+                        删除
+                      </button>
+                    </div>
                   </div>
-                  <input
-                    v-model="destinationItems[index]"
-                    list="acl-rule-destination-suggestions"
-                    class="input w-full border focus:outline-blue-500/60 hover:border disabled:hover:border-stone-200 disabled:border-stone-200 border-stone-200 hover:border-stone-400 rounded-md h-10 min-h-fit"
-                    :disabled="inputBlocking"
-                    type="text"
-                    placeholder="例如 tag:web:443 / internal-db:5432 / *:*"
-                  />
-                  <button
-                    type="button"
-                    :disabled="inputBlocking"
-                    @click="removeDestinationRow(index)"
-                    class="btn btn-sm btn-ghost shrink-0 border-0 bg-base-0 hover:bg-base-200"
-                  >
-                    删除
-                  </button>
+
+                  <div class="lg:ml-11 mt-3">
+                    <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">常用端口</div>
+                    <div class="flex flex-wrap gap-2">
+                      <button
+                        v-for="port in destinationPortSuggestions"
+                        :key="'port-chip-' + index + '-' + port"
+                        type="button"
+                        :disabled="inputBlocking"
+                        @click="useDestinationPortPreset(index, port)"
+                        class="inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium transition"
+                        :class="
+                          destinationRows[index].ports.trim() == port
+                            ? 'border-blue-200 bg-blue-100 text-blue-900'
+                            : 'border-stone-200 bg-white text-stone-600 hover:border-stone-300'
+                        "
+                      >
+                        {{ port }}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
               <p v-if="wrongDestinations" class="text-sm text-red-500 mt-3">
-                请至少填写一个目标项
+                请至少填写一个完整目标项；已填写目标时必须同时填写端口。
               </p>
 
               <div class="mt-5">
-                <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">快速添加</div>
+                <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">快速添加目标</div>
                 <div v-if="aliasLoading" class="text-sm text-gray-500">正在加载可用别名…</div>
                 <div v-else class="flex flex-wrap gap-2">
                   <button
-                    v-for="item in destinationSuggestions.slice(0, 18)"
+                    v-for="item in destinationTargetSuggestions.slice(0, 18)"
                     :key="'destination-chip-' + item"
                     type="button"
                     :disabled="inputBlocking"
-                    @click="addUniqueDestination(item)"
+                    @click="addSuggestedDestinationTarget(item)"
                     class="inline-flex items-center rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-medium text-stone-600 transition hover:border-stone-300 hover:bg-stone-100"
                   >
-                    {{ item }}
+                    {{ item }}<span class="ml-1 text-stone-400">:*</span>
                   </button>
                 </div>
+                <p class="text-xs text-gray-500 mt-3">
+                  从这里快速添加时，默认端口会带上 <code>*</code>，你可以再按行改成具体端口或端口段。
+                </p>
               </div>
             </div>
           </section>
@@ -529,7 +651,7 @@ function saveRule() {
           <div class="font-medium text-gray-700 mb-2">填写提示</div>
           <ul class="list-disc list-inside space-y-1">
             <li>来源支持用户、<code>group:xxx</code>、<code>tag:xxx</code>、<code>*</code> 等现有 ACL 别名</li>
-            <li>目标必须包含端口；协议需要全端口时请使用 <code>*</code></li>
+            <li>目标会被组装成 <code>目标:端口</code>；端口支持 <code>*</code>、单端口、逗号列表和端口段</li>
             <li><code>autogroup:self</code> 目标只允许来源为用户、用户组、<code>*</code> 或 <code>autogroup:member</code></li>
           </ul>
         </div>
@@ -556,9 +678,9 @@ function saveRule() {
       <datalist id="acl-rule-source-suggestions">
         <option v-for="item in sourceSuggestions" :key="'src-opt-' + item" :value="item"></option>
       </datalist>
-      <datalist id="acl-rule-destination-suggestions">
+      <datalist id="acl-rule-destination-target-suggestions">
         <option
-          v-for="item in destinationSuggestions"
+          v-for="item in destinationTargetSuggestions"
           :key="'dst-opt-' + item"
           :value="item"
         ></option>
