@@ -5,6 +5,7 @@ import General from "./setpart/General.vue";
 import Authority from "./setpart/Authority.vue";
 import RebindSA from "./setpart/RebindSA.vue";
 import Client from "./setpart/ClientPublish.vue";
+import Funnel from "./setpart/Funnel.vue";
 
 //路由及选择器页面控制
 const setPartContent = {
@@ -12,6 +13,7 @@ const setPartContent = {
   authority: Authority,
   rebindSA: RebindSA,
   client: Client,
+  funnel: Funnel,
 };
 const route = useRoute();
 const router = useRouter();
@@ -81,6 +83,15 @@ onMounted(() => {
                 to="/setting/client"
                 >客户端发布</router-link
               >
+              <router-link
+                class="flex font-medium mt-4"
+                :class="{
+                  'text-blue-600': currentSetPart == 'funnel',
+                  'text-gray-700': currentSetPart != 'funnel',
+                }"
+                to="/setting/funnel"
+                >公网入口</router-link
+              >
             </div>
           </div>
           <div class="flex flex-row mb-12">
@@ -123,6 +134,7 @@ onMounted(() => {
               <option value="general">基本配置</option>
               <option value="authority">第三方服务</option>
               <option value="client">客户端发布</option>
+              <option value="funnel">公网入口</option>
             </optgroup>
             <optgroup label="其他配置">
               <option value="rebindSA">换绑超管</option>

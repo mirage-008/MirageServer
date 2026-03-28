@@ -99,6 +99,8 @@ type Mirage struct {
 	pollSessionMu     sync.Mutex
 	pollSessionSeq    uint64
 	pollSessions      map[int64]uint64
+	funnelRuntimeMu   sync.RWMutex
+	funnelRuntime     *funnelRuntime
 
 	shutdownChan       chan struct{}
 	pollNetMapStreamWG sync.WaitGroup
@@ -435,6 +437,18 @@ func (h *Mirage) initRouter(router *mux.Router) {
 	console_router.HandleFunc("/api/acls/auto-approvers", h.CAPIGetAutoApprovers).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/subscription", h.CAPIGetSubscription).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/derp/query", h.CAPIQueryDERP).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/funnel/domains", h.CAPIGetFunnelDomains).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/funnel/domains", h.CAPIPostFunnelDomains).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/funnel/domains/{id}/verify", h.CAPIVerifyFunnelDomain).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/funnel/domains/{id}", h.CAPIDeleteFunnelDomain).Methods(http.MethodDelete)
+	console_router.HandleFunc("/api/funnel/services", h.CAPIGetFunnelServices).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/funnel/services", h.CAPIPostFunnelServices).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/funnel/services/{id}", h.CAPIPatchFunnelService).Methods(http.MethodPatch)
+	console_router.HandleFunc("/api/funnel/services/{id}/enable", h.CAPIEnableFunnelService).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/funnel/services/{id}/disable", h.CAPIDisableFunnelService).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/funnel/services/{id}", h.CAPIDeleteFunnelService).Methods(http.MethodDelete)
+	console_router.HandleFunc("/api/funnel/services/{id}/status", h.CAPIGetFunnelServiceStatus).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/funnel/services/{id}/logs", h.CAPIGetFunnelServiceLogs).Methods(http.MethodGet)
 
 	// POST(更新类)API
 	console_router.HandleFunc("/api/users", h.CAPIPostUsers).Methods(http.MethodPost)
@@ -554,6 +568,12 @@ func (h *Mirage) Serve(ctrlChn chan CtrlMsg) error {
 	log.Info().
 		Msgf("listening and serving HTTP on: %s", h.cfg.Addr)
 
+	funnelRuntime := newFunnelRuntime(h)
+	h.setFunnelRuntime(funnelRuntime)
+	if err := funnelRuntime.start(); err != nil {
+		log.Error().Err(err).Msg("failed to start funnel runtime")
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to bind to TCP address: %w", err)
 	}
@@ -580,6 +600,10 @@ func (h *Mirage) Serve(ctrlChn chan CtrlMsg) error {
 				if err != nil && !errors.Is(err, net.ErrClosed) {
 					log.Error().Err(err).Msg("Failed to close http listener")
 				}
+				if rt := h.currentFunnelRuntime(); rt != nil {
+					rt.close()
+					h.setFunnelRuntime(nil)
+				}
 
 				h.cancel() // ??
 				/*
@@ -602,6 +626,9 @@ func (h *Mirage) Serve(ctrlChn chan CtrlMsg) error {
 					h.resetRemoteDERPMapCache()
 				}
 				h.cfg = msg.SysCfg
+				h.requestFunnelRuntimeReload()
+			case "reload-funnel":
+				h.requestFunnelRuntimeReload()
 			case "set-last-update":
 				log.Info().Msg("Received set-last-update message, updating last update time")
 				h.setLastStateChangeToNow()

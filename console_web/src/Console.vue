@@ -37,6 +37,7 @@ const currentRoute = computed(() => {
   if (curPath == "/") return "machines";
   if (curPath.substring(0, 6) == "/users") return "users";
   if (curPath.substring(0, 4) == "/dns") return "dns";
+  if (curPath.substring(0, 7) == "/funnel") return "funnel";
   if (curPath.substring(0, 8) == "/machine") return "machines";
   if (curPath.substring(0, 8) == "/setting") return "setting";
   if (curPath.substring(0, 5) == "/acls") return "acls";
@@ -327,6 +328,35 @@ onMounted(() => {
               ></path>
             </svg>
             <div :class="{ 'font-medium': currentRoute == 'dns' }">DNS</div>
+          </div>
+        </router-link>
+
+        <router-link class="whitespace-nowrap py-2 group relative" to="/funnel">
+          <div
+            :class="{
+              'text-blue-600 after:visible': currentRoute == 'funnel',
+              'text-gray-600 group-hover:text-gray-800 after:invisible':
+                currentRoute != 'funnel',
+            }"
+            class="px-3 py-2 flex items-center rounded-md group-hover:bg-gray-200 after:absolute after:bottom-0 after:right-3 after:left-3 after:h-0.5"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="1.125em"
+              height="1.125em"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              :stroke-width="currentRoute == 'funnel' ? '2.5' : '2'"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="mr-2 inline-block"
+            >
+              <path d="M12 2 4 5v6c0 5 3.4 9.4 8 10 4.6-.6 8-5 8-10V5l-8-3Z"></path>
+              <path d="M8 10h8"></path>
+              <path d="M12 6v8"></path>
+            </svg>
+            <div :class="{ 'font-medium': currentRoute == 'funnel' }">公网服务</div>
           </div>
         </router-link>
 

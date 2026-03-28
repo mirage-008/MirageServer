@@ -26,6 +26,7 @@ type Config struct {
 	Addr       string         //DONE
 	IPPrefixes []netip.Prefix //DONE
 	BaseDomain string         //DONE
+	FunnelCfg  FunnelPlatformConfig
 
 	AllowRouteDueToMachine bool //DONE
 

@@ -48,7 +48,7 @@ func (dp *DataPool) InitCockpitDB() error {
 		return err
 	}
 
-	return err
+	return dp.initFunnelTables()
 }
 
 func (dp *DataPool) InitMirageDB() error {
@@ -93,7 +93,21 @@ func (dp *DataPool) InitMirageDB() error {
 		return err
 	}
 
-	return err
+	return dp.initFunnelTables()
+}
+
+func (dp *DataPool) initFunnelTables() error {
+	return migrateFunnelTables(dp.db)
+}
+
+func migrateFunnelTables(db *gorm.DB) error {
+	return db.AutoMigrate(
+		&FunnelDomain{},
+		&FunnelService{},
+		&FunnelEdge{},
+		&FunnelCert{},
+		&FunnelAudit{},
+	)
 }
 
 func (dp *DataPool) OpenDB() error {

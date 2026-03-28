@@ -48,6 +48,7 @@ type SysConfig struct {
 	NaviDeployPub string
 	NaviDeployKey string
 	ClientVersion ClientVersionInfo
+	FunnelCfg     FunnelPlatformConfig `gorm:"type:text"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -168,6 +169,7 @@ func (s *SysConfig) toSrvConfig() (*Config, error) {
 		Addr:                           s.Addr,
 		IPPrefixes:                     []netip.Prefix{netip.Prefix(s.Mip4), netip.Prefix(s.Mip6)},
 		BaseDomain:                     s.Basedomain,
+		FunnelCfg:                      s.FunnelCfg,
 		DERPURL:                        normalizeDERPMapURL(s.DerpUrl),
 		EphemeralNodeInactivityTimeout: normalizeEphemeralNodeInactivityTimeout(s.EphemeralNodeInactivityTimeout),
 		AllowRouteDueToMachine:         s.RouteAccessDueMachine,

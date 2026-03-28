@@ -10,12 +10,14 @@ import Settings from './components/Settings.vue'
 import Users from './components/Users.vue'
 import ACLs from './components/ACLs.vue'
 import Navi from './components/Navi.vue'
+import Funnel from './components/Funnel.vue'
 
 const routes = [
     { path: '/', redirect: '/machines' },
     { path: '/machines', component: Machines },
     { path: '/machines/:mip', component: Machine },
     { path: '/dns', component: DNS },
+    { path: '/funnel', component: Funnel },
     { path: '/settings', redirect: '/settings/general' },
     { path: '/settings/:setpart', component: Settings },
     { path: '/users', component: Users },
