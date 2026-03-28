@@ -22,6 +22,8 @@ type mapResponseStreamState struct {
 	peerNodesByID map[tailcfg.NodeID]*tailcfg.Node
 }
 
+const nodeAttrDisableAndroidBindToActiveNetwork tailcfg.NodeCapability = "disable-android-bind-to-active-network"
+
 func allowedFilterDestinations(machine *Machine) []netip.Prefix {
 	if machine == nil {
 		return nil
@@ -331,6 +333,13 @@ func (h *Mirage) generateMapResponse(
 				}
 			}
 		}
+	}
+	if mapRequest.Hostinfo != nil && strings.EqualFold(mapRequest.Hostinfo.OS, "android") {
+		if resp.Node.CapMap == nil {
+			resp.Node.CapMap = tailcfg.NodeCapMap{}
+		}
+		resp.Node.CapMap[nodeAttrDisableAndroidBindToActiveNetwork] = []tailcfg.RawMessage{}
+		resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, nodeAttrDisableAndroidBindToActiveNetwork)
 	}
 
 	toNodes := func(machines Machines) ([]*tailcfg.Node, error) {

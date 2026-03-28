@@ -151,6 +151,44 @@ func TestGenerateMapResponseFlowLogsSkipNoLogsClients(t *testing.T) {
 	}
 }
 
+func TestGenerateMapResponseAndroidDisablesBindToActiveNetwork(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	owner := createTestUser(t, app, "owner@example.com", "Owner", "flow-org", "Mirage")
+	machine := createTestMachine(t, app, owner, "android-node", "100.64.0.20")
+
+	resp, err := app.generateMapResponse(tailcfg.MapRequest{Hostinfo: &tailcfg.Hostinfo{
+		Hostname: machine.Hostname,
+		OS:       "android",
+	}}, machine, &mapResponseStreamState{})
+	if err != nil {
+		t.Fatalf("generateMapResponse(): %v", err)
+	}
+	if _, ok := resp.Node.CapMap[nodeAttrDisableAndroidBindToActiveNetwork]; !ok {
+		t.Fatalf("expected %q capability for android node, got %#v", nodeAttrDisableAndroidBindToActiveNetwork, resp.Node.CapMap)
+	}
+}
+
+func TestGenerateMapResponseNonAndroidKeepsActiveNetworkBindingDefault(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	owner := createTestUser(t, app, "owner@example.com", "Owner", "flow-org", "Mirage")
+	machine := createTestMachine(t, app, owner, "linux-node", "100.64.0.21")
+
+	resp, err := app.generateMapResponse(tailcfg.MapRequest{Hostinfo: &tailcfg.Hostinfo{
+		Hostname: machine.Hostname,
+		OS:       "linux",
+	}}, machine, &mapResponseStreamState{})
+	if err != nil {
+		t.Fatalf("generateMapResponse(): %v", err)
+	}
+	if _, ok := resp.Node.CapMap[nodeAttrDisableAndroidBindToActiveNetwork]; ok {
+		t.Fatalf("did not expect %q capability for non-android node, got %#v", nodeAttrDisableAndroidBindToActiveNetwork, resp.Node.CapMap)
+	}
+}
+
 func TestPruneFlowLogsWorkerUsesRetentionDays(t *testing.T) {
 	t.Parallel()
 
