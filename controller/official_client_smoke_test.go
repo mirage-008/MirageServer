@@ -1710,6 +1710,12 @@ func initSmokeSchema(t *testing.T, db *gorm.DB) {
 			t.Fatalf("AutoMigrate(%T): %v", model, err)
 		}
 	}
+	if err := migrateFunnelTables(db); err != nil {
+		t.Fatalf("migrateFunnelTables(): %v", err)
+	}
+	if err := migrateFlowLogTables(db); err != nil {
+		t.Fatalf("migrateFlowLogTables(): %v", err)
+	}
 }
 
 func mustFreeTCPAddr(t *testing.T) string {
