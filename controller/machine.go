@@ -1244,6 +1244,8 @@ func (h *Mirage) toNodes(
 //     tailnet.
 //   - hidden ShareeNode peers on the shared source device are not jailed; they
 //     exist only so the source device can receive traffic from recipients.
+//   - hidden ShareeNode peers only advertise their own node addresses; they do
+//     not carry subnet or exit-route advertisements back to the shared source.
 func (h *Mirage) toNode(
 	machine Machine,
 	shared bool,
@@ -1293,19 +1295,24 @@ func (h *Mirage) toNode(
 		[]netip.Prefix{},
 		addrs...) // we append the node own IP, as it is required by the clients
 
-	primaryRoutes, err := h.getMachinePrimaryRoutes(&machine)
-	if err != nil {
-		return nil, err
+	primaryPrefixes := []netip.Prefix{}
+	if !machine.ShareeNode {
+		primaryRoutes, err := h.getMachinePrimaryRoutes(&machine)
+		if err != nil {
+			return nil, err
+		}
+		primaryPrefixes = Routes(primaryRoutes).toPrefixes()
 	}
-	primaryPrefixes := Routes(primaryRoutes).toPrefixes()
 
 	machineRoutes, err := h.GetMachineRoutes(&machine)
 	if err != nil {
 		return nil, err
 	}
-	for _, route := range machineRoutes {
-		if route.Enabled && (route.IsPrimary || route.isExitRoute()) {
-			allowedIPs = append(allowedIPs, netip.Prefix(route.Prefix))
+	if !machine.ShareeNode {
+		for _, route := range machineRoutes {
+			if route.Enabled && (route.IsPrimary || route.isExitRoute()) {
+				allowedIPs = append(allowedIPs, netip.Prefix(route.Prefix))
+			}
 		}
 	}
 
