@@ -511,11 +511,18 @@ func TestListSharePeersForMachineIncludesConnectedOrgMachines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSharePeersForMachine(target): %v", err)
 	}
-	if len(targetPeers) != 1 || targetPeers[0].ID != sourceMachine.ID {
-		t.Fatalf("expected one shared source peer for target machine, got %+v", targetPeers)
+	if len(targetPeers) != 2 {
+		t.Fatalf("expected two shared source-org peers for target machine, got %+v", targetPeers)
 	}
-	if !targetPeers[0].Shared {
-		t.Fatal("expected shared source peer to be marked shared")
+	targetPeersByID := machinesByID(targetPeers)
+	if _, ok := targetPeersByID[sourceMachine.ID]; !ok {
+		t.Fatalf("expected target machine to include shared source machine, got %+v", targetPeers)
+	}
+	if _, ok := targetPeersByID[sourceOrgPeer.ID]; !ok {
+		t.Fatalf("expected target machine to include connected source-org peer, got %+v", targetPeers)
+	}
+	if !targetPeersByID[sourceMachine.ID].Shared || !targetPeersByID[sourceOrgPeer.ID].Shared {
+		t.Fatalf("expected target machine to mark source-org peers as shared, got %+v", targetPeers)
 	}
 	_ = targetMachineB
 }
@@ -594,11 +601,15 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if len(invalidNodeIDs) != 0 {
 		t.Fatalf("expected no invalid node IDs, got %v", invalidNodeIDs)
 	}
-	if len(peers) != 1 || peers[0].ID != sourceMachine.ID {
-		t.Fatalf("expected one shared peer via ACL visibility, got %+v", peers)
+	peersByID := machinesByID(peers)
+	if _, ok := peersByID[sourceMachine.ID]; !ok {
+		t.Fatalf("expected shared source machine via ACL visibility, got %+v", peers)
 	}
-	if !peers[0].Shared {
-		t.Fatal("expected ACL peer to be marked shared")
+	if _, ok := peersByID[sourceOrgPeer.ID]; !ok {
+		t.Fatalf("expected connected source-org peer via ACL visibility, got %+v", peers)
+	}
+	if !peersByID[sourceMachine.ID].Shared || !peersByID[sourceOrgPeer.ID].Shared {
+		t.Fatalf("expected ACL-visible source-org peers to be marked shared, got %+v", peers)
 	}
 
 	sourcePeers, sourceInvalidNodeIDs, err := app.getPeers(sourceMachine, sourceAllowSelf)
@@ -638,7 +649,7 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 		t.Fatalf("expected source org peer to keep same-org source machine visibility, got %+v", sourceOrgPeers)
 	}
 
-	sharedNode, err := app.toNode(peers[0], peers[0].Shared)
+	sharedNode, err := app.toNode(peersByID[sourceMachine.ID], peersByID[sourceMachine.ID].Shared)
 	if err != nil {
 		t.Fatalf("toNode(shared peer): %v", err)
 	}

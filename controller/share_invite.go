@@ -1111,9 +1111,13 @@ func (h *Mirage) ListSharePeersForMachine(machine *Machine) ([]Machine, error) {
 		return nil, err
 	}
 	sharedSourceMachineIDs := make([]int64, 0, len(acceptedTargetShares))
+	sourceOrgIDs := make([]int64, 0, len(acceptedTargetShares))
 	for _, share := range acceptedTargetShares {
 		if share.SourceMachineID != machine.ID {
 			sharedSourceMachineIDs = append(sharedSourceMachineIDs, share.SourceMachineID)
+		}
+		if share.SourceOrgID != 0 && share.SourceOrgID != machine.User.OrganizationID {
+			sourceOrgIDs = append(sourceOrgIDs, share.SourceOrgID)
 		}
 	}
 	sharedSourceMachines, err := h.listMachinesByIDs(sharedSourceMachineIDs)
@@ -1124,6 +1128,15 @@ func (h *Mirage) ListSharePeersForMachine(machine *Machine) ([]Machine, error) {
 		sharedSourceMachines[i].Shared = true
 	}
 	sharePeers = append(sharePeers, sharedSourceMachines...)
+
+	connectedSourceOrgMachines, err := h.listMachinesByOrgIDs(sourceOrgIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range connectedSourceOrgMachines {
+		connectedSourceOrgMachines[i].Shared = true
+	}
+	sharePeers = append(sharePeers, connectedSourceOrgMachines...)
 
 	filtered := make([]Machine, 0, len(sharePeers))
 	for _, peer := range mergeMachines(sharePeers) {
