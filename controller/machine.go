@@ -1235,8 +1235,8 @@ func (h *Mirage) toNodes(
 }
 
 // toNode converts a Machine into a Tailscale Node.
-// Shared peers keep their enabled exit-node and subnet-route capabilities so
-// clients can use them the same way they use owned peers.
+// Shared peers keep exit-node capabilities, but do not advertise subnet routes
+// into the recipient tailnet.
 //
 // The sharing model matches upstream Tailscale quarantine semantics:
 //   - peers shared *to* the current user are marked jailed, so the shared device
@@ -1293,18 +1293,28 @@ func (h *Mirage) toNode(
 		[]netip.Prefix{},
 		addrs...) // we append the node own IP, as it is required by the clients
 
-	primaryRoutes, err := h.getMachinePrimaryRoutes(&machine)
-	if err != nil {
-		return nil, err
+	primaryPrefixes := []netip.Prefix{}
+	if !shared {
+		primaryRoutes, err := h.getMachinePrimaryRoutes(&machine)
+		if err != nil {
+			return nil, err
+		}
+		primaryPrefixes = Routes(primaryRoutes).toPrefixes()
 	}
-	primaryPrefixes := Routes(primaryRoutes).toPrefixes()
 
 	machineRoutes, err := h.GetMachineRoutes(&machine)
 	if err != nil {
 		return nil, err
 	}
 	for _, route := range machineRoutes {
-		if route.Enabled && (route.IsPrimary || route.isExitRoute()) {
+		if !route.Enabled {
+			continue
+		}
+		if route.isExitRoute() {
+			allowedIPs = append(allowedIPs, netip.Prefix(route.Prefix))
+			continue
+		}
+		if !shared && route.IsPrimary {
 			allowedIPs = append(allowedIPs, netip.Prefix(route.Prefix))
 		}
 	}
