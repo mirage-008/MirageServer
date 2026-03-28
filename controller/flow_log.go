@@ -181,20 +181,30 @@ type flowLogSummaryBucket struct {
 	PhysicalTraffic    flowLogTrafficTotals `json:"physicalTraffic"`
 }
 
+type flowLogExportStatusSummary struct {
+	EntryCount     int        `json:"entryCount"`
+	PendingCount   int        `json:"pendingCount"`
+	ExportedCount  int        `json:"exportedCount"`
+	FailedCount    int        `json:"failedCount"`
+	LastAttemptAt  *time.Time `json:"lastAttemptAt,omitempty"`
+	LastExportedAt *time.Time `json:"lastExportedAt,omitempty"`
+}
+
 type flowLogSummary struct {
-	BucketMode         string                 `json:"bucketMode"`
-	RetentionDays      int                    `json:"retentionDays"`
-	EntryCount         int                    `json:"entryCount"`
-	Start              *time.Time             `json:"start,omitempty"`
-	End                *time.Time             `json:"end,omitempty"`
-	HasSubnetTraffic   bool                   `json:"hasSubnetTraffic"`
-	HasExitTraffic     bool                   `json:"hasExitTraffic"`
-	HasPhysicalTraffic bool                   `json:"hasPhysicalTraffic"`
-	VirtualTraffic     flowLogTrafficTotals   `json:"virtualTraffic"`
-	SubnetTraffic      flowLogTrafficTotals   `json:"subnetTraffic"`
-	ExitTraffic        flowLogTrafficTotals   `json:"exitTraffic"`
-	PhysicalTraffic    flowLogTrafficTotals   `json:"physicalTraffic"`
-	Buckets            []flowLogSummaryBucket `json:"buckets,omitempty"`
+	BucketMode         string                     `json:"bucketMode"`
+	RetentionDays      int                        `json:"retentionDays"`
+	EntryCount         int                        `json:"entryCount"`
+	Start              *time.Time                 `json:"start,omitempty"`
+	End                *time.Time                 `json:"end,omitempty"`
+	HasSubnetTraffic   bool                       `json:"hasSubnetTraffic"`
+	HasExitTraffic     bool                       `json:"hasExitTraffic"`
+	HasPhysicalTraffic bool                       `json:"hasPhysicalTraffic"`
+	VirtualTraffic     flowLogTrafficTotals       `json:"virtualTraffic"`
+	SubnetTraffic      flowLogTrafficTotals       `json:"subnetTraffic"`
+	ExitTraffic        flowLogTrafficTotals       `json:"exitTraffic"`
+	PhysicalTraffic    flowLogTrafficTotals       `json:"physicalTraffic"`
+	Export             flowLogExportStatusSummary `json:"export"`
+	Buckets            []flowLogSummaryBucket     `json:"buckets,omitempty"`
 }
 
 func appendNodeCapabilityIfMissing(caps []tailcfg.NodeCapability, capability tailcfg.NodeCapability) []tailcfg.NodeCapability {
@@ -706,6 +716,7 @@ func addEntryToSummary(summary *flowLogSummary, entry FlowLogEntry) {
 	addCounts(&summary.SubnetTraffic, entry.SubnetTxPackets, entry.SubnetTxBytes, entry.SubnetRxPackets, entry.SubnetRxBytes)
 	addCounts(&summary.ExitTraffic, entry.ExitTxPackets, entry.ExitTxBytes, entry.ExitRxPackets, entry.ExitRxBytes)
 	addCounts(&summary.PhysicalTraffic, entry.PhysicalTxPackets, entry.PhysicalTxBytes, entry.PhysicalRxPackets, entry.PhysicalRxBytes)
+	addEntryToExportStatus(&summary.Export, entry)
 }
 
 func addEntryToBucket(bucket *flowLogSummaryBucket, entry FlowLogEntry) {
@@ -717,6 +728,26 @@ func addEntryToBucket(bucket *flowLogSummaryBucket, entry FlowLogEntry) {
 	addCounts(&bucket.SubnetTraffic, entry.SubnetTxPackets, entry.SubnetTxBytes, entry.SubnetRxPackets, entry.SubnetRxBytes)
 	addCounts(&bucket.ExitTraffic, entry.ExitTxPackets, entry.ExitTxBytes, entry.ExitRxPackets, entry.ExitRxBytes)
 	addCounts(&bucket.PhysicalTraffic, entry.PhysicalTxPackets, entry.PhysicalTxBytes, entry.PhysicalRxPackets, entry.PhysicalRxBytes)
+}
+
+func addEntryToExportStatus(summary *flowLogExportStatusSummary, entry FlowLogEntry) {
+	summary.EntryCount++
+	switch {
+	case entry.ExportedAt != nil:
+		summary.ExportedCount++
+	case strings.TrimSpace(entry.ExportError) != "":
+		summary.FailedCount++
+	default:
+		summary.PendingCount++
+	}
+	if entry.LastExportAttemptAt != nil && (summary.LastAttemptAt == nil || entry.LastExportAttemptAt.After(*summary.LastAttemptAt)) {
+		t := entry.LastExportAttemptAt.UTC()
+		summary.LastAttemptAt = &t
+	}
+	if entry.ExportedAt != nil && (summary.LastExportedAt == nil || entry.ExportedAt.After(*summary.LastExportedAt)) {
+		t := entry.ExportedAt.UTC()
+		summary.LastExportedAt = &t
+	}
 }
 
 func resolveFlowLogBucketMode(filter flowLogQuery, entries []FlowLogEntry) string {

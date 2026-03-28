@@ -258,6 +258,13 @@ func TestFlowLogCollectorAndTenantQuery(t *testing.T) {
 	if summary["bucketMode"] != flowLogBucketHour {
 		t.Fatalf("bucketMode=%v", summary["bucketMode"])
 	}
+	exportSummary := summary["export"].(map[string]any)
+	if got := int(exportSummary["pendingCount"].(float64)); got != 1 {
+		t.Fatalf("export pendingCount=%d want 1", got)
+	}
+	if got := int(exportSummary["exportedCount"].(float64)); got != 0 {
+		t.Fatalf("export exportedCount=%d want 0", got)
+	}
 	virtualTraffic := summary["virtualTraffic"].(map[string]any)
 	if got := uint64(virtualTraffic["txBytes"].(float64)); got != 300 {
 		t.Fatalf("virtual txBytes=%d want 300", got)

@@ -72,6 +72,14 @@ func TestFlowLogExportWorkerHTTP(t *testing.T) {
 	if stored.ExportError != "" {
 		t.Fatalf("unexpected export error: %q", stored.ExportError)
 	}
+
+	summary, err := summarizeFlowLogs(app.db, flowLogQuery{}, app.cfg.FlowLogCfg)
+	if err != nil {
+		t.Fatalf("summarizeFlowLogs(): %v", err)
+	}
+	if summary.Export.ExportedCount != 1 || summary.Export.PendingCount != 0 || summary.Export.FailedCount != 0 {
+		t.Fatalf("unexpected export summary: %#v", summary.Export)
+	}
 }
 
 func TestFlowLogExportWorkerElasticsearch(t *testing.T) {
