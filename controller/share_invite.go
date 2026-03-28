@@ -1090,7 +1090,7 @@ func (h *Mirage) ListSharePeersForMachine(machine *Machine) ([]Machine, error) {
 
 	sharePeers := make([]Machine, 0)
 
-	acceptedSourceShares, err := h.ListAcceptedMachineSharesBySourceMachine(machine.ID)
+	acceptedSourceShares, err := h.ListAcceptedMachineSharesBySourceOrg(machine.User.OrganizationID)
 	if err != nil {
 		return nil, err
 	}
