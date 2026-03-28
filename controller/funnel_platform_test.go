@@ -55,6 +55,38 @@ func TestNormalizeFunnelPlatformConfigRejectsInvalidPort(t *testing.T) {
 	}
 }
 
+func TestNormalizeFunnelPlatformConfigDNSMgrDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := normalizeFunnelPlatformConfig(FunnelPlatformConfig{
+		ManagedDNSProvider: FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSUID:      1000,
+		ManagedDNSAPIKey:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("normalizeFunnelPlatformConfig(): %v", err)
+	}
+	if cfg.ManagedBaseDomain != defaultFunnelDNSMgrBaseDomain {
+		t.Fatalf("ManagedBaseDomain = %q", cfg.ManagedBaseDomain)
+	}
+	if cfg.ManagedDNSAPIBaseURL != defaultFunnelDNSMgrAPIBaseURL {
+		t.Fatalf("ManagedDNSAPIBaseURL = %q", cfg.ManagedDNSAPIBaseURL)
+	}
+}
+
+func TestNormalizeFunnelPlatformConfigRejectsDNSMgrSuffixOverride(t *testing.T) {
+	t.Parallel()
+
+	if _, err := normalizeFunnelPlatformConfig(FunnelPlatformConfig{
+		ManagedBaseDomain:  "custom.example.test",
+		ManagedDNSProvider: FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSUID:      1000,
+		ManagedDNSAPIKey:   "secret",
+	}); err == nil {
+		t.Fatal("expected dnsmgr base domain override to fail")
+	}
+}
+
 func TestEffectiveFunnelIngressTargets(t *testing.T) {
 	t.Parallel()
 

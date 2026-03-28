@@ -2,7 +2,9 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,6 +21,29 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
+
+type fakeManagedFunnelDNSProvider struct {
+	ensured   []string
+	deleted   []string
+	ensureErr error
+	deleteErr error
+}
+
+func (f *fakeManagedFunnelDNSProvider) EnsureManagedDomain(_ context.Context, fqdn string) error {
+	if f.ensureErr != nil {
+		return f.ensureErr
+	}
+	f.ensured = append(f.ensured, fqdn)
+	return nil
+}
+
+func (f *fakeManagedFunnelDNSProvider) DeleteManagedDomain(_ context.Context, fqdn string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, fqdn)
+	return nil
+}
 
 func newFunnelTenantTestMirage(t *testing.T) *Mirage {
 	t.Helper()
@@ -89,6 +114,23 @@ func newFunnelTenantTestMirage(t *testing.T) *Mirage {
 	createTestRoute(t, app, machine, "10.10.0.0/24", true, true)
 
 	return app
+}
+
+func setTenantTestFunnelDNSMgrConfig(t *testing.T, app *Mirage) {
+	t.Helper()
+
+	sysCfg := &SysConfig{}
+	if err := app.db.Order("id ASC").First(sysCfg).Error; err != nil {
+		t.Fatalf("First(sysCfg): %v", err)
+	}
+	sysCfg.FunnelCfg.ManagedDNSProvider = FunnelManagedDNSProviderDNSMgr
+	sysCfg.FunnelCfg.ManagedBaseDomain = defaultFunnelDNSMgrBaseDomain
+	sysCfg.FunnelCfg.ManagedDNSAPIBaseURL = "https://dnsmgr.example.test"
+	sysCfg.FunnelCfg.ManagedDNSUID = 1000
+	sysCfg.FunnelCfg.ManagedDNSAPIKey = "secret"
+	if err := app.db.Save(sysCfg).Error; err != nil {
+		t.Fatalf("Save(sysCfg): %v", err)
+	}
 }
 
 func funnelTenantRequest(method, target string, body []byte) *http.Request {
@@ -452,6 +494,81 @@ func TestConsoleFunnelRemoteEdgeStaleStatusStaysPending(t *testing.T) {
 	}
 	if serviceMap["lastError"] != "当前remote-edge尚未完成最近一次同步" {
 		t.Fatalf("lastError = %#v", serviceMap["lastError"])
+	}
+}
+
+func TestCreateManagedFunnelDomainSyncsDNSProvider(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	setTenantTestFunnelDNSMgrConfig(t, app)
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{}
+	app.newManagedFunnelDNSProvider = func(cfg FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
+		if cfg.ManagedDNSProvider != FunnelManagedDNSProviderDNSMgr {
+			t.Fatalf("ManagedDNSProvider = %q", cfg.ManagedDNSProvider)
+		}
+		return fakeDNS, nil
+	}
+
+	owner := createTestUser(t, app, "managed-owner@example.com", "Managed Owner", "managed-org", "Mirage")
+	domainName := "machine-123-managed-org." + defaultFunnelDNSMgrBaseDomain
+	domain, err := app.createManagedFunnelDomain(owner, domainName, 443, FunnelEdgeModeServer, FunnelListenerModeDirect)
+	if err != nil {
+		t.Fatalf("createManagedFunnelDomain(): %v", err)
+	}
+	if len(fakeDNS.ensured) != 1 || fakeDNS.ensured[0] != domain.Domain {
+		t.Fatalf("ensured = %#v", fakeDNS.ensured)
+	}
+}
+
+func TestCreateManagedFunnelDomainRollsBackOnDNSFailure(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	setTenantTestFunnelDNSMgrConfig(t, app)
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{ensureErr: errors.New("dns create failed")}
+	app.newManagedFunnelDNSProvider = func(FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
+		return fakeDNS, nil
+	}
+
+	owner := createTestUser(t, app, "rollback-owner@example.com", "Rollback Owner", "rollback-org", "Mirage")
+	domainName := "machine-456-rollback-org." + defaultFunnelDNSMgrBaseDomain
+	if _, err := app.createManagedFunnelDomain(owner, domainName, 443, FunnelEdgeModeServer, FunnelListenerModeDirect); err == nil {
+		t.Fatal("expected createManagedFunnelDomain to fail")
+	}
+
+	domain := &FunnelDomain{}
+	if err := app.db.Where("domain = ?", domainName).First(domain).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected domain rollback, got err=%v domain=%+v", err, domain)
+	}
+}
+
+func TestDeleteManagedFunnelDomainSyncsDNSProvider(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	setTenantTestFunnelDNSMgrConfig(t, app)
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{}
+	app.newManagedFunnelDNSProvider = func(FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
+		return fakeDNS, nil
+	}
+
+	owner := createTestUser(t, app, "delete-owner@example.com", "Delete Owner", "delete-org", "Mirage")
+	domainName := "machine-789-delete-org." + defaultFunnelDNSMgrBaseDomain
+	domain, err := app.createManagedFunnelDomain(owner, domainName, 443, FunnelEdgeModeServer, FunnelListenerModeDirect)
+	if err != nil {
+		t.Fatalf("createManagedFunnelDomain(): %v", err)
+	}
+	fakeDNS.ensured = nil
+
+	if err := app.deleteFunnelDomainWithChildren(domain); err != nil {
+		t.Fatalf("deleteFunnelDomainWithChildren(): %v", err)
+	}
+	if len(fakeDNS.deleted) != 1 || fakeDNS.deleted[0] != domain.Domain {
+		t.Fatalf("deleted = %#v", fakeDNS.deleted)
 	}
 }
 

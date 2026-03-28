@@ -16,12 +16,17 @@ import (
 )
 
 type FunnelPlatformConfigRequest struct {
-	ManagedBaseDomain   string         `json:"managedBaseDomain"`
-	DefaultEdgeMode     string         `json:"defaultEdgeMode"`
-	DefaultListenerMode string         `json:"defaultListenerMode"`
-	DirectBindAddrs     StringList     `json:"directBindAddrs"`
-	DirectBindPorts     FunnelPortList `json:"directBindPorts"`
-	TrustedProxyCIDRs   StringList     `json:"trustedProxyCIDRs"`
+	ManagedBaseDomain       string         `json:"managedBaseDomain"`
+	DefaultEdgeMode         string         `json:"defaultEdgeMode"`
+	DefaultListenerMode     string         `json:"defaultListenerMode"`
+	DirectBindAddrs         StringList     `json:"directBindAddrs"`
+	DirectBindPorts         FunnelPortList `json:"directBindPorts"`
+	TrustedProxyCIDRs       StringList     `json:"trustedProxyCIDRs"`
+	ManagedDNSProvider      string         `json:"managedDnsProvider"`
+	ManagedDNSAPIBaseURL    string         `json:"managedDnsApiBaseUrl"`
+	ManagedDNSUID           int64          `json:"managedDnsUid"`
+	ManagedDNSAPIKey        string         `json:"managedDnsApiKey"`
+	ManagedDNSSkipTLSVerify bool           `json:"managedDnsSkipTlsVerify"`
 }
 
 type FunnelEdgeUpsertRequest struct {
@@ -86,8 +91,14 @@ func defaultFunnelPlatformConfig() FunnelPlatformConfig {
 		DefaultListenerMode: FunnelListenerModeDirect,
 		DirectBindAddrs:     StringList{"0.0.0.0", "::"},
 		DirectBindPorts:     FunnelPortList{80, 443},
+		ManagedDNSProvider:  FunnelManagedDNSProviderNone,
 	}
 }
+
+const (
+	defaultFunnelDNSMgrAPIBaseURL = "https://dnsmgr.mm.md"
+	defaultFunnelDNSMgrBaseDomain = "mirage.mm.md"
+)
 
 func normalizeFunnelBaseDomain(raw string) string {
 	raw = strings.TrimSpace(raw)
@@ -109,6 +120,37 @@ func normalizeFunnelBaseDomain(raw string) string {
 func normalizeFunnelPlatformConfig(cfg FunnelPlatformConfig) (FunnelPlatformConfig, error) {
 	normalized := cfg
 	normalized.ManagedBaseDomain = normalizeFunnelBaseDomain(normalized.ManagedBaseDomain)
+	normalized.ManagedDNSProvider = strings.ToLower(strings.TrimSpace(normalized.ManagedDNSProvider))
+	switch normalized.ManagedDNSProvider {
+	case FunnelManagedDNSProviderNone, FunnelManagedDNSProviderDNSMgr:
+	default:
+		return FunnelPlatformConfig{}, fmt.Errorf("unsupported managed funnel dns provider: %s", normalized.ManagedDNSProvider)
+	}
+	normalized.ManagedDNSAPIBaseURL = strings.TrimSpace(normalized.ManagedDNSAPIBaseURL)
+	if normalized.ManagedDNSProvider == FunnelManagedDNSProviderDNSMgr {
+		if normalized.ManagedDNSAPIBaseURL == "" {
+			normalized.ManagedDNSAPIBaseURL = defaultFunnelDNSMgrAPIBaseURL
+		}
+		if normalized.ManagedBaseDomain == "" {
+			normalized.ManagedBaseDomain = defaultFunnelDNSMgrBaseDomain
+		}
+		if normalized.ManagedBaseDomain != defaultFunnelDNSMgrBaseDomain {
+			return FunnelPlatformConfig{}, fmt.Errorf("dnsmgr 托管域名后缀固定为 %s", defaultFunnelDNSMgrBaseDomain)
+		}
+		if normalized.ManagedDNSUID <= 0 {
+			return FunnelPlatformConfig{}, fmt.Errorf("managed funnel dns uid is required")
+		}
+		if strings.TrimSpace(normalized.ManagedDNSAPIKey) == "" {
+			return FunnelPlatformConfig{}, fmt.Errorf("managed funnel dns api key is required")
+		}
+	}
+	if normalized.ManagedDNSAPIBaseURL != "" {
+		parsed, err := url.Parse(normalized.ManagedDNSAPIBaseURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return FunnelPlatformConfig{}, fmt.Errorf("invalid managed funnel dns api url")
+		}
+		normalized.ManagedDNSAPIBaseURL = strings.TrimRight(parsed.String(), "/")
+	}
 
 	normalized.DefaultEdgeMode = strings.ToLower(strings.TrimSpace(normalized.DefaultEdgeMode))
 	if normalized.DefaultEdgeMode == "" {
@@ -192,9 +234,13 @@ func effectiveFunnelPlatformConfig(sysCfg *SysConfig) (FunnelPlatformConfig, err
 	cfg := defaultFunnelPlatformConfig()
 	if sysCfg != nil {
 		cfg = sysCfg.FunnelCfg
-		if strings.TrimSpace(cfg.ManagedBaseDomain) == "" {
-			cfg.ManagedBaseDomain = sysCfg.Basedomain
-		}
+	}
+	cfg, err := normalizeFunnelPlatformConfig(cfg)
+	if err != nil {
+		return FunnelPlatformConfig{}, err
+	}
+	if strings.TrimSpace(cfg.ManagedBaseDomain) == "" && sysCfg != nil {
+		cfg.ManagedBaseDomain = normalizeFunnelBaseDomain(sysCfg.Basedomain)
 	}
 	return normalizeFunnelPlatformConfig(cfg)
 }
@@ -745,7 +791,7 @@ func (c *Cockpit) currentFunnelSysCfg() (*SysConfig, error) {
 	if sysCfg == nil {
 		return nil, fmt.Errorf("获取系统配置失败")
 	}
-	if strings.TrimSpace(sysCfg.FunnelCfg.ManagedBaseDomain) == "" {
+	if strings.TrimSpace(sysCfg.FunnelCfg.ManagedBaseDomain) == "" && strings.ToLower(strings.TrimSpace(sysCfg.FunnelCfg.ManagedDNSProvider)) != FunnelManagedDNSProviderDNSMgr {
 		sysCfg.FunnelCfg.ManagedBaseDomain = sysCfg.Basedomain
 	}
 	return sysCfg, nil
@@ -882,12 +928,17 @@ func funnelServiceStatusResponse(service *FunnelService, domain *FunnelDomain, c
 
 func funnelDomainFromRequest(req FunnelPlatformConfigRequest) FunnelPlatformConfig {
 	return FunnelPlatformConfig{
-		ManagedBaseDomain:   req.ManagedBaseDomain,
-		DefaultEdgeMode:     req.DefaultEdgeMode,
-		DefaultListenerMode: req.DefaultListenerMode,
-		DirectBindAddrs:     req.DirectBindAddrs,
-		DirectBindPorts:     req.DirectBindPorts,
-		TrustedProxyCIDRs:   req.TrustedProxyCIDRs,
+		ManagedBaseDomain:       req.ManagedBaseDomain,
+		DefaultEdgeMode:         req.DefaultEdgeMode,
+		DefaultListenerMode:     req.DefaultListenerMode,
+		DirectBindAddrs:         req.DirectBindAddrs,
+		DirectBindPorts:         req.DirectBindPorts,
+		TrustedProxyCIDRs:       req.TrustedProxyCIDRs,
+		ManagedDNSProvider:      req.ManagedDNSProvider,
+		ManagedDNSAPIBaseURL:    req.ManagedDNSAPIBaseURL,
+		ManagedDNSUID:           req.ManagedDNSUID,
+		ManagedDNSAPIKey:        req.ManagedDNSAPIKey,
+		ManagedDNSSkipTLSVerify: req.ManagedDNSSkipTLSVerify,
 	}
 }
 

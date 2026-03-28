@@ -14,6 +14,9 @@ const (
 	FunnelDomainTypeManaged = "managed"
 	FunnelDomainTypeCustom  = "custom"
 
+	FunnelManagedDNSProviderNone   = ""
+	FunnelManagedDNSProviderDNSMgr = "dnsmgr"
+
 	FunnelDomainStatusPendingDNS  = "pending_dns"
 	FunnelDomainStatusPendingCert = "pending_cert"
 	FunnelDomainStatusActive      = "active"
@@ -69,12 +72,17 @@ const (
 )
 
 type FunnelPlatformConfig struct {
-	ManagedBaseDomain   string         `json:"managedBaseDomain"`
-	DefaultEdgeMode     string         `json:"defaultEdgeMode"`
-	DefaultListenerMode string         `json:"defaultListenerMode"`
-	DirectBindAddrs     StringList     `json:"directBindAddrs"`
-	DirectBindPorts     FunnelPortList `json:"directBindPorts"`
-	TrustedProxyCIDRs   StringList     `json:"trustedProxyCIDRs"`
+	ManagedBaseDomain       string         `json:"managedBaseDomain"`
+	DefaultEdgeMode         string         `json:"defaultEdgeMode"`
+	DefaultListenerMode     string         `json:"defaultListenerMode"`
+	DirectBindAddrs         StringList     `json:"directBindAddrs"`
+	DirectBindPorts         FunnelPortList `json:"directBindPorts"`
+	TrustedProxyCIDRs       StringList     `json:"trustedProxyCIDRs"`
+	ManagedDNSProvider      string         `json:"managedDnsProvider"`
+	ManagedDNSAPIBaseURL    string         `json:"managedDnsApiBaseUrl"`
+	ManagedDNSUID           int64          `json:"managedDnsUid"`
+	ManagedDNSAPIKey        string         `json:"managedDnsApiKey"`
+	ManagedDNSSkipTLSVerify bool           `json:"managedDnsSkipTlsVerify"`
 }
 
 type FunnelPublicAddr struct {

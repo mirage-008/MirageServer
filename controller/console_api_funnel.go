@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -573,6 +574,28 @@ func (h *Mirage) createManagedFunnelDomain(user *User, domainName string, listen
 	if strings.TrimSpace(listenerMode) == "" {
 		listenerMode = FunnelListenerModeDirect
 	}
+	provider, err := h.currentManagedFunnelDNSProvider()
+	if err != nil {
+		return nil, err
+	}
+	dnsCtx := context.Background()
+	if h != nil && h.ctx != nil {
+		dnsCtx = h.ctx
+	}
+	existing := &FunnelDomain{}
+	if err := h.db.Where("domain = ?", domainName).First(existing).Error; err == nil {
+		if existing.OrgID != user.OrganizationID {
+			return nil, fmt.Errorf("该Funnel域名已被占用")
+		}
+		if provider != nil {
+			if err := provider.EnsureManagedDomain(dnsCtx, existing.Domain); err != nil {
+				return nil, err
+			}
+		}
+		return existing, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
 	domain := &FunnelDomain{
 		OrgID:            user.OrganizationID,
 		Domain:           domainName,
@@ -589,15 +612,6 @@ func (h *Mirage) createManagedFunnelDomain(user *User, domainName string, listen
 		ValidationTarget: domainName,
 		ValidationToken:  GenerateRandomStringURLSafeOrEmpty(24),
 	}
-	if err := h.db.Where("domain = ?", domainName).First(&FunnelDomain{}).Error; err == nil {
-		existing := &FunnelDomain{}
-		if err := h.db.Where("domain = ?", domainName).First(existing).Error; err == nil {
-			if existing.OrgID != user.OrganizationID {
-				return nil, fmt.Errorf("该Funnel域名已被占用")
-			}
-			return existing, nil
-		}
-	}
 	if err := h.db.Create(domain).Error; err != nil {
 		return nil, err
 	}
@@ -606,11 +620,21 @@ func (h *Mirage) createManagedFunnelDomain(user *User, domainName string, listen
 		CertStatus: FunnelCertStatusPending,
 	}
 	if err := h.db.Create(cert).Error; err != nil {
+		_ = h.db.Delete(domain).Error
 		return nil, err
 	}
 	domain.CertID = &cert.ID
 	if err := h.db.Save(domain).Error; err != nil {
+		_ = h.db.Where("domain_id = ?", domain.ID).Delete(&FunnelCert{}).Error
+		_ = h.db.Delete(domain).Error
 		return nil, err
+	}
+	if provider != nil {
+		if err := provider.EnsureManagedDomain(dnsCtx, domain.Domain); err != nil {
+			_ = h.db.Where("domain_id = ?", domain.ID).Delete(&FunnelCert{}).Error
+			_ = h.db.Delete(domain).Error
+			return nil, err
+		}
 	}
 	return domain, nil
 }
@@ -822,6 +846,21 @@ func (h *Mirage) lookupTenantFunnelEdge(domain *FunnelDomain) *FunnelEdge {
 func (h *Mirage) deleteFunnelDomainWithChildren(domain *FunnelDomain) error {
 	if domain == nil {
 		return fmt.Errorf("未找到Funnel域名")
+	}
+	if domain.DomainType == FunnelDomainTypeManaged {
+		provider, err := h.currentManagedFunnelDNSProvider()
+		if err != nil {
+			return err
+		}
+		if provider != nil {
+			dnsCtx := context.Background()
+			if h != nil && h.ctx != nil {
+				dnsCtx = h.ctx
+			}
+			if err := provider.DeleteManagedDomain(dnsCtx, domain.Domain); err != nil {
+				return err
+			}
+		}
 	}
 	if err := h.db.Where("domain_id = ?", domain.ID).Delete(&FunnelService{}).Error; err != nil {
 		return err

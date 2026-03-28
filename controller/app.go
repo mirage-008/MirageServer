@@ -95,12 +95,13 @@ type Mirage struct {
 
 	longPollChanPool map[string]chan string
 
-	ipAllocationMutex sync.Mutex
-	pollSessionMu     sync.Mutex
-	pollSessionSeq    uint64
-	pollSessions      map[int64]uint64
-	funnelRuntimeMu   sync.RWMutex
-	funnelRuntime     *funnelRuntime
+	ipAllocationMutex           sync.Mutex
+	pollSessionMu               sync.Mutex
+	pollSessionSeq              uint64
+	pollSessions                map[int64]uint64
+	funnelRuntimeMu             sync.RWMutex
+	funnelRuntime               *funnelRuntime
+	newManagedFunnelDNSProvider func(FunnelPlatformConfig) (managedFunnelDNSProvider, error)
 
 	shutdownChan       chan struct{}
 	pollNetMapStreamWG sync.WaitGroup
@@ -176,18 +177,19 @@ func NewMirage(cfg *Config, db *gorm.DB) (*Mirage, error) {
 		DERPseqnum:      make(map[string]int),
 		aclRules:        tailcfg.FilterAllowAll, // default allowall
 
-		aCodeCache:              aCodeCache,
-		stateCodeCache:          stateCodeCache,
-		controlCodeCache:        controlCodeCache,
-		machineControlCodeCache: machineControlCodeCache,
-		inviteAuthCache:         cache.New(0, 0),
-		tcdCache:                cache.New(0, 0),
-		longPollChanPool:        longPollChanPool,
-		pollSessions:            make(map[int64]uint64),
-		smsCodeCache:            smsCodeCache,
-		shutdownChan:            make(chan struct{}),
-		pollNetMapStreamWG:      sync.WaitGroup{},
-		lastStateChange:         xsync.NewMapOf[time.Time](),
+		aCodeCache:                  aCodeCache,
+		stateCodeCache:              stateCodeCache,
+		controlCodeCache:            controlCodeCache,
+		machineControlCodeCache:     machineControlCodeCache,
+		inviteAuthCache:             cache.New(0, 0),
+		tcdCache:                    cache.New(0, 0),
+		longPollChanPool:            longPollChanPool,
+		pollSessions:                make(map[int64]uint64),
+		smsCodeCache:                smsCodeCache,
+		shutdownChan:                make(chan struct{}),
+		pollNetMapStreamWG:          sync.WaitGroup{},
+		lastStateChange:             xsync.NewMapOf[time.Time](),
+		newManagedFunnelDNSProvider: newManagedFunnelDNSProvider,
 	}
 
 	nrs := app.ListNaviRegions()

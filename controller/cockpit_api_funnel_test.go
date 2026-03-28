@@ -130,12 +130,16 @@ func TestCockpitFunnelAuthzAndConfig(t *testing.T) {
 	}
 
 	postBody, _ := json.Marshal(FunnelPlatformConfigRequest{
-		ManagedBaseDomain:   "https://PUBLIC.EXAMPLE.COM/",
-		DefaultEdgeMode:     FunnelEdgeModeRemote,
-		DefaultListenerMode: FunnelListenerModeBehindProxy,
-		DirectBindAddrs:     StringList{" 127.0.0.1 ", "0.0.0.0"},
-		DirectBindPorts:     FunnelPortList{443, 80, 443},
-		TrustedProxyCIDRs:   StringList{"10.0.0.0/24", " 10.0.0.0/24 "},
+		ManagedBaseDomain:       "",
+		DefaultEdgeMode:         FunnelEdgeModeRemote,
+		DefaultListenerMode:     FunnelListenerModeBehindProxy,
+		DirectBindAddrs:         StringList{" 127.0.0.1 ", "0.0.0.0"},
+		DirectBindPorts:         FunnelPortList{443, 80, 443},
+		TrustedProxyCIDRs:       StringList{"10.0.0.0/24", " 10.0.0.0/24 "},
+		ManagedDNSProvider:      FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSUID:           1000,
+		ManagedDNSAPIKey:        "secret",
+		ManagedDNSSkipTLSVerify: true,
 	})
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, funnelAuthedRequest(http.MethodPost, "/cockpit/api/funnel/config", postBody))
@@ -144,8 +148,17 @@ func TestCockpitFunnelAuthzAndConfig(t *testing.T) {
 		t.Fatalf("unexpected post status: %s", status)
 	}
 	config = data["config"].(map[string]any)
-	if config["managedBaseDomain"] != "public.example.com" {
+	if config["managedBaseDomain"] != defaultFunnelDNSMgrBaseDomain {
 		t.Fatalf("managedBaseDomain = %#v", config["managedBaseDomain"])
+	}
+	if config["managedDnsProvider"] != FunnelManagedDNSProviderDNSMgr {
+		t.Fatalf("managedDnsProvider = %#v", config["managedDnsProvider"])
+	}
+	if config["managedDnsApiBaseUrl"] != defaultFunnelDNSMgrAPIBaseURL {
+		t.Fatalf("managedDnsApiBaseUrl = %#v", config["managedDnsApiBaseUrl"])
+	}
+	if config["managedDnsSkipTlsVerify"] != true {
+		t.Fatalf("managedDnsSkipTlsVerify = %#v", config["managedDnsSkipTlsVerify"])
 	}
 	addrs := config["directBindAddrs"].([]any)
 	if len(addrs) != 2 {

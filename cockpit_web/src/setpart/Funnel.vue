@@ -18,6 +18,11 @@ const defaultListenerMode = ref("direct");
 const directBindAddrsText = ref("");
 const directBindPortsText = ref("");
 const trustedProxyCIDRsText = ref("");
+const managedDnsProvider = ref("");
+const managedDnsApiBaseUrl = ref("");
+const managedDnsUid = ref("");
+const managedDnsApiKey = ref("");
+const managedDnsSkipTlsVerify = ref(false);
 const effectiveIngressTargets = ref([]);
 const edges = ref([]);
 const domains = ref([]);
@@ -75,6 +80,11 @@ function applyConfigPayload(payload) {
   directBindAddrsText.value = joinList(config["directBindAddrs"]);
   directBindPortsText.value = joinList(config["directBindPorts"]);
   trustedProxyCIDRsText.value = joinList(config["trustedProxyCIDRs"]);
+  managedDnsProvider.value = config["managedDnsProvider"] || "";
+  managedDnsApiBaseUrl.value = config["managedDnsApiBaseUrl"] || "";
+  managedDnsUid.value = config["managedDnsUid"] ? String(config["managedDnsUid"]) : "";
+  managedDnsApiKey.value = config["managedDnsApiKey"] || "";
+  managedDnsSkipTlsVerify.value = Boolean(config["managedDnsSkipTlsVerify"]);
 
   if (Array.isArray(payload?.effectiveIngressTargets)) {
     effectiveIngressTargets.value = payload.effectiveIngressTargets;
@@ -165,12 +175,17 @@ function saveConfig() {
   saveConfigText.value = "保存中...";
   axios
     .post("/cockpit/api/funnel/config", {
-      managedBaseDomain: managedBaseDomain.value,
+      managedBaseDomain: isDNSMgrProvider.value ? "mirage.mm.md" : managedBaseDomain.value,
       defaultEdgeMode: defaultEdgeMode.value,
       defaultListenerMode: defaultListenerMode.value,
       directBindAddrs: normalizeListText(directBindAddrsText.value),
       directBindPorts: normalizePortList(directBindPortsText.value),
       trustedProxyCIDRs: normalizeListText(trustedProxyCIDRsText.value),
+      managedDnsProvider: managedDnsProvider.value,
+      managedDnsApiBaseUrl: managedDnsApiBaseUrl.value,
+      managedDnsUid: managedDnsUid.value ? Number(managedDnsUid.value) : 0,
+      managedDnsApiKey: managedDnsApiKey.value,
+      managedDnsSkipTlsVerify: managedDnsSkipTlsVerify.value,
     })
     .then(function (response) {
       const payload = unwrapData(response.data);
@@ -273,6 +288,10 @@ const hasIngressTargets = computed(() => {
   return effectiveIngressTargets.value.length > 0;
 });
 
+const isDNSMgrProvider = computed(() => {
+  return managedDnsProvider.value == "dnsmgr";
+});
+
 onMounted(() => {
   loadConfig().then().catch();
   loadEdges().then().catch();
@@ -288,7 +307,7 @@ onMounted(() => {
     <div class="text-gray-600 mt-3">
       <p>配置 Mirage Funnel 的平台级域名、监听模式和入口节点清单。</p>
       <p class="text-sm text-gray-400 mt-1">
-        这一批先打通控制面和配置页，不直接监听公网流量。
+        托管免费域名会按固定后缀 <code class="bg-gray-200 text-xs rounded px-1">.mirage.mm.md</code> 自动写入 DNS。
       </p>
     </div>
 
@@ -302,12 +321,20 @@ onMounted(() => {
           <div>
             <p class="text-gray-600">托管基础域名</p>
             <p class="text-sm text-gray-400">
-              例如 <code class="bg-gray-200 text-xs rounded px-1">public.example.com</code>
+              <span v-if="isDNSMgrProvider">
+                <code class="bg-gray-200 text-xs rounded px-1">dnsmgr</code>
+                免费域名固定为
+                <code class="bg-gray-200 text-xs rounded px-1">mirage.mm.md</code>
+              </span>
+              <span v-else>
+                例如 <code class="bg-gray-200 text-xs rounded px-1">public.example.com</code>
+              </span>
             </p>
             <input
               v-model="managedBaseDomain"
+              :disabled="isDNSMgrProvider"
               class="mt-2 outline-none py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md font-mono text-sm"
-              placeholder="public.example.com"
+              :placeholder="isDNSMgrProvider ? 'mirage.mm.md' : 'public.example.com'"
             />
           </div>
           <div>
@@ -358,6 +385,56 @@ onMounted(() => {
               class="mt-2 outline-none py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md font-mono text-sm"
               placeholder="10.0.0.0/24"
             ></textarea>
+          </div>
+          <div>
+            <p class="text-gray-600">托管 DNS 提供方</p>
+            <select
+              v-model="managedDnsProvider"
+              class="mt-2 py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md bg-white"
+            >
+              <option value="">不启用</option>
+              <option value="dnsmgr">dnsmgr</option>
+            </select>
+          </div>
+          <div v-if="isDNSMgrProvider">
+            <p class="text-gray-600">dnsmgr API 地址</p>
+            <p class="text-sm text-gray-400">默认使用聚合 DNS 管理系统 API 根地址。</p>
+            <input
+              v-model="managedDnsApiBaseUrl"
+              class="mt-2 outline-none py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md font-mono text-sm"
+              placeholder="https://dnsmgr.mm.md"
+            />
+          </div>
+          <div v-if="isDNSMgrProvider">
+            <p class="text-gray-600">dnsmgr UID</p>
+            <input
+              v-model="managedDnsUid"
+              type="number"
+              min="1"
+              class="mt-2 outline-none py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md font-mono text-sm"
+              placeholder="1000"
+            />
+          </div>
+          <div v-if="isDNSMgrProvider">
+            <p class="text-gray-600">dnsmgr API Key</p>
+            <input
+              v-model="managedDnsApiKey"
+              type="password"
+              class="mt-2 outline-none py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md font-mono text-sm"
+              placeholder="API key"
+            />
+          </div>
+          <div v-if="isDNSMgrProvider" class="lg:col-span-2">
+            <label class="inline-flex items-center gap-2 text-gray-600 mt-2">
+              <input v-model="managedDnsSkipTlsVerify" type="checkbox" class="checkbox checkbox-sm" />
+              <span>跳过 dnsmgr TLS 证书校验</span>
+            </label>
+            <p class="text-sm text-gray-400 mt-2">
+              仅在上游 API 证书链异常或内网调试时使用。自动创建的记录会写成
+              <code class="bg-gray-200 text-xs rounded px-1">CNAME</code>
+              指向
+              <code class="bg-gray-200 text-xs rounded px-1">mirage.mm.md</code>。
+            </p>
           </div>
         </div>
         <div class="mt-5 flex items-center gap-3">
