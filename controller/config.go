@@ -27,6 +27,7 @@ type Config struct {
 	IPPrefixes []netip.Prefix //DONE
 	BaseDomain string         //DONE
 	FunnelCfg  FunnelPlatformConfig
+	FlowLogCfg FlowLogConfig
 
 	AllowRouteDueToMachine bool //DONE
 

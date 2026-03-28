@@ -73,8 +73,9 @@ type Machine struct {
 	LastSuccessfulUpdate *time.Time
 	Expiry               *time.Time
 
-	HostInfo  HostInfo
-	Endpoints StringList
+	HostInfo            HostInfo
+	Endpoints           StringList
+	DataPlaneAuditLogID string
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

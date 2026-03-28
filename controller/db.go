@@ -48,7 +48,11 @@ func (dp *DataPool) InitCockpitDB() error {
 		return err
 	}
 
-	return dp.initFunnelTables()
+	if err = dp.initFunnelTables(); err != nil {
+		return err
+	}
+
+	return dp.initFlowLogTables()
 }
 
 func (dp *DataPool) InitMirageDB() error {
@@ -93,11 +97,19 @@ func (dp *DataPool) InitMirageDB() error {
 		return err
 	}
 
-	return dp.initFunnelTables()
+	if err = dp.initFunnelTables(); err != nil {
+		return err
+	}
+
+	return dp.initFlowLogTables()
 }
 
 func (dp *DataPool) initFunnelTables() error {
 	return migrateFunnelTables(dp.db)
+}
+
+func (dp *DataPool) initFlowLogTables() error {
+	return migrateFlowLogTables(dp.db)
 }
 
 func migrateFunnelTables(db *gorm.DB) error {

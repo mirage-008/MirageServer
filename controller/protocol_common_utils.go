@@ -136,7 +136,6 @@ func cloneNodesByID(nodes []*tailcfg.Node) map[tailcfg.NodeID]*tailcfg.Node {
 	return byID
 }
 
-
 func (h *Mirage) generateMapResponse(
 	mapRequest tailcfg.MapRequest,
 	machine *Machine,
@@ -221,6 +220,7 @@ func (h *Mirage) generateMapResponse(
 	}
 
 	reducedRules, packetFilters := packetFiltersForMachine(machine, org.AclRules)
+	flowLogCfg := normalizeFlowLogConfig(h.cfg.FlowLogCfg)
 
 	resp := tailcfg.MapResponse{
 		KeepAlive: false,
@@ -258,8 +258,31 @@ func (h *Mirage) generateMapResponse(
 		ControlTime: &now,
 
 		Debug: &tailcfg.Debug{
-			DisableLogTail: true,
+			DisableLogTail: !flowLogCfg.Enabled,
 		},
+	}
+	if flowLogCfg.Enabled {
+		domainAuditLogID, err := h.ensureOrganizationDomainAuditLogID(org)
+		if err != nil {
+			log.Error().Caller().Err(err).Msg("failed to ensure organization domain audit log id")
+		} else {
+			nodeAuditLogID, err := h.ensureMachineDataPlaneAuditLogID(machine)
+			if err != nil {
+				log.Error().Caller().Err(err).Msg("failed to ensure machine data plane audit log id")
+			} else {
+				resp.DomainDataPlaneAuditLogID = domainAuditLogID
+				resp.Node.DataPlaneAuditLogID = nodeAuditLogID
+				if resp.Node.CapMap == nil {
+					resp.Node.CapMap = tailcfg.NodeCapMap{}
+				}
+				resp.Node.CapMap[tailcfg.CapabilityDataPlaneAuditLogs] = []tailcfg.RawMessage{}
+				resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, tailcfg.CapabilityDataPlaneAuditLogs)
+				if flowLogCfg.LogExitFlows {
+					resp.Node.CapMap[tailcfg.NodeAttrLogExitFlows] = []tailcfg.RawMessage{}
+					resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, tailcfg.NodeAttrLogExitFlows)
+				}
+			}
+		}
 	}
 
 	toNodes := func(machines Machines) ([]*tailcfg.Node, error) {

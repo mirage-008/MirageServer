@@ -49,6 +49,7 @@ type SysConfig struct {
 	NaviDeployKey string
 	ClientVersion ClientVersionInfo
 	FunnelCfg     FunnelPlatformConfig `gorm:"type:text"`
+	FlowLogCfg    FlowLogConfig        `gorm:"type:text"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -81,6 +82,7 @@ type GeneralCfg struct {
 
 	NaviDeployPub string            `json:"navi_deploy_pub"`
 	ClientVersion ClientVersionInfo `json:"client_version"`
+	FlowLogCfg    FlowLogConfig     `json:"flow_log"`
 }
 
 func (s *SysConfig) toGeneralCfg() GeneralCfg {
@@ -110,6 +112,7 @@ func (s *SysConfig) toGeneralCfg() GeneralCfg {
 
 		NaviDeployPub: s.NaviDeployPub,
 		ClientVersion: s.ClientVersion,
+		FlowLogCfg:    normalizeFlowLogConfig(s.FlowLogCfg),
 	}
 }
 
@@ -170,6 +173,7 @@ func (s *SysConfig) toSrvConfig() (*Config, error) {
 		IPPrefixes:                     []netip.Prefix{netip.Prefix(s.Mip4), netip.Prefix(s.Mip6)},
 		BaseDomain:                     s.Basedomain,
 		FunnelCfg:                      s.FunnelCfg,
+		FlowLogCfg:                     normalizeFlowLogConfig(s.FlowLogCfg),
 		DERPURL:                        normalizeDERPMapURL(s.DerpUrl),
 		EphemeralNodeInactivityTimeout: normalizeEphemeralNodeInactivityTimeout(s.EphemeralNodeInactivityTimeout),
 		AllowRouteDueToMachine:         s.RouteAccessDueMachine,

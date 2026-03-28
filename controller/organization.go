@@ -33,7 +33,7 @@ type Organization struct {
 	ExpiryDuration     uint   `gorm:"default:180"`
 	EnableMagic        bool   `gorm:"default:false"`
 	MagicDnsDomain     string
-	OverrideLocal      bool `gorm:"default:false"`
+	OverrideLocal      bool  `gorm:"default:false"`
 	FileSharingEnabled *bool `gorm:"default:true"`
 	Nameservers        StringList
 	SplitDns           SplitDNS
@@ -43,6 +43,7 @@ type Organization struct {
 	NaviBanList        NaviBanList
 	NaviDeployKey      string
 	NaviDeployPub      string
+	DomainAuditLogID   string
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

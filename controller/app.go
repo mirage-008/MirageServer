@@ -390,6 +390,7 @@ func (h *Mirage) initRouter(router *mux.Router) {
 	router.PathPrefix("/download").Handler(http.StripPrefix("/download", http.FileServer(http.Dir("download"))))
 
 	router.HandleFunc("/logout", h.ConsoleLogout).Methods(http.MethodGet)
+	router.HandleFunc("/c/{collection}/{privateID}", h.LogtailCollectionHandler).Methods(http.MethodPost)
 	//注册
 	router.PathPrefix("/api/register").HandlerFunc(h.RegisterUserAPI).Methods(http.MethodPost)
 	router.PathPrefix("/api/idps").HandlerFunc(h.ListIdps).Methods(http.MethodGet)
@@ -437,6 +438,9 @@ func (h *Mirage) initRouter(router *mux.Router) {
 	console_router.HandleFunc("/api/acls/auto-approvers", h.CAPIGetAutoApprovers).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/subscription", h.CAPIGetSubscription).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/derp/query", h.CAPIQueryDERP).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/flow-logs", h.CAPIGetFlowLogs).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/flow-logs/summary", h.CAPIGetFlowLogSummary).Methods(http.MethodGet)
+	console_router.HandleFunc("/api/flow-logs/export", h.CAPIExportFlowLogs).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/funnel/domains", h.CAPIGetFunnelDomains).Methods(http.MethodGet)
 	console_router.HandleFunc("/api/funnel/domains", h.CAPIPostFunnelDomains).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/funnel/domains/{id}/verify", h.CAPIVerifyFunnelDomain).Methods(http.MethodPost)
@@ -517,11 +521,14 @@ func (h *Mirage) Serve(ctrlChn chan CtrlMsg) error {
 	defer ticker.Stop()
 	longTicker := time.NewTicker(time.Millisecond * updateInterval * 6)
 	defer longTicker.Stop()
+	flowLogRetentionTicker := time.NewTicker(time.Hour)
+	defer flowLogRetentionTicker.Stop()
 
 	go h.expireEphemeralNodes(ticker)  //updateInterval)
 	go h.expireExpiredMachines(ticker) //updateInterval)
 	go h.failoverSubnetRoutes(ticker)  //updateInterval)
 	go h.refreshNaviStatusPoller(longTicker)
+	go h.pruneFlowLogs(flowLogRetentionTicker)
 
 	// Prepare group for running listeners
 	errorGroup := new(errgroup.Group)
