@@ -735,9 +735,19 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 		t.Fatalf("expected source org peer to keep same-org source machine visibility, got %+v", sourceOrgPeers)
 	}
 
-	sharedNode, err := app.toNode(peersByID[sourceMachine.ID], peersByID[sourceMachine.ID].Shared)
+	targetPeerNodes, err := peerNodesForMachine(app, targetMachine, peers)
 	if err != nil {
-		t.Fatalf("toNode(shared peer): %v", err)
+		t.Fatalf("peerNodesForMachine(target): %v", err)
+	}
+	var sharedNode *tailcfg.Node
+	for _, node := range targetPeerNodes {
+		if node != nil && node.ID == tailcfg.NodeID(sourceMachine.ID) {
+			sharedNode = node
+			break
+		}
+	}
+	if sharedNode == nil {
+		t.Fatalf("expected shared source node in target peer nodes, got %+v", targetPeerNodes)
 	}
 	if !sharedNode.IsJailed {
 		t.Fatalf("expected shared source peer to be jailed for recipient, got %+v", sharedNode)
@@ -751,10 +761,26 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if !containsPrefix(sharedNode.PrimaryRoutes, mustPrefix(t, "10.10.0.0/24")) {
 		t.Fatalf("expected shared peer primary routes to include subnet route, got %v", sharedNode.PrimaryRoutes)
 	}
+	if len(sharedNode.Addresses) == 0 || sharedNode.Addresses[0].Addr() == sourceMachine.IPAddresses[0] {
+		t.Fatalf("expected shared peer address to be masqueraded for recipient, got %v", sharedNode.Addresses)
+	}
+	if sharedNode.SelfNodeV4MasqAddrForThisPeer == nil || !sharedNode.SelfNodeV4MasqAddrForThisPeer.IsValid() {
+		t.Fatalf("expected shared peer to include recipient masquerade addr, got %+v", sharedNode)
+	}
 
-	hiddenShareeNode, err := app.toNode(sourcePeersByID[targetMachine.ID], sourcePeersByID[targetMachine.ID].Shared)
+	sourcePeerNodes, err := peerNodesForMachine(app, sourceMachine, sourcePeers)
 	if err != nil {
-		t.Fatalf("toNode(hidden sharee peer): %v", err)
+		t.Fatalf("peerNodesForMachine(source): %v", err)
+	}
+	var hiddenShareeNode *tailcfg.Node
+	for _, node := range sourcePeerNodes {
+		if node != nil && node.ID == tailcfg.NodeID(targetMachine.ID) {
+			hiddenShareeNode = node
+			break
+		}
+	}
+	if hiddenShareeNode == nil {
+		t.Fatalf("expected hidden target node in source peer nodes, got %+v", sourcePeerNodes)
 	}
 	if !hiddenShareeNode.Hostinfo.ShareeNode() {
 		t.Fatalf("expected hidden target peer to be marked sharee node, got %+v", hiddenShareeNode.Hostinfo)
@@ -762,11 +788,23 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if hiddenShareeNode.IsJailed {
 		t.Fatalf("expected hidden target peer not to be jailed, got %+v", hiddenShareeNode)
 	}
+	if len(hiddenShareeNode.Addresses) == 0 || hiddenShareeNode.Addresses[0].Addr() == targetMachine.IPAddresses[0] {
+		t.Fatalf("expected hidden target peer address to be masqueraded for source, got %v", hiddenShareeNode.Addresses)
+	}
+	if hiddenShareeNode.SelfNodeV4MasqAddrForThisPeer == nil || !hiddenShareeNode.SelfNodeV4MasqAddrForThisPeer.IsValid() {
+		t.Fatalf("expected hidden sharee peer to include source masquerade addr, got %+v", hiddenShareeNode)
+	}
+	if hiddenShareeNode.Addresses[0].Addr() != *sharedNode.SelfNodeV4MasqAddrForThisPeer {
+		t.Fatalf("expected shared peer source-masq addr %v to match hidden peer address %v", *sharedNode.SelfNodeV4MasqAddrForThisPeer, hiddenShareeNode.Addresses[0].Addr())
+	}
+	if sharedNode.Addresses[0].Addr() != *hiddenShareeNode.SelfNodeV4MasqAddrForThisPeer {
+		t.Fatalf("expected hidden peer source-masq addr %v to match shared peer address %v", *hiddenShareeNode.SelfNodeV4MasqAddrForThisPeer, sharedNode.Addresses[0].Addr())
+	}
 
 	sourceFilters, _ := packetFiltersForMachine(sourceMachine, sourcePeers, sourceOrg.AclRules)
 	foundShareIngress := false
 	for _, rule := range sourceFilters {
-		if !containsAddresses(rule.SrcIPs, targetMachine.IPAddresses.ToStringSlice()) {
+		if !containsAddresses(rule.SrcIPs, []string{hiddenShareeNode.Addresses[0].Addr().String()}) {
 			continue
 		}
 		for _, dst := range rule.DstPorts {
@@ -795,10 +833,10 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 		nil,
 		tslogger.Discard,
 	)
-	if got := sourceFilter.CheckTCP(targetMachine.IPAddresses[0], sourceMachine.IPAddresses[0], 22); got != filter.Accept {
+	if got := sourceFilter.CheckTCP(hiddenShareeNode.Addresses[0].Addr(), sourceMachine.IPAddresses[0], 22); got != filter.Accept {
 		t.Fatalf("expected hidden target peer ingress to shared source machine to be allowed, got %v", got)
 	}
-	if got := sourceFilter.Check(targetMachine.IPAddresses[0], sourceMachine.IPAddresses[0], 0, ipproto.ICMPv4); got != filter.Accept {
+	if got := sourceFilter.Check(hiddenShareeNode.Addresses[0].Addr(), sourceMachine.IPAddresses[0], 0, ipproto.ICMPv4); got != filter.Accept {
 		t.Fatalf("expected hidden target peer ICMP ingress to shared source machine to be allowed, got %v", got)
 	}
 

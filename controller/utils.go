@@ -181,6 +181,9 @@ func (h *Mirage) getAvailableIP(ipPrefix netip.Prefix) (*netip.Addr, error) {
 			fallthrough
 		case usedIps.Contains(ip):
 			fallthrough
+		case isSharedPeerMasqReservedIP(ip):
+			ip = nextAddrAfterSharedPeerMasqRange(ip)
+			continue
 		case ip == netip.Addr{} || ip.IsLoopback():
 			ip = ip.Next()
 

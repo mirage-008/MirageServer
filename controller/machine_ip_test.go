@@ -107,3 +107,17 @@ func TestSetMachineAddressesRejectsOccupiedAddress(t *testing.T) {
 		t.Fatalf("SetMachineAddresses() error = %v, want %v", err, ErrMachineIPAddressUnavailable)
 	}
 }
+
+func TestGetAvailableIPSkipsSharedPeerMasqRange(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	app.cfg.IPPrefixes = []netip.Prefix{sharePeerMasqIPv4Prefix, sharePeerMasqIPv6Prefix}
+
+	if _, err := app.getAvailableIP(app.cfg.IPPrefixes[0]); !errors.Is(err, ErrCouldNotAllocateIP) {
+		t.Fatalf("getAvailableIP(v4 masq range) error = %v, want %v", err, ErrCouldNotAllocateIP)
+	}
+	if _, err := app.getAvailableIP(app.cfg.IPPrefixes[1]); !errors.Is(err, ErrCouldNotAllocateIP) {
+		t.Fatalf("getAvailableIP(v6 masq range) error = %v, want %v", err, ErrCouldNotAllocateIP)
+	}
+}

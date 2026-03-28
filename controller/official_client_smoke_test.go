@@ -1362,6 +1362,26 @@ func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
 		}
 		return fmt.Errorf("expected hidden target peer %s in source-side status json; peers=%+v", clientNode.hostname, status.Peer)
 	})
+	targetStatus := waitForNodeRunning(t, clientNode.socketPath)
+	waitForCondition(t, 30*time.Second, func() error {
+		status, err := readSmokeStatus(t, routerNode.socketPath)
+		if err != nil {
+			return err
+		}
+		for _, peer := range status.Peer {
+			if peer.HostName != clientNode.hostname {
+				continue
+			}
+			for _, realIP := range targetStatus.TailscaleIPs {
+				if containsString(peer.TailscaleIPs, realIP) {
+					return fmt.Errorf("expected hidden target peer %s to be masqueraded, still exposes real IP %s in %+v", clientNode.hostname, realIP, peer)
+				}
+			}
+			return nil
+		}
+
+		return fmt.Errorf("expected hidden target peer %s in source-side status json for masquerade check; peers=%+v", clientNode.hostname, status.Peer)
+	})
 
 	waitForCondition(t, 30*time.Second, func() error {
 		output, err := runCommand(

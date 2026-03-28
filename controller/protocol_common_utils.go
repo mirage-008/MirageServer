@@ -112,7 +112,8 @@ func shareIngressRulesForMachine(machine *Machine, peers Machines) []tailcfg.Fil
 		if !peer.ShareeNode {
 			continue
 		}
-		for _, ip := range peer.IPAddresses.ToStringSlice() {
+		for _, addr := range sharedPeerDisplayAddresses(machine, peer) {
+			ip := addr.String()
 			if _, ok := seen[ip]; ok {
 				continue
 			}
@@ -153,8 +154,25 @@ func packetFiltersForMachine(machine *Machine, peers Machines, rules []tailcfg.F
 	return merged, map[string][]tailcfg.FilterRule{"base": merged}
 }
 
-func peerNodesForMachine(h *Mirage, peers Machines) ([]*tailcfg.Node, error) {
-	return h.toNodes(peers)
+func peerNodesForMachine(h *Mirage, viewer *Machine, peers Machines) ([]*tailcfg.Node, error) {
+	nodes, err := h.toNodes(peers)
+	if err != nil {
+		return nil, err
+	}
+	if viewer == nil {
+		return nodes, nil
+	}
+
+	byID := nodesByID(nodes)
+	for _, peer := range peers {
+		node, ok := byID[tailcfg.NodeID(peer.ID)]
+		if !ok {
+			continue
+		}
+		applySharedPeerMasquerade(viewer, peer, node)
+	}
+
+	return nodes, nil
 }
 
 func mapRequestDisablesClientLogUploads(machine *Machine, mapRequest tailcfg.MapRequest) bool {
@@ -343,7 +361,7 @@ func (h *Mirage) generateMapResponse(
 	}
 
 	toNodes := func(machines Machines) ([]*tailcfg.Node, error) {
-		return peerNodesForMachine(h, machines)
+		return peerNodesForMachine(h, machine, machines)
 	}
 	resp, err = applyMapResponseDelta(resp, streamState, peers, toNodes)
 	if err != nil {
