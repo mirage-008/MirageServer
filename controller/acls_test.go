@@ -429,7 +429,7 @@ func TestExitNodeInternetAccessRequiresEnabledRoutes(t *testing.T) {
 		}
 	}
 
-	reducedRules, packetFilters := packetFiltersForMachine(exitNode, org.AclRules)
+	reducedRules, packetFilters := packetFiltersForMachine(exitNode, nil, org.AclRules)
 	if len(reducedRules) != 0 {
 		t.Fatalf("expected no reduced packet filter rules before exit routes are enabled, got %+v", reducedRules)
 	}
@@ -456,7 +456,7 @@ func TestExitNodeInternetAccessRequiresEnabledRoutes(t *testing.T) {
 		t.Fatalf("expected enabled exit node to be visible, got peers=%+v", peers)
 	}
 
-	reducedRules, packetFilters = packetFiltersForMachine(exitNode, org.AclRules)
+	reducedRules, packetFilters = packetFiltersForMachine(exitNode, nil, org.AclRules)
 	if len(reducedRules) != 0 {
 		t.Fatalf("expected autogroup:internet to keep packet filter rules empty after exit routes are enabled, got %+v", reducedRules)
 	}

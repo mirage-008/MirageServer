@@ -99,13 +99,56 @@ func reduceFilterRulesForMachine(machine *Machine, rules []tailcfg.FilterRule) [
 	return reduced
 }
 
-func packetFiltersForMachine(machine *Machine, rules []tailcfg.FilterRule) ([]tailcfg.FilterRule, map[string][]tailcfg.FilterRule) {
-	reduced := reduceFilterRulesForMachine(machine, rules)
-	if len(reduced) == 0 {
-		return nil, map[string][]tailcfg.FilterRule{"base": {}}
+func shareIngressRulesForMachine(machine *Machine, peers Machines) []tailcfg.FilterRule {
+	if machine == nil || len(peers) == 0 {
+		return nil
 	}
 
-	return reduced, map[string][]tailcfg.FilterRule{"base": reduced}
+	shareeSources := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, peer := range peers {
+		if !peer.ShareeNode {
+			continue
+		}
+		for _, ip := range peer.IPAddresses.ToStringSlice() {
+			if _, ok := seen[ip]; ok {
+				continue
+			}
+			seen[ip] = struct{}{}
+			shareeSources = append(shareeSources, ip)
+		}
+	}
+	if len(shareeSources) == 0 {
+		return nil
+	}
+
+	allowedDestinations := allowedFilterDestinations(machine)
+	if len(allowedDestinations) == 0 {
+		return nil
+	}
+	dsts := make([]tailcfg.NetPortRange, 0, len(allowedDestinations))
+	for _, allowed := range allowedDestinations {
+		dsts = append(dsts, tailcfg.NetPortRange{
+			IP:    allowed.String(),
+			Ports: tailcfg.PortRangeAny,
+		})
+	}
+
+	return []tailcfg.FilterRule{{
+		SrcIPs:   shareeSources,
+		DstPorts: dsts,
+	}}
+}
+
+func packetFiltersForMachine(machine *Machine, peers Machines, rules []tailcfg.FilterRule) ([]tailcfg.FilterRule, map[string][]tailcfg.FilterRule) {
+	reduced := reduceFilterRulesForMachine(machine, rules)
+	shareRules := shareIngressRulesForMachine(machine, peers)
+	if len(reduced) == 0 && len(shareRules) == 0 {
+		return nil, map[string][]tailcfg.FilterRule{"base": {}}
+	}
+	merged := append(reduced, shareRules...)
+
+	return merged, map[string][]tailcfg.FilterRule{"base": merged}
 }
 
 func peerNodesForMachine(h *Mirage, peers Machines) ([]*tailcfg.Node, error) {
@@ -226,7 +269,7 @@ func (h *Mirage) generateMapResponse(
 			Msg("Failed to get DERP map of machine")
 	}
 
-	reducedRules, packetFilters := packetFiltersForMachine(machine, org.AclRules)
+	reducedRules, packetFilters := packetFiltersForMachine(machine, peers, org.AclRules)
 	flowLogCfg := normalizeFlowLogConfig(h.cfg.FlowLogCfg)
 
 	resp := tailcfg.MapResponse{

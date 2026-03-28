@@ -84,7 +84,8 @@ type Machine struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 
-	Shared bool `gorm:"-"`
+	Shared     bool `gorm:"-"`
+	ShareeNode bool `gorm:"-"`
 }
 
 func (machine *Machine) BeforeCreate(tx *gorm.DB) error {
@@ -500,6 +501,10 @@ func (h *Mirage) getFilteredByACLPeers(
 
 	for _, peer := range machines {
 		if peer.ID == machine.ID {
+			continue
+		}
+		if peer.Shared || peer.ShareeNode {
+			peers[peer.ID] = peer
 			continue
 		}
 		// 处理self情况:如果启用了self且没有tag,直接加入peer列表
@@ -1335,6 +1340,9 @@ func (h *Mirage) toNode(
 	}
 
 	hostInfo := machine.GetHostInfo()
+	if machine.ShareeNode {
+		hostInfo.ShareeNode = true
+	}
 
 	online := machine.isOnline()
 	expired := machine.isExpired()

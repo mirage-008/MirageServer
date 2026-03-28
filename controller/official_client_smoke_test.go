@@ -72,6 +72,7 @@ type smokePeerStatus struct {
 	PeerRelay      string   `json:"PeerRelay"`
 	Online         bool     `json:"Online"`
 	InNetworkMap   bool     `json:"InNetworkMap"`
+	ShareeNode     bool     `json:"ShareeNode"`
 	ExitNode       bool     `json:"ExitNode"`
 	ExitNodeOption bool     `json:"ExitNodeOption"`
 }
@@ -1343,6 +1344,39 @@ func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
 			return fmt.Errorf("peer %s missing subnet route %s in PrimaryRoutes: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
 		}
 		_ = status
+		return nil
+	})
+
+	waitForCondition(t, 30*time.Second, func() error {
+		status, err := readSmokeStatus(t, routerNode.socketPath)
+		if err != nil {
+			return err
+		}
+		for _, peer := range status.Peer {
+			if peer.HostName == clientNode.hostname {
+				if !peer.ShareeNode {
+					return fmt.Errorf("expected source-side target peer %s to be hidden sharee node: %+v", clientNode.hostname, peer)
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("expected hidden target peer %s in source-side status json; peers=%+v", clientNode.hostname, status.Peer)
+	})
+
+	waitForCondition(t, 30*time.Second, func() error {
+		output, err := runCommand(
+			t,
+			15*time.Second,
+			"tailscale",
+			"--socket", routerNode.socketPath,
+			"status",
+		)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(output, clientNode.hostname) {
+			return fmt.Errorf("expected source-side plain status to hide target peer %s, got:\n%s", clientNode.hostname, output)
+		}
 		return nil
 	})
 

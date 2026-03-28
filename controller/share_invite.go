@@ -1001,6 +1001,28 @@ func (h *Mirage) ListSharedMachinesByTargetOrgID(orgID int64) ([]Machine, error)
 	return machines, nil
 }
 
+func (h *Mirage) ListShareeMachinesBySourceMachineID(machineID int64) ([]Machine, error) {
+	shares, err := h.ListAcceptedMachineSharesBySourceMachine(machineID)
+	if err != nil {
+		return nil, err
+	}
+	targetOrgIDs := make([]int64, 0, len(shares))
+	for _, share := range shares {
+		if share.TargetOrgID != 0 {
+			targetOrgIDs = append(targetOrgIDs, share.TargetOrgID)
+		}
+	}
+	machines, err := h.listMachinesByOrgIDs(targetOrgIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range machines {
+		machines[i].ShareeNode = true
+	}
+
+	return machines, nil
+}
+
 func (h *Mirage) ListVisibleMachinesByOrgID(orgID int64) ([]Machine, error) {
 	orgMachines, err := h.ListMachinesByOrgID(orgID)
 	if err != nil {
@@ -1088,58 +1110,17 @@ func (h *Mirage) ListSharePeersForMachine(machine *Machine) ([]Machine, error) {
 		return nil, ErrMachineNotFound
 	}
 
-	sharePeers := make([]Machine, 0)
+	sharedMachines, err := h.ListSharedMachinesByTargetOrgID(machine.User.OrganizationID)
+	if err != nil {
+		return nil, err
+	}
+	shareeMachines, err := h.ListShareeMachinesBySourceMachineID(machine.ID)
+	if err != nil {
+		return nil, err
+	}
 
-	acceptedSourceShares, err := h.ListAcceptedMachineSharesBySourceOrg(machine.User.OrganizationID)
-	if err != nil {
-		return nil, err
-	}
-	targetOrgIDs := make([]int64, 0, len(acceptedSourceShares))
-	for _, share := range acceptedSourceShares {
-		if share.TargetOrgID != 0 && share.TargetOrgID != machine.User.OrganizationID {
-			targetOrgIDs = append(targetOrgIDs, share.TargetOrgID)
-		}
-	}
-	targetOrgMachines, err := h.listMachinesByOrgIDs(targetOrgIDs)
-	if err != nil {
-		return nil, err
-	}
-	sharePeers = append(sharePeers, targetOrgMachines...)
-
-	acceptedTargetShares, err := h.ListAcceptedMachineSharesByTargetOrg(machine.User.OrganizationID)
-	if err != nil {
-		return nil, err
-	}
-	sharedSourceMachineIDs := make([]int64, 0, len(acceptedTargetShares))
-	sourceOrgIDs := make([]int64, 0, len(acceptedTargetShares))
-	for _, share := range acceptedTargetShares {
-		if share.SourceMachineID != machine.ID {
-			sharedSourceMachineIDs = append(sharedSourceMachineIDs, share.SourceMachineID)
-		}
-		if share.SourceOrgID != 0 && share.SourceOrgID != machine.User.OrganizationID {
-			sourceOrgIDs = append(sourceOrgIDs, share.SourceOrgID)
-		}
-	}
-	sharedSourceMachines, err := h.listMachinesByIDs(sharedSourceMachineIDs)
-	if err != nil {
-		return nil, err
-	}
-	for i := range sharedSourceMachines {
-		sharedSourceMachines[i].Shared = true
-	}
-	sharePeers = append(sharePeers, sharedSourceMachines...)
-
-	connectedSourceOrgMachines, err := h.listMachinesByOrgIDs(sourceOrgIDs)
-	if err != nil {
-		return nil, err
-	}
-	for i := range connectedSourceOrgMachines {
-		connectedSourceOrgMachines[i].Shared = true
-	}
-	sharePeers = append(sharePeers, connectedSourceOrgMachines...)
-
-	filtered := make([]Machine, 0, len(sharePeers))
-	for _, peer := range mergeMachines(sharePeers) {
+	filtered := make([]Machine, 0, len(sharedMachines)+len(shareeMachines))
+	for _, peer := range mergeMachines(sharedMachines, shareeMachines) {
 		if peer.ID == machine.ID {
 			continue
 		}

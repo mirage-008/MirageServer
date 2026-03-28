@@ -462,7 +462,7 @@ func TestSharedNodeKeepsRoutesAndExitNodeCapabilities(t *testing.T) {
 	}
 }
 
-func TestListSharePeersForMachineIncludesConnectedOrgMachines(t *testing.T) {
+func TestListSharePeersForMachineUsesSingleDeviceShareSemantics(t *testing.T) {
 	t.Parallel()
 
 	app := newShareInviteTestMirage(t)
@@ -486,11 +486,11 @@ func TestListSharePeersForMachineIncludesConnectedOrgMachines(t *testing.T) {
 		t.Fatalf("ListSharePeersForMachine(source): %v", err)
 	}
 	if len(sourcePeers) != 2 {
-		t.Fatalf("expected 2 connected target peers, got %d (%+v)", len(sourcePeers), sourcePeers)
+		t.Fatalf("expected 2 hidden target peers for shared source machine, got %d (%+v)", len(sourcePeers), sourcePeers)
 	}
 	for _, peer := range sourcePeers {
-		if peer.Shared {
-			t.Fatalf("expected connected target peers to stay owned, got shared peer %+v", peer)
+		if peer.Shared || !peer.ShareeNode {
+			t.Fatalf("expected hidden sharee peers for shared source machine, got %+v", peer)
 		}
 	}
 
@@ -498,31 +498,23 @@ func TestListSharePeersForMachineIncludesConnectedOrgMachines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSharePeersForMachine(source org peer): %v", err)
 	}
-	if len(sourceOrgPeers) != 2 {
-		t.Fatalf("expected 2 connected target peers for source org peer, got %d (%+v)", len(sourceOrgPeers), sourceOrgPeers)
-	}
-	for _, peer := range sourceOrgPeers {
-		if peer.Shared {
-			t.Fatalf("expected source org peer to see connected target peers as owned, got shared peer %+v", peer)
-		}
+	if len(sourceOrgPeers) != 0 {
+		t.Fatalf("expected unrelated source-org peer to see no target peers, got %+v", sourceOrgPeers)
 	}
 
 	targetPeers, err := app.ListSharePeersForMachine(targetMachineA)
 	if err != nil {
 		t.Fatalf("ListSharePeersForMachine(target): %v", err)
 	}
-	if len(targetPeers) != 2 {
-		t.Fatalf("expected two shared source-org peers for target machine, got %+v", targetPeers)
+	if len(targetPeers) != 1 {
+		t.Fatalf("expected only the shared source machine for target machine, got %+v", targetPeers)
 	}
 	targetPeersByID := machinesByID(targetPeers)
 	if _, ok := targetPeersByID[sourceMachine.ID]; !ok {
 		t.Fatalf("expected target machine to include shared source machine, got %+v", targetPeers)
 	}
-	if _, ok := targetPeersByID[sourceOrgPeer.ID]; !ok {
-		t.Fatalf("expected target machine to include connected source-org peer, got %+v", targetPeers)
-	}
-	if !targetPeersByID[sourceMachine.ID].Shared || !targetPeersByID[sourceOrgPeer.ID].Shared {
-		t.Fatalf("expected target machine to mark source-org peers as shared, got %+v", targetPeers)
+	if targetPeersByID[sourceMachine.ID].ShareeNode || !targetPeersByID[sourceMachine.ID].Shared {
+		t.Fatalf("expected target machine to mark only the source machine as shared, got %+v", targetPeers)
 	}
 	_ = targetMachineB
 }
@@ -605,11 +597,11 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if _, ok := peersByID[sourceMachine.ID]; !ok {
 		t.Fatalf("expected shared source machine via ACL visibility, got %+v", peers)
 	}
-	if _, ok := peersByID[sourceOrgPeer.ID]; !ok {
-		t.Fatalf("expected connected source-org peer via ACL visibility, got %+v", peers)
+	if peer := peersByID[sourceMachine.ID]; !peer.Shared || peer.ShareeNode {
+		t.Fatalf("expected ACL-visible source machine to stay shared only, got %+v", peer)
 	}
-	if !peersByID[sourceMachine.ID].Shared || !peersByID[sourceOrgPeer.ID].Shared {
-		t.Fatalf("expected ACL-visible source-org peers to be marked shared, got %+v", peers)
+	if _, ok := peersByID[sourceOrgPeer.ID]; ok {
+		t.Fatalf("expected target machine not to see unrelated source-org peer, got %+v", peers)
 	}
 
 	sourcePeers, sourceInvalidNodeIDs, err := app.getPeers(sourceMachine, sourceAllowSelf)
@@ -621,10 +613,10 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	}
 	sourcePeersByID := machinesByID(sourcePeers)
 	if _, ok := sourcePeersByID[targetMachine.ID]; !ok {
-		t.Fatalf("expected source machine to see connected target peer via ACL visibility, got %+v", sourcePeers)
+		t.Fatalf("expected shared source machine to keep hidden target peer, got %+v", sourcePeers)
 	}
-	if peer := sourcePeersByID[targetMachine.ID]; peer.Shared {
-		t.Fatalf("expected connected target peer to stay owned, got %+v", peer)
+	if peer := sourcePeersByID[targetMachine.ID]; peer.Shared || !peer.ShareeNode {
+		t.Fatalf("expected target peer for shared source machine to be a hidden sharee node, got %+v", peer)
 	}
 	if _, ok := sourcePeersByID[sourceOrgPeer.ID]; !ok {
 		t.Fatalf("expected source machine to keep same-org peer visibility, got %+v", sourcePeers)
@@ -639,11 +631,8 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 		t.Fatalf("expected no invalid source org peer node IDs, got %v", sourceOrgInvalidNodeIDs)
 	}
 	sourceOrgPeersByID := machinesByID(sourceOrgPeers)
-	if _, ok := sourceOrgPeersByID[targetMachine.ID]; !ok {
-		t.Fatalf("expected source org peer to see connected target peer via ACL visibility, got %+v", sourceOrgPeers)
-	}
-	if peer := sourceOrgPeersByID[targetMachine.ID]; peer.Shared {
-		t.Fatalf("expected source org peer connected target to stay owned, got %+v", peer)
+	if _, ok := sourceOrgPeersByID[targetMachine.ID]; ok {
+		t.Fatalf("expected unrelated source-org peer not to see target peer, got %+v", sourceOrgPeers)
 	}
 	if _, ok := sourceOrgPeersByID[sourceMachine.ID]; !ok {
 		t.Fatalf("expected source org peer to keep same-org source machine visibility, got %+v", sourceOrgPeers)
@@ -661,6 +650,34 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	}
 	if !containsPrefix(sharedNode.PrimaryRoutes, mustPrefix(t, "10.10.0.0/24")) {
 		t.Fatalf("expected shared peer primary routes to include subnet route, got %v", sharedNode.PrimaryRoutes)
+	}
+
+	hiddenShareeNode, err := app.toNode(sourcePeersByID[targetMachine.ID], sourcePeersByID[targetMachine.ID].Shared)
+	if err != nil {
+		t.Fatalf("toNode(hidden sharee peer): %v", err)
+	}
+	if !hiddenShareeNode.Hostinfo.ShareeNode() {
+		t.Fatalf("expected hidden target peer to be marked sharee node, got %+v", hiddenShareeNode.Hostinfo)
+	}
+
+	sourceFilters, _ := packetFiltersForMachine(sourceMachine, sourcePeers, sourceOrg.AclRules)
+	foundShareIngress := false
+	for _, rule := range sourceFilters {
+		if !containsAddresses(rule.SrcIPs, targetMachine.IPAddresses.ToStringSlice()) {
+			continue
+		}
+		for _, dst := range rule.DstPorts {
+			if containsAddresses([]string{dst.IP}, []string{sourceMachine.IPAddresses[0].String()}) {
+				foundShareIngress = true
+				break
+			}
+		}
+		if foundShareIngress {
+			break
+		}
+	}
+	if !foundShareIngress {
+		t.Fatalf("expected shared source machine packet filters to allow hidden target peer ingress, got %+v", sourceFilters)
 	}
 }
 
