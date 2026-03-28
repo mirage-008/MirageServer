@@ -161,7 +161,7 @@ func GetIPPrefixEndpoints(na netip.Prefix) (netip.Addr, netip.Addr) {
 }
 
 func (h *Mirage) getAvailableIP(ipPrefix netip.Prefix) (*netip.Addr, error) {
-	usedIps, err := h.getUsedIPs()
+	usedIps, err := h.getUsedIPsExcludingMachine(0)
 	if err != nil {
 		return nil, err
 	}
@@ -193,11 +193,19 @@ func (h *Mirage) getAvailableIP(ipPrefix netip.Prefix) (*netip.Addr, error) {
 }
 
 func (h *Mirage) getUsedIPs() (*netipx.IPSet, error) {
+	return h.getUsedIPsExcludingMachine(0)
+}
+
+func (h *Mirage) getUsedIPsExcludingMachine(machineID int64) (*netipx.IPSet, error) {
 	// FIXME: This really deserves a better data model,
 	// but this was quick to get running and it should be enough
 	// to begin experimenting with a dual stack tailnet.
 	var addressesSlices []string
-	h.db.Model(&Machine{}).Pluck("ip_addresses", &addressesSlices)
+	query := h.db.Model(&Machine{})
+	if machineID != 0 {
+		query = query.Where("id <> ?", machineID)
+	}
+	query.Pluck("ip_addresses", &addressesSlices)
 
 	var ips netipx.IPSetBuilder
 	for _, slice := range addressesSlices {

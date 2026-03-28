@@ -22,6 +22,10 @@ const (
 	ErrMachineNotFound                  = Error("machine not found")
 	ErrMachineRouteIsNotAvailable       = Error("route is not available on machine")
 	ErrMachineAddressesInvalid          = Error("failed to parse machine addresses")
+	ErrMachineIPAddressInvalid          = Error("machine IP address is invalid")
+	ErrMachineIPAddressUnavailable      = Error("machine IP address is already in use")
+	ErrMachineIPAddressOutOfRange       = Error("machine IP address is outside configured prefixes")
+	ErrMachineIPAddressDuplicatePrefix  = Error("machine IP address prefix was specified more than once")
 	ErrMachineNotFoundRegistrationCache = Error(
 		"machine not found in registration cache",
 	)
@@ -139,6 +143,135 @@ func (ma MachineAddresses) Value() (driver.Value, error) {
 	addresses := strings.Join(ma.ToStringSlice(), ",")
 
 	return addresses, nil
+}
+
+func (h *Mirage) addressPrefixIndex(addr netip.Addr) (int, bool) {
+	for i, prefix := range h.cfg.IPPrefixes {
+		if prefix.Contains(addr) {
+			return i, true
+		}
+	}
+
+	return -1, false
+}
+
+func (h *Mirage) validateMachineIPInPrefix(addr netip.Addr, prefix netip.Prefix) error {
+	if !prefix.Contains(addr) {
+		return ErrMachineIPAddressOutOfRange
+	}
+	network, broadcast := GetIPPrefixEndpoints(prefix)
+	switch {
+	case addr == netip.Addr{}:
+		return ErrMachineIPAddressInvalid
+	case addr.IsLoopback():
+		return ErrMachineIPAddressInvalid
+	case addr == network:
+		return ErrMachineIPAddressInvalid
+	case addr == broadcast:
+		return ErrMachineIPAddressInvalid
+	default:
+		return nil
+	}
+}
+
+func (h *Mirage) machineAddressesByPrefix(machine *Machine) map[int]netip.Addr {
+	byPrefix := make(map[int]netip.Addr)
+	if machine == nil {
+		return byPrefix
+	}
+	for _, addr := range machine.IPAddresses {
+		if idx, ok := h.addressPrefixIndex(addr); ok {
+			byPrefix[idx] = addr
+		}
+	}
+
+	return byPrefix
+}
+
+func (h *Mirage) buildUpdatedMachineAddresses(machine *Machine, rawAddresses []string) (MachineAddresses, error) {
+	if machine == nil {
+		return nil, ErrMachineNotFound
+	}
+
+	updatedByPrefix := h.machineAddressesByPrefix(machine)
+	explicitByPrefix := make(map[int]netip.Addr)
+	sawExplicitAddress := false
+	for _, raw := range rawAddresses {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		sawExplicitAddress = true
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			return nil, ErrMachineIPAddressInvalid
+		}
+		prefixIndex, ok := h.addressPrefixIndex(addr)
+		if !ok {
+			return nil, ErrMachineIPAddressOutOfRange
+		}
+		if err := h.validateMachineIPInPrefix(addr, h.cfg.IPPrefixes[prefixIndex]); err != nil {
+			return nil, err
+		}
+		if existing, exists := explicitByPrefix[prefixIndex]; exists && existing != addr {
+			return nil, ErrMachineIPAddressDuplicatePrefix
+		}
+		explicitByPrefix[prefixIndex] = addr
+		updatedByPrefix[prefixIndex] = addr
+	}
+	if !sawExplicitAddress && len(updatedByPrefix) == 0 {
+		return nil, ErrMachineIPAddressInvalid
+	}
+
+	usedIPs, err := h.getUsedIPsExcludingMachine(machine.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	updated := make(MachineAddresses, 0, len(updatedByPrefix))
+	for i := range h.cfg.IPPrefixes {
+		addr, ok := updatedByPrefix[i]
+		if !ok {
+			continue
+		}
+		if usedIPs.Contains(addr) {
+			return nil, ErrMachineIPAddressUnavailable
+		}
+		updated = append(updated, addr)
+	}
+	if len(updated) == 0 {
+		return nil, ErrMachineIPAddressInvalid
+	}
+
+	return updated, nil
+}
+
+func (h *Mirage) SetMachineAddresses(machine *Machine, rawAddresses []string) error {
+	if machine == nil {
+		return ErrMachineNotFound
+	}
+
+	h.ipAllocationMutex.Lock()
+	defer h.ipAllocationMutex.Unlock()
+
+	updatedAddresses, err := h.buildUpdatedMachineAddresses(machine, rawAddresses)
+	if err != nil {
+		return err
+	}
+
+	machine.IPAddresses = updatedAddresses
+	if err := h.db.Save(machine).Error; err != nil {
+		return err
+	}
+
+	connectedOrgIDs, err := h.ListShareConnectedOrgIDs(machine.User.OrganizationID)
+	if err != nil || len(connectedOrgIDs) == 0 {
+		h.setOrgLastStateChangeToNow(machine.User.OrganizationID)
+		return nil
+	}
+	h.setOrgLastStateChangeToNow(connectedOrgIDs...)
+
+	return nil
 }
 
 // isExpired returns whether the machine registration has expired.
@@ -1003,13 +1136,21 @@ func (h *Mirage) TouchMachine(machine *Machine) error {
 
 // HardDeleteMachine hard deletes a Machine from the database.
 func (h *Mirage) HardDeleteMachine(machine *Machine) error {
+	h.ipAllocationMutex.Lock()
+	defer h.ipAllocationMutex.Unlock()
+
+	connectedOrgIDs, err := h.ListShareConnectedOrgIDs(machine.User.OrganizationID)
+	if err != nil {
+		connectedOrgIDs = []int64{machine.User.OrganizationID}
+	}
 	// delete routes of this machine
 	h.db.Where(&Route{MachineID: machine.ID}).Delete(&Route{})
+	h.db.Where("source_machine_id = ?", machine.ID).Delete(&MachineShare{})
 	if err := h.db.Unscoped().Delete(&machine).Error; err != nil {
 		return err
 	}
 
-	h.setOrgLastStateChangeToNow(machine.User.OrganizationID)
+	h.setOrgLastStateChangeToNow(connectedOrgIDs...)
 	return nil
 }
 

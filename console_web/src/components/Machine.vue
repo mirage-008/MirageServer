@@ -4,6 +4,7 @@ import { useRouter, useRoute } from "vue-router";
 import MachineMenu from "./MachineMenu.vue";
 import RemoveMachine from "./mmenu/RemoveMachine.vue";
 import UpdateHostname from "./mmenu/UpdateHostname.vue";
+import UpdateAddresses from "./mmenu/UpdateAddresses.vue";
 import SetSubnet from "./mmenu/SetSubnet.vue";
 import EditTags from "./mmenu/EditTags.vue";
 import ShareMachine from "./mmenu/ShareMachine.vue";
@@ -83,6 +84,11 @@ const updateHostnameShow = ref(false);
 function showUpdateHostname() {
   closeMachineMenu();
   updateHostnameShow.value = true;
+}
+const updateAddressesShow = ref(false);
+function showUpdateAddresses() {
+  closeMachineMenu();
+  updateAddressesShow.value = true;
 }
 const setSubnetShow = ref(false);
 function showSetSubnet() {
@@ -393,6 +399,24 @@ function hostnameUpdateDone(newName, newAutomaticNameMode, wantClose) {
 }
 function hostnameUpdateFail(msg) {
   toastMsg.value = "更新设备名称失败！";
+  toastShow.value = true;
+}
+
+function addressesUpdateDone(newAddresses) {
+  const nextAddresses = newAddresses || [];
+  const previousPrimary = currentMachine.value["addresses"]?.[0] || "";
+  currentMachine.value["addresses"] = nextAddresses;
+  updateAddressesShow.value = false;
+  nextTick(() => {
+    if (nextAddresses[0] && nextAddresses[0] !== previousPrimary) {
+      router.replace("/machines/" + nextAddresses[0]);
+    }
+    toastMsg.value = "已更新设备 IP！";
+    toastShow.value = true;
+  });
+}
+function addressesUpdateFail(msg) {
+  toastMsg.value = "更新设备 IP 失败！" + msg;
   toastShow.value = true;
 }
 
@@ -1014,6 +1038,7 @@ function isInvalidTag(tag) {
       @showdialog-remove="showDelConfirm"
       @showdialog-edittags="showEditTags"
       @showdialog-updatehostname="showUpdateHostname"
+      @showdialog-updateaddresses="showUpdateAddresses"
       @showdialog-setsubnet="showSetSubnet"
       @showdialog-share="showShareMachine"
     ></MachineMenu>
@@ -1049,6 +1074,14 @@ function isInvalidTag(tag) {
       @update-fail="hostnameUpdateFail"
     >
     </UpdateHostname>
+    <UpdateAddresses
+      v-if="updateAddressesShow"
+      :id="currentMID"
+      :current-addresses="currentMachine.addresses"
+      @close="updateAddressesShow = false"
+      @update-done="addressesUpdateDone"
+      @update-fail="addressesUpdateFail"
+    ></UpdateAddresses>
     <!-- 设置子网转发提示框显示 -->
     <SetSubnet
       v-if="setSubnetShow"

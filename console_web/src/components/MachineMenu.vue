@@ -71,6 +71,16 @@ function emitIfEditable(eventName) {
         编辑设备名称…
       </div>
       <div
+        @click="emitIfEditable('showdialog-updateaddresses')"
+        :class="{
+          'cursor-pointer hover:bg-gray-100 focus:bg-gray-100': !isExternal,
+          'cursor-default text-gray-300': isExternal,
+        }"
+        class="block px-4 py-2 focus:outline-none"
+      >
+        编辑设备 IP…
+      </div>
+      <div
         @click="emitIfEditable('showdialog-share')"
         :class="{
           'cursor-pointer hover:bg-gray-100 focus:bg-gray-100': !isExternal,

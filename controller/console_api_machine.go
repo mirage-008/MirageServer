@@ -108,6 +108,17 @@ func IsUpdateAvailable(cur, latest string) bool {
 	return false
 }
 
+func preferredMachineAddresses(addresses MachineAddresses) []string {
+	switch {
+	case len(addresses) >= 2 && addresses[0].Is4():
+		return []string{addresses[0].String(), addresses[1].String()}
+	case len(addresses) >= 2 && addresses[1].Is4():
+		return []string{addresses[1].String(), addresses[0].String()}
+	default:
+		return addresses.ToStringSlice()
+	}
+}
+
 // 控制台获取设备信息列表的API
 func (h *Mirage) ConsoleMachinesAPI(
 	w http.ResponseWriter,
@@ -246,14 +257,7 @@ func (h *Mirage) ConsoleMachinesAPI(
 		if !tmpMachine.NeverExpires {
 			tmpMachine.ExpiryDesc = convExpiryToStr(time.Until(expires))
 		}
-		switch {
-		case len(machine.IPAddresses) >= 2 && machine.IPAddresses[0].Is4():
-			tmpMachine.Addresses = []string{machine.IPAddresses[0].String(), machine.IPAddresses[1].String()}
-		case len(machine.IPAddresses) >= 2 && machine.IPAddresses[1].Is4():
-			tmpMachine.Addresses = []string{machine.IPAddresses[1].String(), machine.IPAddresses[0].String()}
-		default:
-			tmpMachine.Addresses = machine.IPAddresses.ToStringSlice()
-		}
+		tmpMachine.Addresses = preferredMachineAddresses(machine.IPAddresses)
 		mlist = append(mlist, tmpMachine)
 	}
 
@@ -694,6 +698,32 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 			}
 			h.doAPIResponse(writer, "", resData)
 		}
+	case "set-addresses", "set-ip", "set-ip-addresses":
+		addressRequests := make([]string, 0, 4)
+		if reqAddresses, ok := reqData["addresses"].([]interface{}); ok {
+			for _, address := range reqAddresses {
+				if addressStr, ok := address.(string); ok {
+					addressRequests = append(addressRequests, addressStr)
+				}
+			}
+		}
+		if ipv4 := parseRequestString(reqData, "ipv4", "address4", "ip4"); ipv4 != "" {
+			addressRequests = append(addressRequests, ipv4)
+		}
+		if ipv6 := parseRequestString(reqData, "ipv6", "address6", "ip6"); ipv6 != "" {
+			addressRequests = append(addressRequests, ipv6)
+		}
+
+		msg, addresses, err := h.setMachineAddresses(toUpdateMachine, addressRequests)
+		if err != nil {
+			h.doAPIResponse(writer, msg, nil)
+			return
+		}
+
+		resData := machineData{
+			Address: preferredMachineAddresses(addresses),
+		}
+		h.doAPIResponse(writer, "", resData)
 	default:
 		h.doAPIResponse(writer, "未知设备操作", nil)
 	}
@@ -779,6 +809,26 @@ func (h *Mirage) setMachineTags(machine *Machine, tags []string) (string, error)
 		return "设置设备标签失败", err
 	}
 	return "", nil
+}
+
+func (h *Mirage) setMachineAddresses(machine *Machine, addresses []string) (string, MachineAddresses, error) {
+	err := h.SetMachineAddresses(machine, addresses)
+	if err == nil {
+		return "", machine.IPAddresses, nil
+	}
+
+	switch {
+	case errors.Is(err, ErrMachineIPAddressInvalid):
+		return "设置设备 IP 失败：IP 地址格式无效或属于保留地址", nil, err
+	case errors.Is(err, ErrMachineIPAddressOutOfRange):
+		return "设置设备 IP 失败：IP 地址不在当前尾网地址池内", nil, err
+	case errors.Is(err, ErrMachineIPAddressUnavailable):
+		return "设置设备 IP 失败：IP 地址已被其它设备占用", nil, err
+	case errors.Is(err, ErrMachineIPAddressDuplicatePrefix):
+		return "设置设备 IP 失败：同一地址族只能设置一个地址", nil, err
+	default:
+		return "设置设备 IP 失败", nil, err
+	}
 }
 
 func (h *Mirage) setMachineSubnet(machine *Machine, ExitNodeEnable bool, allowedIPs []string) (string, error) {

@@ -4,6 +4,7 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate } from "vue-router";
 import MachineMenu from "./MachineMenu.vue";
 import RemoveMachine from "./mmenu/RemoveMachine.vue";
 import UpdateHostname from "./mmenu/UpdateHostname.vue";
+import UpdateAddresses from "./mmenu/UpdateAddresses.vue";
 import SetSubnet from "./mmenu/SetSubnet.vue";
 import Toast from "./Toast.vue";
 import EditTags from "./mmenu/EditTags.vue";
@@ -76,6 +77,12 @@ function showUpdateHostname() {
   machineBtnShow.value = false;
   closeMachineMenu();
   updateHostnameShow.value = true;
+}
+const updateAddressesShow = ref(false);
+function showUpdateAddresses() {
+  machineBtnShow.value = false;
+  closeMachineMenu();
+  updateAddressesShow.value = true;
 }
 const setSubnetShow = ref(false);
 function showSetSubnet() {
@@ -448,6 +455,19 @@ function hostnameUpdateDone(newName, newAutomaticNameMode, wantClose) {
 }
 function hostnameUpdateFail(msg) {
   toastMsg.value = "更新设备名称失败！";
+  toastShow.value = true;
+}
+
+function addressesUpdateDone(newAddresses) {
+  MList.value[currentMID.value]["addresses"] = newAddresses || [];
+  updateAddressesShow.value = false;
+  nextTick(() => {
+    toastMsg.value = "已更新设备 IP！";
+    toastShow.value = true;
+  });
+}
+function addressesUpdateFail(msg) {
+  toastMsg.value = "更新设备 IP 失败！" + msg;
   toastShow.value = true;
 }
 
@@ -1081,6 +1101,7 @@ function copyMIPv6() {
       @showdialog-remove="showDelConfirm"
       @showdialog-edittags="showEditTags"
       @showdialog-updatehostname="showUpdateHostname"
+      @showdialog-updateaddresses="showUpdateAddresses"
       @showdialog-setsubnet="showSetSubnet"
       @showdialog-share="showShareMachine"
     ></MachineMenu>
@@ -1119,6 +1140,14 @@ function copyMIPv6() {
       @update-fail="hostnameUpdateFail"
     >
     </UpdateHostname>
+    <UpdateAddresses
+      v-if="updateAddressesShow"
+      :id="currentMID"
+      :current-addresses="MList[currentMID].addresses"
+      @close="updateAddressesShow = false"
+      @update-done="addressesUpdateDone"
+      @update-fail="addressesUpdateFail"
+    ></UpdateAddresses>
     <!-- 设置子网转发提示框显示 -->
     <SetSubnet
       v-if="setSubnetShow"
