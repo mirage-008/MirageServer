@@ -12,12 +12,13 @@ import (
 )
 
 type dnsMgrTestState struct {
-	t        *testing.T
-	zoneID   int64
-	zoneName string
-	minTTL   string
-	records  map[string]dnsMgrRecordItem
-	nextID   int64
+	t                     *testing.T
+	zoneID                int64
+	zoneName              string
+	minTTL                string
+	records               map[string]dnsMgrRecordItem
+	nextID                int64
+	recordNotFoundOnEmpty bool
 }
 
 func newDNSMgrTestServer(t *testing.T) (*dnsMgrTestState, *httptest.Server) {
@@ -83,6 +84,15 @@ func (s *dnsMgrTestState) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		sort.Slice(rows, func(i, j int) bool {
 			return rows[i].RecordID < rows[j].RecordID
 		})
+		if len(rows) == 0 && s.recordNotFoundOnEmpty {
+			s.writeJSON(w, dnsMgrRecordListResponse{
+				dnsMgrAPIEnvelope: dnsMgrAPIEnvelope{
+					Code: 1,
+					Msg:  "record not found",
+				},
+			})
+			return
+		}
 		s.writeJSON(w, dnsMgrRecordListResponse{
 			Total: len(rows),
 			Rows:  rows,
@@ -292,5 +302,35 @@ func TestDNSMgrManagedFunnelDNSProviderLookup(t *testing.T) {
 	}
 	if !result.Ready {
 		t.Fatalf("ready lookup result = %#v", result)
+	}
+}
+
+func TestDNSMgrManagedFunnelDNSProviderLookupTreatsRecordNotFoundAsNotReady(t *testing.T) {
+	t.Parallel()
+
+	state, server := newDNSMgrTestServer(t)
+	state.recordNotFoundOnEmpty = true
+	defer server.Close()
+
+	provider, err := newManagedFunnelDNSProvider(FunnelPlatformConfig{
+		ManagedBaseDomain:    defaultFunnelDNSMgrBaseDomain,
+		ManagedDNSProvider:   FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSAPIBaseURL: server.URL,
+		ManagedDNSUID:        1000,
+		ManagedDNSAPIKey:     "secret",
+	})
+	if err != nil {
+		t.Fatalf("newManagedFunnelDNSProvider(): %v", err)
+	}
+
+	result, err := provider.LookupManagedDomain(context.Background(), "machine-404-org."+defaultFunnelDNSMgrBaseDomain)
+	if err != nil {
+		t.Fatalf("LookupManagedDomain(): %v", err)
+	}
+	if result.Ready {
+		t.Fatal("expected record not found to be treated as not ready")
+	}
+	if !strings.Contains(result.Message, "未找到托管 DNS 记录") {
+		t.Fatalf("lookup message = %q", result.Message)
 	}
 }

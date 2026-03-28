@@ -347,6 +347,9 @@ func (p *dnsMgrManagedFunnelDNSProvider) listRecords(ctx context.Context, zoneID
 		"subdomain": []string{recordName},
 		"limit":     []string{"100"},
 	}, &resp); err != nil {
+		if dnsMgrRecordNotFoundError(err) {
+			return []dnsMgrRecordItem{}, nil
+		}
 		return nil, err
 	}
 	return resp.Rows, nil
@@ -476,6 +479,14 @@ func dnsMgrMinTTL(raw string) int {
 		return 60
 	}
 	return ttl
+}
+
+func dnsMgrRecordNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "record not found")
 }
 
 func (h *Mirage) currentManagedFunnelDNSProvider() (managedFunnelDNSProvider, error) {

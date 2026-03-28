@@ -409,22 +409,10 @@ func (h *Mirage) loadTenantFunnelService(r *http.Request, orgID int64) (*FunnelS
 }
 
 func (h *Mirage) createTenantFunnelDomain(user *User, req FunnelDomainCreateRequest) (*FunnelDomain, *FunnelCert, error) {
-	domainName := normalizeFunnelBaseDomain(req.Domain)
-	if domainName == "" {
-		return nil, nil, fmt.Errorf("未指定Funnel域名")
+	domainType := strings.ToLower(strings.TrimSpace(req.DomainType))
+	if domainType == "" {
+		domainType = FunnelDomainTypeCustom
 	}
-	if !strings.EqualFold(strings.TrimSpace(req.DomainType), FunnelDomainTypeCustom) && strings.TrimSpace(req.DomainType) != "" {
-		return nil, nil, fmt.Errorf("当前仅支持自定义Funnel域名")
-	}
-	if strings.Contains(domainName, "*") {
-		return nil, nil, fmt.Errorf("当前不支持通配Funnel域名")
-	}
-	if err := h.db.Where("domain = ?", domainName).First(&FunnelDomain{}).Error; err == nil {
-		return nil, nil, fmt.Errorf("该Funnel域名已被占用")
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil, err
-	}
-
 	cfg := req
 	if strings.TrimSpace(cfg.ListenerMode) == "" {
 		cfg.ListenerMode = FunnelListenerModeDirect
@@ -434,6 +422,55 @@ func (h *Mirage) createTenantFunnelDomain(user *User, req FunnelDomainCreateRequ
 	}
 	if strings.TrimSpace(cfg.TLSMode) == "" {
 		cfg.TLSMode = FunnelTLSModePlatformManaged
+	}
+	if domainType == FunnelDomainTypeManaged {
+		org := &user.Organization
+		if org.ID == 0 {
+			loadedOrg, err := h.GetOrgnaizationByID(user.OrganizationID)
+			if err != nil {
+				return nil, nil, err
+			}
+			org = loadedOrg
+		}
+		funnelCfg, err := effectiveFunnelPlatformConfigFromDB(h.db, h.cfg.BaseDomain)
+		if err != nil {
+			return nil, nil, err
+		}
+		managedDomainName, err := allocateManagedFunnelDomainForOrg(h.db, org, funnelCfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		listenPort := cfg.HTTPSPort
+		if listenPort <= 0 {
+			listenPort = cfg.HTTPPort
+		}
+		if listenPort <= 0 {
+			listenPort = 443
+		}
+		domain, err := h.createManagedFunnelDomain(user, managedDomainName, listenPort, cfg.EdgeMode, cfg.ListenerMode)
+		if err != nil {
+			return nil, nil, err
+		}
+		cert, err := h.getTenantFunnelCertByDomainID(domain.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return domain, cert, nil
+	}
+	if domainType != FunnelDomainTypeCustom {
+		return nil, nil, fmt.Errorf("不支持的Funnel域名类型")
+	}
+	domainName := normalizeFunnelBaseDomain(req.Domain)
+	if domainName == "" {
+		return nil, nil, fmt.Errorf("未指定Funnel域名")
+	}
+	if strings.Contains(domainName, "*") {
+		return nil, nil, fmt.Errorf("当前不支持通配Funnel域名")
+	}
+	if err := h.db.Where("domain = ?", domainName).First(&FunnelDomain{}).Error; err == nil {
+		return nil, nil, fmt.Errorf("该Funnel域名已被占用")
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, err
 	}
 	domain := &FunnelDomain{
 		OrgID:            user.OrganizationID,
@@ -508,7 +545,7 @@ func (h *Mirage) createTenantFunnelService(user *User, req FunnelServiceCreateRe
 
 	var domain *FunnelDomain
 	switch strings.ToLower(strings.TrimSpace(req.DomainMode)) {
-	case "", FunnelDomainTypeCustom:
+	case "", FunnelDomainTypeCustom, "existing":
 		if req.DomainID == 0 {
 			return nil, nil, nil, fmt.Errorf("未指定Funnel域名")
 		}
@@ -1027,6 +1064,64 @@ func allocateManagedFunnelDomain(org *Organization, machine *Machine, cfg Funnel
 		return ""
 	}
 	return fmt.Sprintf("machine-%d-%s.%s", machine.ID, org.StableID, base)
+}
+
+func allocateManagedFunnelDomainForOrg(db *gorm.DB, org *Organization, cfg FunnelPlatformConfig) (string, error) {
+	base := normalizeFunnelBaseDomain(cfg.ManagedBaseDomain)
+	if base == "" && org != nil {
+		base = normalizeFunnelBaseDomain(org.MagicDnsDomain)
+	}
+	if base == "" {
+		base = "example.invalid"
+	}
+	if org == nil {
+		return "", fmt.Errorf("未找到组织信息")
+	}
+	orgLabel := normalizeFunnelDNSLabel(org.StableID)
+	if orgLabel == "" {
+		orgLabel = fmt.Sprintf("org%d", org.ID)
+	}
+	for attempt := 1; attempt <= 1000; attempt++ {
+		candidate := fmt.Sprintf("managed-%s-%d.%s", orgLabel, attempt, base)
+		existing := &FunnelDomain{}
+		err := db.Where("domain = ?", candidate).First(existing).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return candidate, nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("无法分配托管Funnel域名")
+}
+
+func normalizeFunnelDNSLabel(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash {
+				builder.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	label := strings.Trim(builder.String(), "-")
+	if label == "" {
+		return ""
+	}
+	if len(label) > 48 {
+		label = strings.Trim(label[:48], "-")
+	}
+	return label
 }
 
 func chooseFunnelValidationMethod(raw string) string {

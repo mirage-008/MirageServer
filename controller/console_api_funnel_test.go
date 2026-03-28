@@ -284,6 +284,78 @@ func TestConsoleFunnelManagedServiceAndStatus(t *testing.T) {
 	}
 }
 
+func TestConsoleFunnelCreateManagedDomain(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	setTenantTestFunnelDNSMgrConfig(t, app)
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{}
+	app.newManagedFunnelDNSProvider = func(FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
+		return fakeDNS, nil
+	}
+
+	owner := createTestUser(t, app, "managed-domain-owner@example.com", "Managed Domain Owner", "managed-domain-org", "Mirage")
+	app.controlCodeCache.Set("managed-domain-auth", ControlCacheItem{uid: tailcfg.UserID(owner.ID)}, time.Hour)
+
+	rec := serveTenantFunnel(t, app, http.MethodPost, "/admin/api/funnel/domains", "managed-domain-auth", []byte(`{"domainType":"managed","listenerMode":"direct","edgeMode":"server_edge"}`), nil, app.CAPIPostFunnelDomains)
+	status, data := funnelTenantResponse(t, rec.Body.Bytes())
+	if status != "success" {
+		t.Fatalf("unexpected status: %s body=%s", status, rec.Body.String())
+	}
+	domain := data["domain"].(map[string]any)
+	if domain["domainType"] != FunnelDomainTypeManaged {
+		t.Fatalf("domainType = %#v", domain["domainType"])
+	}
+	if !strings.HasSuffix(domain["domain"].(string), "."+defaultFunnelDNSMgrBaseDomain) {
+		t.Fatalf("domain = %#v", domain["domain"])
+	}
+	if len(fakeDNS.ensured) != 1 {
+		t.Fatalf("ensured = %#v", fakeDNS.ensured)
+	}
+}
+
+func TestConsoleFunnelCreateServiceWithExistingManagedDomain(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	setTenantTestFunnelDNSMgrConfig(t, app)
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{}
+	app.newManagedFunnelDNSProvider = func(FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
+		return fakeDNS, nil
+	}
+
+	owner := createTestUser(t, app, "existing-managed-owner@example.com", "Existing Managed Owner", "existing-managed-org", "Mirage")
+	machine := createTestMachine(t, app, owner, "existing-managed-machine", "100.64.0.88")
+
+	domain, err := app.createManagedFunnelDomain(owner, "existing-managed-org."+defaultFunnelDNSMgrBaseDomain, 443, FunnelEdgeModeServer, FunnelListenerModeDirect)
+	if err != nil {
+		t.Fatalf("createManagedFunnelDomain(): %v", err)
+	}
+
+	service, boundDomain, _, err := app.createTenantFunnelService(owner, FunnelServiceCreateRequest{
+		MachineID:     machine.ID,
+		DomainMode:    "existing",
+		DomainID:      domain.ID,
+		ListenProto:   FunnelListenProtoHTTPS,
+		ListenPort:    443,
+		MountPath:     "/",
+		BackendType:   FunnelBackendTypeHTTPProxy,
+		BackendScheme: "http",
+		BackendPort:   8080,
+	})
+	if err != nil {
+		t.Fatalf("createTenantFunnelService(): %v", err)
+	}
+	if service.DomainID != domain.ID {
+		t.Fatalf("service.DomainID = %d, want %d", service.DomainID, domain.ID)
+	}
+	if boundDomain.ID != domain.ID {
+		t.Fatalf("boundDomain.ID = %d, want %d", boundDomain.ID, domain.ID)
+	}
+}
+
 func TestConsoleFunnelPatchEnableDisableLogs(t *testing.T) {
 	t.Parallel()
 

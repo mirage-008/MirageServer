@@ -17,6 +17,7 @@ const services = ref([]);
 const machines = ref([]);
 
 const domainForm = ref({
+  domainType: "managed",
   domain: "",
   listenerMode: "direct",
   edgeMode: "server_edge",
@@ -42,10 +43,8 @@ const verifyingDomainID = ref("");
 const togglingServiceID = ref("");
 const deletingServiceID = ref("");
 
-const activeCustomDomains = computed(() => {
-  return domains.value.filter(function (domain) {
-    return domain.domainType == "custom";
-  });
+const availableDomains = computed(() => {
+  return domains.value;
 });
 
 const canConfigureBackendScheme = computed(() => {
@@ -94,7 +93,7 @@ function servicePayloadFromForm() {
   };
 
   if (serviceForm.value.domainMode == "existing") {
-    payload["domainMode"] = "custom";
+    payload["domainMode"] = "existing";
     payload["domainId"] = Number(serviceForm.value.domainId);
   }
   if (serviceForm.value.listenPort !== "") {
@@ -166,7 +165,7 @@ function reloadAll() {
 }
 
 function createDomain() {
-  if (!domainForm.value.domain.trim()) {
+  if (domainForm.value.domainType == "custom" && !domainForm.value.domain.trim()) {
     toastMsg.value = "请输入自定义域名";
     toastShow.value = true;
     return;
@@ -176,7 +175,7 @@ function createDomain() {
   axios
     .post("/admin/api/funnel/domains", {
       domain: domainForm.value.domain.trim(),
-      domainType: "custom",
+      domainType: domainForm.value.domainType,
       listenerMode: domainForm.value.listenerMode,
       edgeMode: domainForm.value.edgeMode,
       tlsMode: "platform_managed",
@@ -185,8 +184,11 @@ function createDomain() {
       if (response.data["status"] != "success") {
         throw new Error(response.data["status"]?.substring(6) || "创建公网域名失败");
       }
+      const payload = unwrapData(response.data) || {};
       domainForm.value.domain = "";
-      toastMsg.value = "已创建公网域名";
+      toastMsg.value =
+        payload?.domain?.domain ||
+        (domainForm.value.domainType == "managed" ? "已分配托管域名" : "已创建公网域名");
       toastShow.value = true;
       loadDomains().then().catch();
     })
@@ -368,17 +370,36 @@ onMounted(() => {
         <div class="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
           <header>
             <h2 class="text-xl font-semibold tracking-tight">公共域名</h2>
-            <p class="mt-2 text-sm text-gray-500">先添加自定义域名，再完成 DNS 验证；托管域名会在创建服务时自动分配。</p>
+            <p class="mt-2 text-sm text-gray-500">这里可以先创建免费托管域名，也可以录入自定义域名。已有域名随后都能绑定到公网服务。</p>
           </header>
 
           <div class="mt-5 space-y-4">
             <div>
+              <label class="text-sm text-gray-600">域名类型</label>
+              <select
+                v-model="domainForm.domainType"
+                class="mt-2 py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md bg-white"
+              >
+                <option value="managed">免费托管域名</option>
+                <option value="custom">自定义域名</option>
+              </select>
+            </div>
+            <div>
               <label class="text-sm text-gray-600">域名</label>
               <input
+                v-if="domainForm.domainType == 'custom'"
                 v-model="domainForm.domain"
                 class="mt-2 outline-none py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md font-mono text-sm"
                 placeholder="app.example.com"
               />
+              <div
+                v-else
+                class="mt-2 rounded-md border border-stone-200 bg-stone-50 px-3 py-3 text-sm text-stone-600"
+              >
+                将自动分配一个
+                <code class="bg-stone-200 rounded px-1">*.mirage.mm.md</code>
+                域名。
+              </div>
             </div>
             <div class="grid gap-4 md:grid-cols-2">
               <div>
@@ -408,7 +429,7 @@ onMounted(() => {
                 :disabled="domainSubmitting"
                 class="btn border-0 bg-blue-500 hover:bg-blue-900 disabled:bg-blue-500/60 text-white disabled:text-white/60 h-9 min-h-fit"
               >
-                {{ domainSubmitting ? "创建中..." : "添加域名" }}
+                {{ domainSubmitting ? "创建中..." : domainForm.domainType == "managed" ? "分配托管域名" : "添加自定义域名" }}
               </button>
             </div>
           </div>
@@ -471,7 +492,7 @@ onMounted(() => {
         <div class="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
           <header>
             <h2 class="text-xl font-semibold tracking-tight">公共服务</h2>
-            <p class="mt-2 text-sm text-gray-500">把组织内设备上的服务发布到托管域名，或绑定到已存在的自定义域名。</p>
+            <p class="mt-2 text-sm text-gray-500">把组织内设备上的服务发布到新托管域名，或绑定到已经分配/录入的现有域名。</p>
           </header>
 
           <div class="mt-5 space-y-4">
@@ -505,7 +526,7 @@ onMounted(() => {
                   class="mt-2 py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md bg-white"
                 >
                   <option value="" disabled>请选择域名</option>
-                  <option v-for="domain in activeCustomDomains" :key="domain.id" :value="domain.id">
+                  <option v-for="domain in availableDomains" :key="domain.id" :value="domain.id">
                     {{ domain.domain }}
                   </option>
                 </select>
