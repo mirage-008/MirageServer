@@ -211,7 +211,10 @@ function verifyDomain(domain) {
       if (response.data["status"] != "success") {
         throw new Error(response.data["status"]?.substring(6) || "域名验证请求失败");
       }
-      toastMsg.value = "已提交域名验证请求";
+      const payload = unwrapData(response.data) || {};
+      toastMsg.value =
+        payload["verificationMessage"] ||
+        (payload["verified"] === false ? "域名 DNS 当前未就绪" : "域名验证完成");
       toastShow.value = true;
       loadDomains().then().catch();
     })
@@ -425,6 +428,9 @@ onMounted(() => {
                   <td>
                     <div class="font-semibold text-gray-900">{{ domain.domain }}</div>
                     <div class="text-xs text-gray-400 font-mono">{{ domain.stableId || "-" }}</div>
+                    <div v-if="domain.lastDnsError || domain.last_dns_error" class="text-xs text-orange-700 mt-1">
+                      {{ domain.lastDnsError || domain.last_dns_error }}
+                    </div>
                   </td>
                   <td>
                     <div>{{ domain.status || "-" }}</div>

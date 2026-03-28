@@ -27,6 +27,8 @@ type fakeManagedFunnelDNSProvider struct {
 	deleted   []string
 	ensureErr error
 	deleteErr error
+	lookupErr error
+	lookup    managedFunnelDNSLookupResult
 }
 
 func (f *fakeManagedFunnelDNSProvider) EnsureManagedDomain(_ context.Context, fqdn string) error {
@@ -43,6 +45,13 @@ func (f *fakeManagedFunnelDNSProvider) DeleteManagedDomain(_ context.Context, fq
 	}
 	f.deleted = append(f.deleted, fqdn)
 	return nil
+}
+
+func (f *fakeManagedFunnelDNSProvider) LookupManagedDomain(_ context.Context, fqdn string) (managedFunnelDNSLookupResult, error) {
+	if f.lookupErr != nil {
+		return managedFunnelDNSLookupResult{}, f.lookupErr
+	}
+	return f.lookup, nil
 }
 
 func newFunnelTenantTestMirage(t *testing.T) *Mirage {
@@ -569,6 +578,143 @@ func TestDeleteManagedFunnelDomainSyncsDNSProvider(t *testing.T) {
 	}
 	if len(fakeDNS.deleted) != 1 || fakeDNS.deleted[0] != domain.Domain {
 		t.Fatalf("deleted = %#v", fakeDNS.deleted)
+	}
+}
+
+func TestVerifyManagedFunnelDomainUpdatesDNSState(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	setTenantTestFunnelDNSMgrConfig(t, app)
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{
+		lookup: managedFunnelDNSLookupResult{
+			Ready:   false,
+			Message: "未找到托管 DNS 记录",
+		},
+	}
+	app.newManagedFunnelDNSProvider = func(FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
+		return fakeDNS, nil
+	}
+
+	owner := createTestUser(t, app, "verify-owner@example.com", "Verify Owner", "verify-org", "Mirage")
+	domainName := "machine-900-verify-org." + defaultFunnelDNSMgrBaseDomain
+	domain, err := app.createManagedFunnelDomain(owner, domainName, 443, FunnelEdgeModeServer, FunnelListenerModeDirect)
+	if err != nil {
+		t.Fatalf("createManagedFunnelDomain(): %v", err)
+	}
+
+	result, err := verifyManagedFunnelDomain(app.db, domain, fakeDNS)
+	if err != nil {
+		t.Fatalf("verifyManagedFunnelDomain(): %v", err)
+	}
+	if result.Ready {
+		t.Fatal("expected managed domain verification to report not ready")
+	}
+
+	stored := &FunnelDomain{}
+	if err := app.db.First(stored, domain.ID).Error; err != nil {
+		t.Fatalf("First(domain): %v", err)
+	}
+	if stored.DNSStatus != FunnelDNSStatusError {
+		t.Fatalf("DNSStatus = %q", stored.DNSStatus)
+	}
+	if stored.LastDNSError != "未找到托管 DNS 记录" {
+		t.Fatalf("LastDNSError = %q", stored.LastDNSError)
+	}
+}
+
+func TestManagedFunnelDomainDNSFailureBlocksServiceReady(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	setTenantTestFunnelDNSMgrConfig(t, app)
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{
+		lookup: managedFunnelDNSLookupResult{
+			Ready:   false,
+			Message: "托管 DNS 记录当前已暂停",
+		},
+	}
+	app.newManagedFunnelDNSProvider = func(FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
+		return fakeDNS, nil
+	}
+
+	owner := createTestUser(t, app, "status-owner@example.com", "Status Owner", "status-org", "Mirage")
+	machine := createTestMachine(t, app, owner, "status-machine", "100.64.0.77")
+	service, domain, _, err := app.createTenantFunnelService(owner, FunnelServiceCreateRequest{
+		MachineID:      machine.ID,
+		DomainMode:     "managed",
+		ListenProto:    FunnelListenProtoHTTPS,
+		ListenPort:     443,
+		MountPath:      "/",
+		BackendType:    FunnelBackendTypeHTTPProxy,
+		BackendScheme:  "http",
+		BackendPort:    8080,
+		BackendTailnet: "100.64.0.77",
+	})
+	if err != nil {
+		t.Fatalf("createTenantFunnelService(): %v", err)
+	}
+	if _, err := verifyManagedFunnelDomain(app.db, domain, fakeDNS); err != nil {
+		t.Fatalf("verifyManagedFunnelDomain(): %v", err)
+	}
+
+	status, err := app.buildTenantFunnelServiceStatus(service)
+	if err != nil {
+		t.Fatalf("buildTenantFunnelServiceStatus(): %v", err)
+	}
+	serviceMap := status["service"].(map[string]any)
+	if serviceMap["configStatus"] != FunnelServiceConfigStatusPending {
+		t.Fatalf("configStatus = %#v", serviceMap["configStatus"])
+	}
+	if serviceMap["lastError"] != "托管 DNS 记录当前已暂停" {
+		t.Fatalf("lastError = %#v", serviceMap["lastError"])
+	}
+}
+
+func TestConsoleVerifyManagedFunnelDomainReturnsLookupResult(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	setTenantTestFunnelDNSMgrConfig(t, app)
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{
+		lookup: managedFunnelDNSLookupResult{
+			Ready:   false,
+			Message: "未找到托管 DNS 记录",
+		},
+	}
+	app.newManagedFunnelDNSProvider = func(FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
+		return fakeDNS, nil
+	}
+
+	owner := createTestUser(t, app, "api-verify-owner@example.com", "API Verify Owner", "api-verify-org", "Mirage")
+	app.controlCodeCache.Set("api-verify-auth", ControlCacheItem{uid: tailcfg.UserID(owner.ID)}, time.Hour)
+	domain, err := app.createManagedFunnelDomain(owner, "machine-901-api-verify-org."+defaultFunnelDNSMgrBaseDomain, 443, FunnelEdgeModeServer, FunnelListenerModeDirect)
+	if err != nil {
+		t.Fatalf("createManagedFunnelDomain(): %v", err)
+	}
+
+	rec := serveTenantFunnel(
+		t,
+		app,
+		http.MethodPost,
+		"/admin/api/funnel/domains/"+strconv.FormatInt(domain.ID, 10)+"/verify",
+		"api-verify-auth",
+		[]byte(`{"domainId":`+strconv.FormatInt(domain.ID, 10)+`}`),
+		map[string]string{"id": strconv.FormatInt(domain.ID, 10)},
+		app.CAPIVerifyFunnelDomain,
+	)
+	status, data := funnelTenantResponse(t, rec.Body.Bytes())
+	if status != "success" {
+		t.Fatalf("status = %s body=%s", status, rec.Body.String())
+	}
+	if data["verified"] != false {
+		t.Fatalf("verified = %#v", data["verified"])
+	}
+	if data["verificationMessage"] != "未找到托管 DNS 记录" {
+		t.Fatalf("verificationMessage = %#v", data["verificationMessage"])
 	}
 }
 

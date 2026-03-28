@@ -468,7 +468,7 @@ func (rt *funnelRuntime) buildSnapshot() (*funnelRuntimeSnapshot, FunnelPlatform
 		}
 		portFamilies[service.ListenPort] = portFamily
 
-		domainReady := domain.DomainType == FunnelDomainTypeManaged || domain.ValidationCheckedAt != nil
+		domainReady := funnelDomainDNSReady(domain)
 		if domainReady {
 			status.DomainDNSStatus = FunnelDNSStatusReady
 			if funnelPortFamilyUsesTLS(portFamily) && (status.DomainStatus == "" || status.DomainStatus == FunnelDomainStatusPendingDNS) {
@@ -477,12 +477,21 @@ func (rt *funnelRuntime) buildSnapshot() (*funnelRuntimeSnapshot, FunnelPlatform
 				status.DomainStatus = FunnelDomainStatusActive
 			}
 		} else {
-			status.DomainDNSStatus = FunnelDNSStatusPending
-			status.DomainStatus = FunnelDomainStatusPendingDNS
+			status.DomainDNSStatus = domain.DNSStatus
+			if status.DomainDNSStatus == "" {
+				status.DomainDNSStatus = FunnelDNSStatusPending
+			}
+			status.DomainStatus = domain.Status
+			if status.DomainStatus == "" {
+				status.DomainStatus = FunnelDomainStatusPendingDNS
+			}
 			status.ServiceConfigStatus = FunnelServiceConfigStatusPending
 			status.ServiceEdgeStatus = FunnelServiceEdgeStatusPending
 			status.ServiceBackendStatus = FunnelServiceBackendStatusUnknown
-			status.ServiceLastError = "域名尚未完成验证"
+			status.ServiceLastError = strings.TrimSpace(domain.LastDNSError)
+			if status.ServiceLastError == "" {
+				status.ServiceLastError = "域名尚未完成验证"
+			}
 			snapshot.ServiceStatus[service.ID] = status
 			continue
 		}
@@ -1360,17 +1369,50 @@ func markFunnelDomainVerified(tx *gorm.DB, domain *FunnelDomain) error {
 	if domain == nil {
 		return fmt.Errorf("未找到Funnel域名")
 	}
+	setFunnelDomainDNSVerificationState(domain, true, "")
+	return tx.Save(domain).Error
+}
+
+func markFunnelDomainDNSFailed(tx *gorm.DB, domain *FunnelDomain, message string) error {
+	if domain == nil {
+		return fmt.Errorf("未找到Funnel域名")
+	}
+	setFunnelDomainDNSVerificationState(domain, false, message)
+	return tx.Save(domain).Error
+}
+
+func setFunnelDomainDNSVerificationState(domain *FunnelDomain, ready bool, message string) {
 	now := funnelStatusStamp()
 	domain.ValidationCheckedAt = &now
-	domain.DNSStatus = FunnelDNSStatusReady
-	domain.LastDNSError = ""
-	domain.LastError = ""
-	if strings.EqualFold(domain.TLSMode, FunnelTLSModeBringYourOwn) {
-		domain.Status = FunnelDomainStatusActive
-	} else {
-		domain.Status = FunnelDomainStatusPendingCert
+	if ready {
+		domain.DNSStatus = FunnelDNSStatusReady
+		domain.LastDNSError = ""
+		domain.LastError = ""
+		if strings.EqualFold(domain.TLSMode, FunnelTLSModeBringYourOwn) {
+			domain.Status = FunnelDomainStatusActive
+		} else {
+			domain.Status = FunnelDomainStatusPendingCert
+		}
+		return
 	}
-	return tx.Save(domain).Error
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "域名尚未完成验证"
+	}
+	domain.DNSStatus = FunnelDNSStatusError
+	domain.LastDNSError = message
+	domain.LastError = message
+	domain.Status = FunnelDomainStatusPendingDNS
+}
+
+func funnelDomainDNSReady(domain *FunnelDomain) bool {
+	if domain == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(domain.DNSStatus), FunnelDNSStatusReady) {
+		return false
+	}
+	return domain.DomainType == FunnelDomainTypeManaged || domain.ValidationCheckedAt != nil
 }
 
 func normalizeFunnelRequestHost(host string) string {

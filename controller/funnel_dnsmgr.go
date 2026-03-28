@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 type managedFunnelDNSProvider interface {
 	EnsureManagedDomain(ctx context.Context, fqdn string) error
 	DeleteManagedDomain(ctx context.Context, fqdn string) error
+	LookupManagedDomain(ctx context.Context, fqdn string) (managedFunnelDNSLookupResult, error)
 }
 
 type dnsMgrManagedFunnelDNSProvider struct {
@@ -32,6 +35,11 @@ type dnsMgrManagedFunnelDNSProvider struct {
 	zone    string
 	target  string
 	client  *http.Client
+}
+
+type managedFunnelDNSLookupResult struct {
+	Ready   bool
+	Message string
 }
 
 type dnsMgrAPIEnvelope struct {
@@ -229,6 +237,79 @@ func (p *dnsMgrManagedFunnelDNSProvider) DeleteManagedDomain(ctx context.Context
 	return nil
 }
 
+func (p *dnsMgrManagedFunnelDNSProvider) LookupManagedDomain(ctx context.Context, fqdn string) (managedFunnelDNSLookupResult, error) {
+	zone, err := p.resolveZone(ctx)
+	if err != nil {
+		return managedFunnelDNSLookupResult{}, err
+	}
+	recordName, err := dnsMgrRecordNameForDomain(fqdn, zone.Name)
+	if err != nil {
+		return managedFunnelDNSLookupResult{}, err
+	}
+	records, err := p.listRecords(ctx, zone.ID, recordName)
+	if err != nil {
+		return managedFunnelDNSLookupResult{}, err
+	}
+	if len(records) == 0 {
+		return managedFunnelDNSLookupResult{
+			Ready:   false,
+			Message: "未找到托管 DNS 记录",
+		}, nil
+	}
+
+	var (
+		hasConflictingType bool
+		hasMatchingTarget  bool
+		hasEnabledMatch    bool
+		wrongTargetValue   string
+	)
+	for _, record := range records {
+		if !strings.EqualFold(strings.TrimSpace(record.Name), recordName) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(record.Type), dnsMgrManagedRecordType) {
+			hasConflictingType = true
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(record.Value), p.target) {
+			if wrongTargetValue == "" {
+				wrongTargetValue = strings.TrimSpace(record.Value)
+			}
+			continue
+		}
+		hasMatchingTarget = true
+		if strings.TrimSpace(record.Status) == "1" {
+			hasEnabledMatch = true
+			break
+		}
+	}
+	if hasEnabledMatch {
+		return managedFunnelDNSLookupResult{Ready: true}, nil
+	}
+	if hasMatchingTarget {
+		return managedFunnelDNSLookupResult{
+			Ready:   false,
+			Message: "托管 DNS 记录当前已暂停",
+		}, nil
+	}
+	if wrongTargetValue != "" {
+		return managedFunnelDNSLookupResult{
+			Ready:   false,
+			Message: fmt.Sprintf("托管 DNS 记录未指向 %s", p.target),
+		}, nil
+	}
+	if hasConflictingType {
+		return managedFunnelDNSLookupResult{
+			Ready:   false,
+			Message: "存在冲突的非 CNAME 记录",
+		}, nil
+	}
+	return managedFunnelDNSLookupResult{
+		Ready:   false,
+		Message: "未找到托管 DNS 记录",
+	}, nil
+}
+
 func (p *dnsMgrManagedFunnelDNSProvider) resolveZone(ctx context.Context) (dnsMgrResolvedZone, error) {
 	resp := dnsMgrDomainListResponse{}
 	if err := p.postForm(ctx, "/api/domain", url.Values{
@@ -414,4 +495,46 @@ func (h *Mirage) currentManagedFunnelDNSProvider() (managedFunnelDNSProvider, er
 		factory = newManagedFunnelDNSProvider
 	}
 	return factory(cfg)
+}
+
+func (c *Cockpit) currentManagedFunnelDNSProvider() (managedFunnelDNSProvider, error) {
+	if c == nil || c.db == nil {
+		return nil, nil
+	}
+	sysCfg, err := c.currentFunnelSysCfg()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := effectiveFunnelPlatformConfig(sysCfg)
+	if err != nil {
+		return nil, err
+	}
+	return newManagedFunnelDNSProvider(cfg)
+}
+
+func verifyManagedFunnelDomain(tx *gorm.DB, domain *FunnelDomain, provider managedFunnelDNSProvider) (managedFunnelDNSLookupResult, error) {
+	if domain == nil {
+		return managedFunnelDNSLookupResult{}, fmt.Errorf("未找到Funnel域名")
+	}
+	if provider == nil {
+		if err := markFunnelDomainVerified(tx, domain); err != nil {
+			return managedFunnelDNSLookupResult{}, err
+		}
+		return managedFunnelDNSLookupResult{Ready: true}, nil
+	}
+	result, err := provider.LookupManagedDomain(context.Background(), domain.Domain)
+	if err != nil {
+		_ = markFunnelDomainDNSFailed(tx, domain, err.Error())
+		return managedFunnelDNSLookupResult{}, err
+	}
+	if result.Ready {
+		if err := markFunnelDomainVerified(tx, domain); err != nil {
+			return managedFunnelDNSLookupResult{}, err
+		}
+		return result, nil
+	}
+	if err := markFunnelDomainDNSFailed(tx, domain, result.Message); err != nil {
+		return managedFunnelDNSLookupResult{}, err
+	}
+	return result, nil
 }

@@ -247,9 +247,24 @@ func (c *Cockpit) PostFunnelDomainVerify(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	if err := markFunnelDomainVerified(c.db, domain); err != nil {
-		c.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
-		return
+	response := funnelDomainWithVerifiedFlag(domain)
+	if domain.DomainType == FunnelDomainTypeManaged {
+		provider, err := c.currentManagedFunnelDNSProvider()
+		if err != nil {
+			c.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
+			return
+		}
+		result, err := verifyManagedFunnelDomain(c.db, domain, provider)
+		if err != nil {
+			c.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
+			return
+		}
+		response = funnelDomainVerificationResponse(domain, result.Ready, false, result.Message)
+	} else {
+		if err := markFunnelDomainVerified(c.db, domain); err != nil {
+			c.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
+			return
+		}
 	}
 	if err := recordFunnelAudit(c.db, domain.OrgID, "super_admin", "cockpit", "domain", domain.StableID, "domain_verify_requested", domainActionPayload(domain, nil)); err != nil {
 		c.doAPIResponse(w, "记录Funnel审计失败:"+err.Error(), nil)
@@ -259,7 +274,7 @@ func (c *Cockpit) PostFunnelDomainVerify(w http.ResponseWriter, r *http.Request)
 	case c.CtrlChn <- CtrlMsg{Msg: "reload-funnel"}:
 	default:
 	}
-	c.doAPIResponse(w, "", funnelDomainWithVerifiedFlag(domain))
+	c.doAPIResponse(w, "", response)
 }
 
 func (c *Cockpit) PostFunnelCertRenew(w http.ResponseWriter, r *http.Request) {

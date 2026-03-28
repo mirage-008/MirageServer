@@ -233,3 +233,64 @@ func TestDNSMgrRecordNameForDomain(t *testing.T) {
 		t.Fatalf("record name = %q", got)
 	}
 }
+
+func TestDNSMgrManagedFunnelDNSProviderLookup(t *testing.T) {
+	t.Parallel()
+
+	state, server := newDNSMgrTestServer(t)
+	defer server.Close()
+
+	provider, err := newManagedFunnelDNSProvider(FunnelPlatformConfig{
+		ManagedBaseDomain:    defaultFunnelDNSMgrBaseDomain,
+		ManagedDNSProvider:   FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSAPIBaseURL: server.URL,
+		ManagedDNSUID:        1000,
+		ManagedDNSAPIKey:     "secret",
+	})
+	if err != nil {
+		t.Fatalf("newManagedFunnelDNSProvider(): %v", err)
+	}
+
+	fqdn := "machine-2-org." + defaultFunnelDNSMgrBaseDomain
+	result, err := provider.LookupManagedDomain(context.Background(), fqdn)
+	if err != nil {
+		t.Fatalf("LookupManagedDomain(): %v", err)
+	}
+	if result.Ready {
+		t.Fatal("expected missing record to be not ready")
+	}
+
+	state.records["200"] = dnsMgrRecordItem{
+		RecordID: "200",
+		Domain:   state.zoneName,
+		Name:     "machine-2-org",
+		Type:     dnsMgrManagedRecordType,
+		Value:    defaultFunnelDNSMgrBaseDomain,
+		Status:   "0",
+		TTL:      60,
+	}
+	result, err = provider.LookupManagedDomain(context.Background(), fqdn)
+	if err != nil {
+		t.Fatalf("LookupManagedDomain(paused): %v", err)
+	}
+	if result.Ready || !strings.Contains(result.Message, "暂停") {
+		t.Fatalf("paused lookup result = %#v", result)
+	}
+
+	state.records["200"] = dnsMgrRecordItem{
+		RecordID: "200",
+		Domain:   state.zoneName,
+		Name:     "machine-2-org",
+		Type:     dnsMgrManagedRecordType,
+		Value:    defaultFunnelDNSMgrBaseDomain,
+		Status:   "1",
+		TTL:      60,
+	}
+	result, err = provider.LookupManagedDomain(context.Background(), fqdn)
+	if err != nil {
+		t.Fatalf("LookupManagedDomain(ready): %v", err)
+	}
+	if !result.Ready {
+		t.Fatalf("ready lookup result = %#v", result)
+	}
+}

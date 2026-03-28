@@ -118,16 +118,31 @@ func (h *Mirage) CAPIVerifyFunnelDomain(w http.ResponseWriter, r *http.Request) 
 		h.doAPIResponse(w, err.Error(), nil)
 		return
 	}
-	if err := markFunnelDomainVerified(h.db, domain); err != nil {
-		h.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
-		return
+	response := funnelDomainWithVerifiedFlag(domain)
+	if domain.DomainType == FunnelDomainTypeManaged {
+		provider, err := h.currentManagedFunnelDNSProvider()
+		if err != nil {
+			h.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
+			return
+		}
+		result, err := verifyManagedFunnelDomain(h.db, domain, provider)
+		if err != nil {
+			h.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
+			return
+		}
+		response = funnelDomainVerificationResponse(domain, result.Ready, false, result.Message)
+	} else {
+		if err := markFunnelDomainVerified(h.db, domain); err != nil {
+			h.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
+			return
+		}
 	}
 	if err := recordFunnelAudit(h.db, user.OrganizationID, "tenant_owner", user.StableID, "domain", domain.StableID, "domain_verify_requested", domainActionPayload(domain, nil)); err != nil {
 		h.doAPIResponse(w, "记录Funnel审计失败:"+err.Error(), nil)
 		return
 	}
 	h.requestFunnelRuntimeReload()
-	h.doAPIResponse(w, "", funnelDomainWithVerifiedFlag(domain))
+	h.doAPIResponse(w, "", response)
 }
 
 func (h *Mirage) CAPIDeleteFunnelDomain(w http.ResponseWriter, r *http.Request) {
@@ -705,7 +720,30 @@ func (h *Mirage) buildTenantFunnelServiceStatus(service *FunnelService) (map[str
 	} else {
 		h.applyRemoteEdgeProjection(service, domain, cert, edge)
 	}
+	applyFunnelDomainReadinessProjection(service, domain)
 	return funnelServiceStatusResponse(service, domain, cert, edge), nil
+}
+
+func applyFunnelDomainReadinessProjection(service *FunnelService, domain *FunnelDomain) {
+	if service == nil || domain == nil || !service.Enabled {
+		return
+	}
+	if funnelDomainDNSReady(domain) {
+		domain.DNSStatus = FunnelDNSStatusReady
+		return
+	}
+	if strings.TrimSpace(domain.DNSStatus) == "" {
+		domain.DNSStatus = FunnelDNSStatusPending
+	}
+	if strings.TrimSpace(domain.Status) == "" {
+		domain.Status = FunnelDomainStatusPendingDNS
+	}
+	service.ConfigStatus = FunnelServiceConfigStatusPending
+	service.BackendStatus = FunnelServiceBackendStatusUnknown
+	service.LastError = strings.TrimSpace(domain.LastDNSError)
+	if service.LastError == "" {
+		service.LastError = "域名尚未完成验证"
+	}
 }
 
 func (h *Mirage) applyRemoteEdgeProjection(service *FunnelService, domain *FunnelDomain, cert *FunnelCert, edge *FunnelEdge) {
@@ -768,14 +806,21 @@ func (h *Mirage) applyRemoteEdgeProjection(service *FunnelService, domain *Funne
 		return
 	}
 
-	domainReady := domain.DomainType == FunnelDomainTypeManaged || domain.ValidationCheckedAt != nil
+	domainReady := funnelDomainDNSReady(domain)
 	if !domainReady {
-		domain.DNSStatus = FunnelDNSStatusPending
-		domain.Status = FunnelDomainStatusPendingDNS
+		if strings.TrimSpace(domain.DNSStatus) == "" {
+			domain.DNSStatus = FunnelDNSStatusPending
+		}
+		if strings.TrimSpace(domain.Status) == "" {
+			domain.Status = FunnelDomainStatusPendingDNS
+		}
 		service.ConfigStatus = FunnelServiceConfigStatusPending
 		service.EdgeStatus = FunnelServiceEdgeStatusPending
 		service.BackendStatus = FunnelServiceBackendStatusUnknown
-		service.LastError = "域名尚未完成验证"
+		service.LastError = strings.TrimSpace(domain.LastDNSError)
+		if service.LastError == "" {
+			service.LastError = "域名尚未完成验证"
+		}
 		return
 	}
 	domain.DNSStatus = FunnelDNSStatusReady

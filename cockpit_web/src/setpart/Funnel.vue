@@ -221,7 +221,10 @@ function verifyDomain(domain) {
       if (response.data["status"] != "success") {
         throw new Error(response.data["status"]?.substring(6) || "域名验证请求失败");
       }
-      toastMsg.value = "已提交域名验证请求";
+      const payload = unwrapData(response.data) || {};
+      toastMsg.value =
+        payload["verificationMessage"] ||
+        (payload["verified"] === false ? "域名 DNS 当前未就绪" : "域名验证完成");
       toastShow.value = true;
       loadDomains().then().catch();
     })
@@ -533,7 +536,7 @@ onMounted(() => {
           <h3 class="text-xl font-semibold tracking-tight">域名与证书操作</h3>
         </header>
         <p class="mt-3 text-gray-600">
-          第一批先保留控制面操作入口。验证和续期请求会走 deferred 流程，不会立即触发真实 DNS 或 ACME。
+          现在托管域名验证会实际检查 DNS 记录状态；证书续期仍然保留 deferred 流程。
         </p>
         <div class="mt-4 overflow-x-auto border border-stone-200 rounded-xl">
           <table class="table w-full">
@@ -552,6 +555,9 @@ onMounted(() => {
                 <td>
                   <div class="font-semibold text-gray-900">{{ domain.domain || "-" }}</div>
                   <div class="text-xs text-gray-400 font-mono">{{ domain.stableId || "-" }}</div>
+                  <div v-if="domain.lastDnsError || domain.last_dns_error" class="text-xs text-orange-700 mt-1">
+                    {{ domain.lastDnsError || domain.last_dns_error }}
+                  </div>
                 </td>
                 <td>{{ domain.orgName || domain.orgID || domain.orgId || "-" }}</td>
                 <td>{{ domain.status || "-" }}</td>

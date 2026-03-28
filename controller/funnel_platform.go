@@ -882,9 +882,18 @@ func funnelCertActionData(cert *FunnelCert, extra map[string]any) map[string]any
 }
 
 func funnelDomainWithVerifiedFlag(domain *FunnelDomain) map[string]any {
-	return domainActionPayload(domain, map[string]any{
-		"verificationDeferred": true,
-	})
+	return funnelDomainVerificationResponse(domain, true, true, "")
+}
+
+func funnelDomainVerificationResponse(domain *FunnelDomain, verified bool, deferred bool, message string) map[string]any {
+	extra := map[string]any{
+		"verified":             verified,
+		"verificationDeferred": deferred,
+	}
+	if strings.TrimSpace(message) != "" {
+		extra["verificationMessage"] = message
+	}
+	return domainActionPayload(domain, extra)
 }
 
 func funnelCertWithRenewDeferred(cert *FunnelCert) map[string]any {
