@@ -1237,6 +1237,13 @@ func (h *Mirage) toNodes(
 // toNode converts a Machine into a Tailscale Node.
 // Shared peers keep their enabled exit-node and subnet-route capabilities so
 // clients can use them the same way they use owned peers.
+//
+// The sharing model matches upstream Tailscale quarantine semantics:
+//   - peers shared *to* the current user are marked jailed, so the shared device
+//     can receive incoming traffic but cannot initiate back into the recipient
+//     tailnet.
+//   - hidden ShareeNode peers on the shared source device are not jailed; they
+//     exist only so the source device can receive traffic from recipients.
 func (h *Mirage) toNode(
 	machine Machine,
 	shared bool,
@@ -1385,6 +1392,7 @@ func (h *Mirage) toNode(
 		LegacyDERPString: legacyDERP,
 		Hostinfo:         hostInfo.View(),
 		Created:          machine.CreatedAt.UTC(),
+		IsJailed:         shared,
 
 		Tags: tags,
 

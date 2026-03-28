@@ -135,7 +135,9 @@ func (m *Mirage) getOrgNodesKey(orgID int64) ([]string, error) {
 	if orgID == 0 {
 		machines, err = m.ListMachines()
 	} else {
-		machines, err = m.ListVisibleMachinesByOrgID(orgID)
+		// Navi trusted-node scope is org-owned machines only. Shared-in devices are
+		// user-scoped resources and must not leak into org-wide trusted node sets.
+		machines, err = m.ListMachinesByOrgID(orgID)
 	}
 	if err != nil {
 		log.Error().

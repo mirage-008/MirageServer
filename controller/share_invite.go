@@ -9,6 +9,7 @@ import (
 	"github.com/bwmarrin/snowflake"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
+	"tailscale.com/tailcfg"
 )
 
 const (
@@ -280,6 +281,36 @@ func (h *Mirage) listMachinesByOrgIDs(orgIDs []int64) ([]Machine, error) {
 	return machines, nil
 }
 
+func (h *Mirage) listMachinesByUserIDs(userIDs []int64) ([]Machine, error) {
+	if len(userIDs) == 0 {
+		return []Machine{}, nil
+	}
+
+	seen := make(map[int64]struct{}, len(userIDs))
+	uniqueUserIDs := make([]int64, 0, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == 0 {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		uniqueUserIDs = append(uniqueUserIDs, userID)
+	}
+	if len(uniqueUserIDs) == 0 {
+		return []Machine{}, nil
+	}
+
+	machines := []Machine{}
+	if err := h.db.Preload("AuthKey").Preload("AuthKey.User").Preload("User").Preload("User.Organization").Where("user_id in ?", uniqueUserIDs).Find(&machines).Error; err != nil {
+		return nil, err
+	}
+	sort.Slice(machines, func(i, j int) bool { return machines[i].ID < machines[j].ID })
+
+	return machines, nil
+}
+
 func (h *Mirage) ListMachineSharesBySourceMachine(machineID int64) ([]MachineShare, error) {
 	shares := []MachineShare{}
 	err := h.db.Preload("SourceMachine").Preload("SourceMachine.User").Preload("SourceMachine.User.Organization").Where("source_machine_id = ?", machineID).Order("created_at asc").Find(&shares).Error
@@ -325,6 +356,16 @@ func (h *Mirage) ListAcceptedMachineSharesBySourceOrg(orgID int64) ([]MachineSha
 func (h *Mirage) ListAcceptedMachineSharesByTargetOrg(orgID int64) ([]MachineShare, error) {
 	shares := []MachineShare{}
 	err := h.db.Preload("SourceMachine").Preload("SourceMachine.User").Preload("SourceMachine.User.Organization").Where("target_org_id = ? AND status = ?", orgID, MachineShareStatusAccepted).Order("created_at asc").Find(&shares).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return shares, nil
+}
+
+func (h *Mirage) ListAcceptedMachineSharesByTargetUser(userID int64) ([]MachineShare, error) {
+	shares := []MachineShare{}
+	err := h.db.Preload("SourceMachine").Preload("SourceMachine.User").Preload("SourceMachine.User.Organization").Where("target_user_id = ? AND status = ?", userID, MachineShareStatusAccepted).Order("created_at asc").Find(&shares).Error
 	if err != nil {
 		return nil, err
 	}
@@ -751,6 +792,19 @@ func (h *Mirage) hasAcceptedShareBetweenOrgs(sourceOrgID int64, targetOrgID int6
 	return count > 0, nil
 }
 
+func (h *Mirage) hasAcceptedShareBetweenSourceOrgAndTargetUser(sourceOrgID int64, targetUserID int64, excludeShareID int64) (bool, error) {
+	var count int64
+	query := h.db.Model(&MachineShare{}).Where("source_org_id = ? AND target_user_id = ? AND status = ?", sourceOrgID, targetUserID, MachineShareStatusAccepted)
+	if excludeShareID != 0 {
+		query = query.Where("id <> ?", excludeShareID)
+	}
+	if err := query.Count(&count).Error; err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
+}
+
 func (h *Mirage) notifyMachineShareTopology(share *MachineShare, add bool) {
 	if share == nil || share.TargetOrgID == 0 || share.SourceOrgID == 0 {
 		return
@@ -770,17 +824,17 @@ func (h *Mirage) notifyMachineShareTopology(share *MachineShare, add bool) {
 		}
 	}
 
-	targetMachines, err := h.ListMachinesByOrgID(share.TargetOrgID)
+	targetMachines, err := h.ListMachinesByUser(share.TargetUserID)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to list target org machines for machine share topology update")
+		log.Error().Err(err).Msg("failed to list target user machines for machine share topology update")
 	} else if add {
 		for _, machine := range targetMachines {
 			h.NotifyNaviOrgNodesChange(share.SourceOrgID, machine.NodeKey, "")
 		}
 	} else {
-		remaining, remainingErr := h.hasAcceptedShareBetweenOrgs(share.SourceOrgID, share.TargetOrgID, share.ID)
+		remaining, remainingErr := h.hasAcceptedShareBetweenSourceOrgAndTargetUser(share.SourceOrgID, share.TargetUserID, share.ID)
 		if remainingErr != nil {
-			log.Error().Err(remainingErr).Msg("failed to inspect remaining accepted org shares")
+			log.Error().Err(remainingErr).Msg("failed to inspect remaining accepted user shares")
 		} else if !remaining {
 			for _, machine := range targetMachines {
 				h.NotifyNaviOrgNodesChange(share.SourceOrgID, "", machine.NodeKey)
@@ -1001,18 +1055,38 @@ func (h *Mirage) ListSharedMachinesByTargetOrgID(orgID int64) ([]Machine, error)
 	return machines, nil
 }
 
+func (h *Mirage) ListSharedMachinesByTargetUserID(userID int64) ([]Machine, error) {
+	shares, err := h.ListAcceptedMachineSharesByTargetUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	machineIDs := make([]int64, 0, len(shares))
+	for _, share := range shares {
+		machineIDs = append(machineIDs, share.SourceMachineID)
+	}
+	machines, err := h.listMachinesByIDs(machineIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range machines {
+		machines[i].Shared = true
+	}
+
+	return machines, nil
+}
+
 func (h *Mirage) ListShareeMachinesBySourceMachineID(machineID int64) ([]Machine, error) {
 	shares, err := h.ListAcceptedMachineSharesBySourceMachine(machineID)
 	if err != nil {
 		return nil, err
 	}
-	targetOrgIDs := make([]int64, 0, len(shares))
+	targetUserIDs := make([]int64, 0, len(shares))
 	for _, share := range shares {
-		if share.TargetOrgID != 0 {
-			targetOrgIDs = append(targetOrgIDs, share.TargetOrgID)
+		if share.TargetUserID != 0 {
+			targetUserIDs = append(targetUserIDs, share.TargetUserID)
 		}
 	}
-	machines, err := h.listMachinesByOrgIDs(targetOrgIDs)
+	machines, err := h.listMachinesByUserIDs(targetUserIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1021,6 +1095,43 @@ func (h *Mirage) ListShareeMachinesBySourceMachineID(machineID int64) ([]Machine
 	}
 
 	return machines, nil
+}
+
+func (h *Mirage) ListVisibleMachinesByUserID(userID int64) ([]Machine, error) {
+	user, err := h.GetUserByID(tailcfg.UserID(userID))
+	if err != nil {
+		return nil, err
+	}
+	ownedMachines, err := h.ListMachinesByOrgID(user.OrganizationID)
+	if err != nil {
+		return nil, err
+	}
+	sharedMachines, err := h.ListSharedMachinesByTargetUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return mergeMachines(ownedMachines, sharedMachines), nil
+}
+
+func (h *Mirage) IsMachineVisibleToUser(machine *Machine, userID int64) (bool, error) {
+	if machine == nil {
+		return false, ErrMachineNotFound
+	}
+	user, err := h.GetUserByID(tailcfg.UserID(userID))
+	if err != nil {
+		return false, err
+	}
+	if machine.User.OrganizationID == user.OrganizationID {
+		return true, nil
+	}
+
+	var count int64
+	if err := h.db.Model(&MachineShare{}).Where("source_machine_id = ? AND target_user_id = ? AND status = ?", machine.ID, userID, MachineShareStatusAccepted).Count(&count).Error; err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
 }
 
 func (h *Mirage) ListVisibleMachinesByOrgID(orgID int64) ([]Machine, error) {
@@ -1110,7 +1221,7 @@ func (h *Mirage) ListSharePeersForMachine(machine *Machine) ([]Machine, error) {
 		return nil, ErrMachineNotFound
 	}
 
-	sharedMachines, err := h.ListSharedMachinesByTargetOrgID(machine.User.OrganizationID)
+	sharedMachines, err := h.ListSharedMachinesByTargetUserID(machine.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -1128,6 +1239,40 @@ func (h *Mirage) ListSharePeersForMachine(machine *Machine) ([]Machine, error) {
 	}
 
 	return filtered, nil
+}
+
+func (h *Mirage) ListExternalSharedUsersByTargetUserID(userID int64) ([]User, error) {
+	shares, err := h.ListAcceptedMachineSharesByTargetUser(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	userIDs := make([]int64, 0, len(shares))
+	for _, share := range shares {
+		if share.SourceUserID != 0 {
+			userIDs = append(userIDs, share.SourceUserID)
+		}
+	}
+	if len(userIDs) == 0 {
+		return []User{}, nil
+	}
+
+	users := []User{}
+	if err := h.db.Preload("Organization").Where("id in ?", userIDs).Find(&users).Error; err != nil {
+		return nil, err
+	}
+
+	merged := make(map[int64]User)
+	for _, user := range users {
+		merged[user.ID] = user
+	}
+	result := make([]User, 0, len(merged))
+	for _, user := range merged {
+		result = append(result, user)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+
+	return result, nil
 }
 
 func (h *Mirage) ListExternalSharedUsersByOrgID(orgID int64) ([]User, error) {

@@ -251,8 +251,10 @@ func TestCreateAcceptAndRevokeMachineShareAffectsVisibility(t *testing.T) {
 	app := newShareInviteTestMirage(t)
 	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
 	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	targetTeammate := createTestUser(t, app, "teammate@example.com", "Teammate", "target-org", "Mirage")
 	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
 	targetMachine := createTestMachine(t, app, targetUser, "target-node", "100.64.0.2")
+	targetTeammateMachine := createTestMachine(t, app, targetTeammate, "target-teammate", "100.64.0.3")
 
 	share, err := app.CreateMachineShare(sourceMachine, sourceUser, " Target@Example.com ")
 	if err != nil {
@@ -284,12 +286,12 @@ func TestCreateAcceptAndRevokeMachineShareAffectsVisibility(t *testing.T) {
 		t.Fatal("expected share accepted timestamp to be set")
 	}
 
-	visibleMachines, err := app.ListVisibleMachinesByOrgID(targetUser.OrganizationID)
+	visibleMachines, err := app.ListVisibleMachinesByUserID(targetUser.ID)
 	if err != nil {
-		t.Fatalf("ListVisibleMachinesByOrgID(): %v", err)
+		t.Fatalf("ListVisibleMachinesByUserID(target user): %v", err)
 	}
-	if len(visibleMachines) != 2 {
-		t.Fatalf("expected 2 visible machines, got %d (%+v)", len(visibleMachines), visibleMachines)
+	if len(visibleMachines) != 3 {
+		t.Fatalf("expected 3 visible machines, got %d (%+v)", len(visibleMachines), visibleMachines)
 	}
 	visibleByID := machinesByID(visibleMachines)
 	sharedMachine, ok := visibleByID[sourceMachine.ID]
@@ -302,21 +304,56 @@ func TestCreateAcceptAndRevokeMachineShareAffectsVisibility(t *testing.T) {
 	if _, ok := visibleByID[targetMachine.ID]; !ok {
 		t.Fatalf("expected target-owned machine %d to remain visible", targetMachine.ID)
 	}
+	if _, ok := visibleByID[targetTeammateMachine.ID]; !ok {
+		t.Fatalf("expected same-org teammate machine %d to remain visible", targetTeammateMachine.ID)
+	}
 
-	visible, err := app.IsMachineVisibleToOrg(sourceMachine, targetUser.OrganizationID)
+	teammateVisibleMachines, err := app.ListVisibleMachinesByUserID(targetTeammate.ID)
 	if err != nil {
-		t.Fatalf("IsMachineVisibleToOrg(): %v", err)
+		t.Fatalf("ListVisibleMachinesByUserID(target teammate): %v", err)
+	}
+	teammateVisibleByID := machinesByID(teammateVisibleMachines)
+	if len(teammateVisibleMachines) != 2 {
+		t.Fatalf("expected teammate to see same-org machines only, got %+v", teammateVisibleMachines)
+	}
+	if _, ok := teammateVisibleByID[targetMachine.ID]; !ok {
+		t.Fatalf("expected teammate to see same-org target machine, got %+v", teammateVisibleMachines)
+	}
+	if _, ok := teammateVisibleByID[targetTeammateMachine.ID]; !ok {
+		t.Fatalf("expected teammate to see own machine, got %+v", teammateVisibleMachines)
+	}
+	if _, ok := teammateVisibleByID[sourceMachine.ID]; ok {
+		t.Fatalf("expected teammate not to see shared external machine, got %+v", teammateVisibleMachines)
+	}
+
+	visible, err := app.IsMachineVisibleToUser(sourceMachine, targetUser.ID)
+	if err != nil {
+		t.Fatalf("IsMachineVisibleToUser(target user): %v", err)
 	}
 	if !visible {
-		t.Fatal("expected accepted share to make source machine visible to target org")
+		t.Fatal("expected accepted share to make source machine visible to target user")
+	}
+	visible, err = app.IsMachineVisibleToUser(sourceMachine, targetTeammate.ID)
+	if err != nil {
+		t.Fatalf("IsMachineVisibleToUser(target teammate): %v", err)
+	}
+	if visible {
+		t.Fatal("expected accepted share not to make source machine visible to same-org teammate")
 	}
 
-	externalUsers, err := app.ListExternalSharedUsersByOrgID(targetUser.OrganizationID)
+	externalUsers, err := app.ListExternalSharedUsersByTargetUserID(targetUser.ID)
 	if err != nil {
-		t.Fatalf("ListExternalSharedUsersByOrgID(): %v", err)
+		t.Fatalf("ListExternalSharedUsersByTargetUserID(target user): %v", err)
 	}
 	if len(externalUsers) != 1 || externalUsers[0].ID != sourceUser.ID {
 		t.Fatalf("unexpected external shared users: %+v", externalUsers)
+	}
+	externalUsers, err = app.ListExternalSharedUsersByTargetUserID(targetTeammate.ID)
+	if err != nil {
+		t.Fatalf("ListExternalSharedUsersByTargetUserID(target teammate): %v", err)
+	}
+	if len(externalUsers) != 0 {
+		t.Fatalf("expected teammate to have no external shared users, got %+v", externalUsers)
 	}
 
 	acceptedCount, err := app.CountAcceptedSharesBySourceMachine(sourceMachine.ID)
@@ -357,20 +394,27 @@ func TestCreateAcceptAndRevokeMachineShareAffectsVisibility(t *testing.T) {
 		t.Fatal("expected share revoked timestamp to be set")
 	}
 
-	visibleMachines, err = app.ListVisibleMachinesByOrgID(targetUser.OrganizationID)
+	visibleMachines, err = app.ListVisibleMachinesByUserID(targetUser.ID)
 	if err != nil {
-		t.Fatalf("ListVisibleMachinesByOrgID() after revoke: %v", err)
+		t.Fatalf("ListVisibleMachinesByUserID() after revoke: %v", err)
 	}
-	if len(visibleMachines) != 1 || visibleMachines[0].ID != targetMachine.ID {
-		t.Fatalf("expected only target-owned machine after revoke, got %+v", visibleMachines)
+	visibleByID = machinesByID(visibleMachines)
+	if len(visibleMachines) != 2 {
+		t.Fatalf("expected target org machines only after revoke, got %+v", visibleMachines)
+	}
+	if _, ok := visibleByID[targetMachine.ID]; !ok {
+		t.Fatalf("expected target-owned machine after revoke, got %+v", visibleMachines)
+	}
+	if _, ok := visibleByID[targetTeammateMachine.ID]; !ok {
+		t.Fatalf("expected same-org teammate machine after revoke, got %+v", visibleMachines)
 	}
 
-	visible, err = app.IsMachineVisibleToOrg(sourceMachine, targetUser.OrganizationID)
+	visible, err = app.IsMachineVisibleToUser(sourceMachine, targetUser.ID)
 	if err != nil {
-		t.Fatalf("IsMachineVisibleToOrg() after revoke: %v", err)
+		t.Fatalf("IsMachineVisibleToUser() after revoke: %v", err)
 	}
 	if visible {
-		t.Fatal("expected revoked share to remove source machine visibility from target org")
+		t.Fatal("expected revoked share to remove source machine visibility from target user")
 	}
 }
 
@@ -468,10 +512,12 @@ func TestListSharePeersForMachineUsesSingleDeviceShareSemantics(t *testing.T) {
 	app := newShareInviteTestMirage(t)
 	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
 	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	targetTeammate := createTestUser(t, app, "teammate@example.com", "Teammate", "target-org", "Mirage")
 	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
 	sourceOrgPeer := createTestMachine(t, app, sourceUser, "source-peer", "100.64.0.10")
 	targetMachineA := createTestMachine(t, app, targetUser, "target-a", "100.64.0.2")
 	targetMachineB := createTestMachine(t, app, targetUser, "target-b", "100.64.0.3")
+	targetTeammateMachine := createTestMachine(t, app, targetTeammate, "target-teammate", "100.64.0.4")
 
 	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
 	if err != nil {
@@ -492,6 +538,9 @@ func TestListSharePeersForMachineUsesSingleDeviceShareSemantics(t *testing.T) {
 		if peer.Shared || !peer.ShareeNode {
 			t.Fatalf("expected hidden sharee peers for shared source machine, got %+v", peer)
 		}
+	}
+	if _, ok := machinesByID(sourcePeers)[targetTeammateMachine.ID]; ok {
+		t.Fatalf("expected shared source machine not to include teammate machine hidden peer, got %+v", sourcePeers)
 	}
 
 	sourceOrgPeers, err := app.ListSharePeersForMachine(sourceOrgPeer)
@@ -516,6 +565,13 @@ func TestListSharePeersForMachineUsesSingleDeviceShareSemantics(t *testing.T) {
 	if targetPeersByID[sourceMachine.ID].ShareeNode || !targetPeersByID[sourceMachine.ID].Shared {
 		t.Fatalf("expected target machine to mark only the source machine as shared, got %+v", targetPeers)
 	}
+	teammatePeers, err := app.ListSharePeersForMachine(targetTeammateMachine)
+	if err != nil {
+		t.Fatalf("ListSharePeersForMachine(target teammate): %v", err)
+	}
+	if len(teammatePeers) != 0 {
+		t.Fatalf("expected same-org teammate to see no shared peers, got %+v", teammatePeers)
+	}
 	_ = targetMachineB
 }
 
@@ -525,9 +581,11 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	app := newShareInviteTestMirage(t)
 	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
 	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	targetTeammate := createTestUser(t, app, "teammate@example.com", "Teammate", "target-org", "Mirage")
 	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
 	sourceOrgPeer := createTestMachine(t, app, sourceUser, "source-peer", "100.64.0.10")
 	targetMachine := createTestMachine(t, app, targetUser, "target-node", "100.64.0.2")
+	targetTeammateMachine := createTestMachine(t, app, targetTeammate, "target-teammate", "100.64.0.3")
 	sourceMachine.HostInfo = HostInfo{
 		Hostname:    sourceMachine.Hostname,
 		RoutableIPs: []netip.Prefix{mustPrefix(t, "10.10.0.0/24"), ExitRouteV4, ExitRouteV6},
@@ -618,6 +676,9 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if peer := sourcePeersByID[targetMachine.ID]; peer.Shared || !peer.ShareeNode {
 		t.Fatalf("expected target peer for shared source machine to be a hidden sharee node, got %+v", peer)
 	}
+	if _, ok := sourcePeersByID[targetTeammateMachine.ID]; ok {
+		t.Fatalf("expected shared source machine not to include teammate hidden peer, got %+v", sourcePeers)
+	}
 	if _, ok := sourcePeersByID[sourceOrgPeer.ID]; !ok {
 		t.Fatalf("expected source machine to keep same-org peer visibility, got %+v", sourcePeers)
 	}
@@ -642,6 +703,9 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toNode(shared peer): %v", err)
 	}
+	if !sharedNode.IsJailed {
+		t.Fatalf("expected shared source peer to be jailed for recipient, got %+v", sharedNode)
+	}
 	if !containsPrefix(sharedNode.AllowedIPs, mustPrefix(t, "10.10.0.0/24")) {
 		t.Fatalf("expected shared peer allowed IPs to include subnet route, got %v", sharedNode.AllowedIPs)
 	}
@@ -658,6 +722,9 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	}
 	if !hiddenShareeNode.Hostinfo.ShareeNode() {
 		t.Fatalf("expected hidden target peer to be marked sharee node, got %+v", hiddenShareeNode.Hostinfo)
+	}
+	if hiddenShareeNode.IsJailed {
+		t.Fatalf("expected hidden target peer not to be jailed, got %+v", hiddenShareeNode)
 	}
 
 	sourceFilters, _ := packetFiltersForMachine(sourceMachine, sourcePeers, sourceOrg.AclRules)
@@ -719,6 +786,36 @@ func TestListShareConnectedOrgIDs(t *testing.T) {
 	}
 	if connectedOrgIDs[0] != sourceUser.OrganizationID || connectedOrgIDs[1] != targetUser.OrganizationID {
 		t.Fatalf("unexpected connected org IDs: %v", connectedOrgIDs)
+	}
+}
+
+func TestGetOrgNodesKeyExcludesSharedInMachines(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
+	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+
+	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.10", "fd7a:115c:a1e0::10")
+	targetMachine := createTestMachine(t, app, targetUser, "target-node", "100.64.0.20", "fd7a:115c:a1e0::20")
+
+	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(): %v", err)
+	}
+	if _, err := app.AcceptMachineShareByToken(share.ShareToken, targetUser); err != nil {
+		t.Fatalf("AcceptMachineShareByToken(): %v", err)
+	}
+
+	nodeKeys, err := app.getOrgNodesKey(targetUser.OrganizationID)
+	if err != nil {
+		t.Fatalf("getOrgNodesKey(): %v", err)
+	}
+	if !containsString(nodeKeys, targetMachine.NodeKey) {
+		t.Fatalf("expected target org trusted keys to include owned machine %q, got %+v", targetMachine.NodeKey, nodeKeys)
+	}
+	if containsString(nodeKeys, sourceMachine.NodeKey) {
+		t.Fatalf("expected target org trusted keys to exclude shared-in machine %q, got %+v", sourceMachine.NodeKey, nodeKeys)
 	}
 }
 
@@ -793,6 +890,48 @@ func TestListExternalSharedUsersByOrgIDDeduplicatesSourceUsers(t *testing.T) {
 	}
 	if len(externalUsers) != 1 || !containsUserID(externalUsers, sourceUser.ID) {
 		t.Fatalf("expected one deduplicated external user, got %+v", externalUsers)
+	}
+}
+
+func TestListExternalSharedUsersByTargetUserIDDeduplicatesSourceUsers(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
+	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	targetTeammate := createTestUser(t, app, "teammate@example.com", "Teammate", "target-org", "Mirage")
+	sourceMachineA := createTestMachine(t, app, sourceUser, "source-a", "100.64.0.1")
+	sourceMachineB := createTestMachine(t, app, sourceUser, "source-b", "100.64.0.2")
+
+	shareA, err := app.CreateMachineShare(sourceMachineA, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(source A): %v", err)
+	}
+	shareB, err := app.CreateMachineShare(sourceMachineB, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(source B): %v", err)
+	}
+	if _, err := app.AcceptMachineShareByToken(shareA.ShareToken, targetUser); err != nil {
+		t.Fatalf("AcceptMachineShareByToken(source A): %v", err)
+	}
+	if _, err := app.AcceptMachineShareByToken(shareB.ShareToken, targetUser); err != nil {
+		t.Fatalf("AcceptMachineShareByToken(source B): %v", err)
+	}
+
+	externalUsers, err := app.ListExternalSharedUsersByTargetUserID(targetUser.ID)
+	if err != nil {
+		t.Fatalf("ListExternalSharedUsersByTargetUserID(target user): %v", err)
+	}
+	if len(externalUsers) != 1 || !containsUserID(externalUsers, sourceUser.ID) {
+		t.Fatalf("expected one deduplicated external user, got %+v", externalUsers)
+	}
+
+	externalUsers, err = app.ListExternalSharedUsersByTargetUserID(targetTeammate.ID)
+	if err != nil {
+		t.Fatalf("ListExternalSharedUsersByTargetUserID(target teammate): %v", err)
+	}
+	if len(externalUsers) != 0 {
+		t.Fatalf("expected teammate to have no external shared users, got %+v", externalUsers)
 	}
 }
 

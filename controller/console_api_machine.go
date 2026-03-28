@@ -130,7 +130,7 @@ func (h *Mirage) ConsoleMachinesAPI(
 		return
 	}
 
-	orgMachines, err := h.ListVisibleMachinesByOrgID(user.OrganizationID)
+	orgMachines, err := h.ListVisibleMachinesByUserID(user.ID)
 	if err != nil {
 		h.doAPIResponse(w, "查询用户节点列表失败", nil)
 		return
@@ -370,12 +370,12 @@ func (h *Mirage) resolveShareIDFromRequest(reqData map[string]interface{}) (int6
 	return share.ID, nil
 }
 
-func (h *Mirage) getVisibleMachineForOrg(machineID int64, orgID int64) (*Machine, error) {
+func (h *Mirage) getVisibleMachineForUser(machineID int64, userID int64) (*Machine, error) {
 	machine, err := h.GetMachineByID(machineID)
 	if err != nil {
 		return nil, err
 	}
-	visible, err := h.IsMachineVisibleToOrg(machine, orgID)
+	visible, err := h.IsMachineVisibleToUser(machine, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +411,7 @@ func (m *Mirage) ConsoleMachineDebugAPI(
 		m.doAPIResponse(w, "组织内无此设备", nil)
 		return
 	}
-	visible, err := m.IsMachineVisibleToOrg(targetMachine, user.OrganizationID)
+	visible, err := m.IsMachineVisibleToUser(targetMachine, user.ID)
 	if err != nil {
 		m.doAPIResponse(w, "查询设备权限失败", nil)
 		return
@@ -554,7 +554,7 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 		h.doAPIResponse(writer, "用户请求mid解析失败", nil)
 		return
 	}
-	toUpdateMachine, err := h.getVisibleMachineForOrg(machineID, user.OrganizationID)
+	toUpdateMachine, err := h.getVisibleMachineForUser(machineID, user.ID)
 	if err != nil {
 		h.doAPIResponse(writer, "查询用户设备失败", nil)
 		return
@@ -753,7 +753,7 @@ func (h *Mirage) ConsoleRemoveMachineAPI(
 		return
 	}
 
-	machine, err := h.getVisibleMachineForOrg(machineID, user.OrganizationID)
+	machine, err := h.getVisibleMachineForUser(machineID, user.ID)
 	if err != nil {
 		h.doAPIResponse(writer, "未找到目标设备", nil)
 		return

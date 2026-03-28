@@ -138,7 +138,7 @@ func (h *Mirage) buildUsersData(user *User) (*UsersData, error) {
 		}
 	}
 
-	externalUsers, err := h.ListExternalSharedUsersByOrgID(user.OrganizationID)
+	externalUsers, err := h.ListExternalSharedUsersByTargetUserID(user.ID)
 	if err != nil {
 		return nil, err
 	}

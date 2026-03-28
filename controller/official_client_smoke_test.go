@@ -1380,6 +1380,16 @@ func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
 		return nil
 	})
 
+	// TSMP ping is not a useful quarantine signal here: upstream handles an
+	// inbound TSMP ping before the jailed filter runs, so shared source devices
+	// can still receive a TSMP pong even when ordinary traffic is blocked.
+	assertPingFails(
+		t,
+		routerNode.socketPath,
+		clientNode.hostname,
+		"--icmp",
+	)
+
 	setOutput, err := runCommand(
 		t,
 		30*time.Second,
@@ -2186,6 +2196,25 @@ func waitForRoutePing(t *testing.T, socketPath string, target string) string {
 	})
 
 	return successOutput
+}
+
+func assertPingFails(t *testing.T, socketPath string, target string, pingFlag string) {
+	t.Helper()
+
+	output, err := runCommand(
+		t,
+		15*time.Second,
+		"tailscale",
+		"--socket", socketPath,
+		"ping",
+		pingFlag,
+		"--c=1",
+		"--timeout=5s",
+		target,
+	)
+	if err == nil {
+		t.Fatalf("expected tailscale ping %s %s to fail, but it succeeded:\n%s", pingFlag, target, output)
+	}
 }
 
 func decodeSmokeJSON(raw string, out any) error {
