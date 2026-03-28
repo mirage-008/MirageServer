@@ -1111,10 +1111,17 @@ func (h *Mirage) ListShareeMachinesBySourceMachineID(machineID int64) ([]Machine
 	// selected the source as an exit node.
 	sourceStableID := tailcfg.StableNodeID(strconv.FormatInt(machineID, Base10))
 	selectedExitTargets := make([]Machine, 0, len(filtered))
+	activeSelectedExitTargets := make([]Machine, 0, len(filtered))
 	for _, machine := range filtered {
 		if machine.GetHostInfo().ExitNodeID == sourceStableID {
 			selectedExitTargets = append(selectedExitTargets, machine)
+			if h.hasActivePollSession(machine.ID) {
+				activeSelectedExitTargets = append(activeSelectedExitTargets, machine)
+			}
 		}
+	}
+	if len(activeSelectedExitTargets) > 0 {
+		return activeSelectedExitTargets, nil
 	}
 	if len(selectedExitTargets) > 0 {
 		return selectedExitTargets, nil

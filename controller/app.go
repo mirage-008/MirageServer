@@ -143,6 +143,14 @@ func (h *Mirage) finishPollSession(machineID int64, sessionID uint64) bool {
 	return true
 }
 
+func (h *Mirage) hasActivePollSession(machineID int64) bool {
+	h.pollSessionMu.Lock()
+	defer h.pollSessionMu.Unlock()
+
+	_, ok := h.pollSessions[machineID]
+	return ok
+}
+
 func NewMirage(cfg *Config, db *gorm.DB) (*Mirage, error) {
 	// noisePrivateKey, err := readOrCreatePrivateKey(AbsolutePathFromConfigPath(NoiseKeyPath))
 	noisePrivateKey, err := getServerPrivateKey(db)

@@ -935,6 +935,51 @@ func TestListShareeMachinesBySourceMachineIDPrefersExitSelectedTargets(t *testin
 	}
 }
 
+func TestListShareeMachinesBySourceMachineIDPrefersActiveExitSelectedTargets(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
+	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
+	targetActive := createTestMachine(t, app, targetUser, "target-active", "100.64.0.2")
+	targetInactive := createTestMachine(t, app, targetUser, "target-inactive", "100.64.0.3")
+	markMachineOnline(t, app, targetActive)
+	markMachineOnline(t, app, targetInactive)
+
+	exitID := tailcfg.StableNodeID(strconv.FormatInt(sourceMachine.ID, Base10))
+	targetActive.HostInfo = HostInfo{Hostname: targetActive.Hostname, ExitNodeID: exitID}
+	targetInactive.HostInfo = HostInfo{Hostname: targetInactive.Hostname, ExitNodeID: exitID}
+	if err := app.db.Save(targetActive).Error; err != nil {
+		t.Fatalf("Save(targetActive hostinfo): %v", err)
+	}
+	if err := app.db.Save(targetInactive).Error; err != nil {
+		t.Fatalf("Save(targetInactive hostinfo): %v", err)
+	}
+
+	sessionID := app.startPollSession(targetActive.ID)
+	defer app.finishPollSession(targetActive.ID, sessionID)
+
+	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(): %v", err)
+	}
+	if _, err := app.AcceptMachineShareByToken(share.ShareToken, targetUser); err != nil {
+		t.Fatalf("AcceptMachineShareByToken(): %v", err)
+	}
+
+	shareeMachines, err := app.ListShareeMachinesBySourceMachineID(sourceMachine.ID)
+	if err != nil {
+		t.Fatalf("ListShareeMachinesBySourceMachineID(): %v", err)
+	}
+	if len(shareeMachines) != 1 {
+		t.Fatalf("expected only active exit-selected target machine, got %+v", shareeMachines)
+	}
+	if shareeMachines[0].ID != targetActive.ID {
+		t.Fatalf("expected active exit-selected target machine %d, got %+v", targetActive.ID, shareeMachines)
+	}
+}
+
 func TestListShareeMachinesBySourceMachineIDKeepsAllOnlineTargetsWithoutExitSelection(t *testing.T) {
 	t.Parallel()
 
