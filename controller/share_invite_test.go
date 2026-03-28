@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/netip"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"go4.org/netipx"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/ipproto"
 	"tailscale.com/types/key"
 	tslogger "tailscale.com/types/logger"
@@ -886,6 +889,88 @@ func TestListShareeMachinesBySourceMachineIDOnlyReturnsOnlineTargets(t *testing.
 	}
 	if !shareeMachines[0].ShareeNode {
 		t.Fatalf("expected online target machine to be marked as sharee node, got %+v", shareeMachines[0])
+	}
+}
+
+func TestListShareeMachinesBySourceMachineIDPrefersExitSelectedTargets(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
+	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
+	targetExitSelected := createTestMachine(t, app, targetUser, "target-exit-selected", "100.64.0.2")
+	targetOther := createTestMachine(t, app, targetUser, "target-other", "100.64.0.3")
+	markMachineOnline(t, app, targetExitSelected)
+	markMachineOnline(t, app, targetOther)
+
+	targetExitSelected.HostInfo = HostInfo{
+		Hostname:   targetExitSelected.Hostname,
+		ExitNodeID: tailcfg.StableNodeID(strconv.FormatInt(sourceMachine.ID, Base10)),
+	}
+	if err := app.db.Save(targetExitSelected).Error; err != nil {
+		t.Fatalf("Save(targetExitSelected hostinfo): %v", err)
+	}
+
+	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(): %v", err)
+	}
+	if _, err := app.AcceptMachineShareByToken(share.ShareToken, targetUser); err != nil {
+		t.Fatalf("AcceptMachineShareByToken(): %v", err)
+	}
+
+	shareeMachines, err := app.ListShareeMachinesBySourceMachineID(sourceMachine.ID)
+	if err != nil {
+		t.Fatalf("ListShareeMachinesBySourceMachineID(): %v", err)
+	}
+	if len(shareeMachines) != 1 {
+		t.Fatalf("expected only exit-selected target machine, got %+v", shareeMachines)
+	}
+	if shareeMachines[0].ID != targetExitSelected.ID {
+		t.Fatalf("expected exit-selected target machine %d, got %+v", targetExitSelected.ID, shareeMachines)
+	}
+	if !shareeMachines[0].ShareeNode {
+		t.Fatalf("expected exit-selected target machine to be marked as sharee node, got %+v", shareeMachines[0])
+	}
+}
+
+func TestListShareeMachinesBySourceMachineIDKeepsAllOnlineTargetsWithoutExitSelection(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
+	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
+	targetA := createTestMachine(t, app, targetUser, "target-a", "100.64.0.2")
+	targetB := createTestMachine(t, app, targetUser, "target-b", "100.64.0.3")
+	markMachineOnline(t, app, targetA)
+	markMachineOnline(t, app, targetB)
+
+	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(): %v", err)
+	}
+	if _, err := app.AcceptMachineShareByToken(share.ShareToken, targetUser); err != nil {
+		t.Fatalf("AcceptMachineShareByToken(): %v", err)
+	}
+
+	shareeMachines, err := app.ListShareeMachinesBySourceMachineID(sourceMachine.ID)
+	if err != nil {
+		t.Fatalf("ListShareeMachinesBySourceMachineID(): %v", err)
+	}
+	if len(shareeMachines) != 2 {
+		t.Fatalf("expected both online target machines, got %+v", shareeMachines)
+	}
+	ids := []int64{shareeMachines[0].ID, shareeMachines[1].ID}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	want := []int64{targetA.ID, targetB.ID}
+	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+	if ids[0] != want[0] || ids[1] != want[1] {
+		t.Fatalf("expected both online target machines %v, got %+v", want, shareeMachines)
+	}
+	if !shareeMachines[0].ShareeNode || !shareeMachines[1].ShareeNode {
+		t.Fatalf("expected both online target machines to be marked as sharee nodes, got %+v", shareeMachines)
 	}
 }
 

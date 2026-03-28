@@ -3,6 +3,7 @@ package controller
 import (
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1098,6 +1099,25 @@ func (h *Mirage) ListShareeMachinesBySourceMachineID(machineID int64) ([]Machine
 		}
 		machines[i].ShareeNode = true
 		filtered = append(filtered, machines[i])
+	}
+	if len(filtered) <= 1 {
+		return filtered, nil
+	}
+
+	// When recipients explicitly select this shared machine as their exit node,
+	// prefer keeping only those devices as hidden sharee peers on the shared
+	// source. This narrows source-side peer exposure in the shared-exit case
+	// without changing the broader direct-share behavior when no recipient has
+	// selected the source as an exit node.
+	sourceStableID := tailcfg.StableNodeID(strconv.FormatInt(machineID, Base10))
+	selectedExitTargets := make([]Machine, 0, len(filtered))
+	for _, machine := range filtered {
+		if machine.GetHostInfo().ExitNodeID == sourceStableID {
+			selectedExitTargets = append(selectedExitTargets, machine)
+		}
+	}
+	if len(selectedExitTargets) > 0 {
+		return selectedExitTargets, nil
 	}
 
 	return filtered, nil
