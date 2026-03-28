@@ -6,6 +6,7 @@ import Authority from "./setpart/Authority.vue";
 import RebindSA from "./setpart/RebindSA.vue";
 import Client from "./setpart/ClientPublish.vue";
 import Funnel from "./setpart/Funnel.vue";
+import FlowLogs from "./setpart/FlowLogs.vue";
 
 //路由及选择器页面控制
 const setPartContent = {
@@ -14,6 +15,7 @@ const setPartContent = {
   rebindSA: RebindSA,
   client: Client,
   funnel: Funnel,
+  "flow-logs": FlowLogs,
 };
 const route = useRoute();
 const router = useRouter();
@@ -92,6 +94,15 @@ onMounted(() => {
                 to="/setting/funnel"
                 >公网入口</router-link
               >
+              <router-link
+                class="flex font-medium mt-4"
+                :class="{
+                  'text-blue-600': currentSetPart == 'flow-logs',
+                  'text-gray-700': currentSetPart != 'flow-logs',
+                }"
+                to="/setting/flow-logs"
+                >流量日志</router-link
+              >
             </div>
           </div>
           <div class="flex flex-row mb-12">
@@ -135,6 +146,7 @@ onMounted(() => {
               <option value="authority">第三方服务</option>
               <option value="client">客户端发布</option>
               <option value="funnel">公网入口</option>
+              <option value="flow-logs">流量日志</option>
             </optgroup>
             <optgroup label="其他配置">
               <option value="rebindSA">换绑超管</option>

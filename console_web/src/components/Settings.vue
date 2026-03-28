@@ -6,6 +6,7 @@ import Keys from "./setpart/Keys.vue";
 import DeviceManagement from "./setpart/DeviceManagement.vue";
 import UserManagement from "./setpart/UserManagement.vue";
 import Subscription from "./setpart/Subscription.vue";
+import FlowLogs from "./setpart/FlowLogs.vue";
 
 //路由及选择器页面控制
 const setPartContent = {
@@ -14,6 +15,7 @@ const setPartContent = {
   billing: Subscription,
   "user-management": UserManagement,
   keys: Keys,
+  "flow-logs": FlowLogs,
 };
 const route = useRoute();
 const router = useRouter();
@@ -90,6 +92,15 @@ onMounted(() => {
                 to="/settings/billing"
                 >账单</router-link
               >
+              <router-link
+                class="flex font-medium mt-4"
+                :class="{
+                  'text-blue-600': currentSetPart == 'flow-logs',
+                  'text-gray-700': currentSetPart != 'flow-logs',
+                }"
+                to="/settings/flow-logs"
+                >流量日志</router-link
+              >
             </div>
           </div>
           <div class="flex flex-row mb-12">
@@ -133,6 +144,7 @@ onMounted(() => {
               <option value="user-management">用户</option>
               <option value="device-management">设备</option>
               <option value="billing">账单</option>
+              <option value="flow-logs">流量日志</option>
             </optgroup>
             <optgroup label="个人设置">
               <option value="keys">密钥</option>
