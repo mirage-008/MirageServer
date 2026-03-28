@@ -31,6 +31,10 @@ const exportAPIKey = ref("");
 const exportIndex = ref("");
 const exportBatchSize = ref(100);
 const exportInsecureSkipVerify = ref(false);
+const logTargetHint = ref("");
+const collectorPath = ref("/c/{collection}/{privateID}");
+const netlogCollection = ref("tailtraffic.log.tailscale.io");
+const requiresClientLogTarget = ref(true);
 
 const supportedExportTargets = ref(["http", "elasticsearch"]);
 const exportBatchSizeMax = ref(500);
@@ -124,6 +128,10 @@ function applyConfigPayload(payload) {
     ? payload.supportedExportTargets
     : ["http", "elasticsearch"];
   exportBatchSizeMax.value = Number(payload?.exportBatchSizeMax || 500);
+  logTargetHint.value = payload?.logTargetHint || "";
+  collectorPath.value = payload?.collectorPath || "/c/{collection}/{privateID}";
+  netlogCollection.value = payload?.netlogCollection || "tailtraffic.log.tailscale.io";
+  requiresClientLogTarget.value = payload?.requiresClientLogTarget !== false;
 }
 
 function loadConfig() {
@@ -300,6 +308,34 @@ onBeforeUnmount(() => {
               min="1"
               class="input input-bordered w-full max-w-xs"
             />
+          </div>
+
+          <div class="rounded-2xl border border-stone-200 p-4 bg-stone-50/60">
+            <div class="mb-3">
+              <h3 class="font-semibold text-gray-900">客户端上传目标</h3>
+              <p class="text-sm text-gray-500 mt-1">
+                {{ requiresClientLogTarget ? "当前仍需要客户端或受控司南显式把日志目标指向 Mirage。" : "当前客户端不需要额外设置日志目标。" }}
+              </p>
+            </div>
+            <div class="grid gap-4 md:grid-cols-2">
+              <div>
+                <p class="text-sm font-medium text-gray-700 mb-2">TS_LOG_TARGET</p>
+                <div class="rounded-xl bg-white border border-stone-200 px-3 py-2 font-mono text-sm break-all">
+                  {{ logTargetHint || "未提供" }}
+                </div>
+              </div>
+              <div>
+                <p class="text-sm font-medium text-gray-700 mb-2">Collector Path</p>
+                <div class="rounded-xl bg-white border border-stone-200 px-3 py-2 font-mono text-sm break-all">
+                  {{ collectorPath }}
+                </div>
+              </div>
+            </div>
+            <p class="text-xs text-gray-500 mt-3">
+              官方 `tailscale`/Mirage 客户端会在 `TS_LOG_TARGET` 基础上自动追加集合
+              <span class="font-mono">{{ netlogCollection }}</span>
+              和私有 log ID，不需要手动拼完整上传 URL。
+            </p>
           </div>
 
           <div class="rounded-2xl border border-stone-200 p-4 bg-stone-50/60">

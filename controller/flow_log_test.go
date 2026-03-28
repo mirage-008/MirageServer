@@ -2,8 +2,10 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -14,9 +16,12 @@ import (
 
 	"github.com/gorilla/mux"
 	"gorm.io/gorm"
+	"tailscale.com/logtail"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/ipproto"
+	"tailscale.com/types/logid"
 	"tailscale.com/types/netlogtype"
+	"tailscale.com/util/zstdframe"
 )
 
 func TestInitFlowLogTables(t *testing.T) {
@@ -272,6 +277,177 @@ func TestFlowLogCollectorAndTenantQuery(t *testing.T) {
 	buckets := summary["buckets"].([]any)
 	if len(buckets) != 1 {
 		t.Fatalf("expected 1 summary bucket, got %d", len(buckets))
+	}
+}
+
+func TestFlowLogCollectorAcceptsOfficialLogtailNetlogUpload(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+	app.cfg.FlowLogCfg = FlowLogConfig{Enabled: true}
+	if err := migrateFlowLogTables(app.db); err != nil {
+		t.Fatalf("migrateFlowLogTables(): %v", err)
+	}
+
+	owner, err := app.GetUser("owner@example.com", "tenant-org", "Mirage")
+	if err != nil {
+		t.Fatalf("GetUser(owner): %v", err)
+	}
+	machine, err := app.GetMachineByGivenName(owner.ID, "tenant-machine")
+	if err != nil {
+		t.Fatalf("GetMachineByGivenName(): %v", err)
+	}
+	org, err := app.GetOrgnaizationByID(owner.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(): %v", err)
+	}
+	nodeLogID, err := app.ensureMachineDataPlaneAuditLogID(machine)
+	if err != nil {
+		t.Fatalf("ensureMachineDataPlaneAuditLogID(): %v", err)
+	}
+	domainLogID, err := app.ensureOrganizationDomainAuditLogID(org)
+	if err != nil {
+		t.Fatalf("ensureOrganizationDomainAuditLogID(): %v", err)
+	}
+
+	parsedNodeLogID, err := logid.ParsePrivateID(nodeLogID)
+	if err != nil {
+		t.Fatalf("ParsePrivateID(node): %v", err)
+	}
+	parsedDomainLogID, err := logid.ParsePrivateID(domainLogID)
+	if err != nil {
+		t.Fatalf("ParsePrivateID(domain): %v", err)
+	}
+
+	router := mux.NewRouter()
+	app.initRouter(router)
+	var capturedBody []byte
+	var capturedStatus int
+	var capturedCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedCalls++
+		rawBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("io.ReadAll(request body): %v", err)
+		}
+		r.Body.Close()
+		decodedBody := rawBody
+		if strings.EqualFold(strings.TrimSpace(r.Header.Get("Content-Encoding")), ZstdCompression) {
+			decodedBody, err = zstdframe.AppendDecode(nil, rawBody)
+			if err != nil {
+				t.Fatalf("zstdframe.AppendDecode(): %v", err)
+			}
+		}
+		capturedBody = append(capturedBody[:0], decodedBody...)
+
+		clone := r.Clone(r.Context())
+		clone.Body = io.NopCloser(bytes.NewReader(rawBody))
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, clone)
+		capturedStatus = rec.Code
+		for key, values := range rec.Header() {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(rec.Code)
+		if _, err := w.Write(rec.Body.Bytes()); err != nil {
+			t.Fatalf("Write(response body): %v", err)
+		}
+	}))
+	defer server.Close()
+
+	logger := logtail.NewLogger(logtail.Config{
+		Collection:          flowLogCollectionTailtraffic,
+		PrivateID:           parsedNodeLogID,
+		CopyPrivateID:       parsedDomainLogID,
+		BaseURL:             server.URL,
+		HTTPC:               server.Client(),
+		Stderr:              io.Discard,
+		CompressLogs:        true,
+		FlushDelayFn:        func() time.Duration { return 0 },
+		IncludeProcID:       true,
+		IncludeProcSequence: true,
+	}, t.Logf)
+
+	start := time.Now().UTC().Add(-5 * time.Second).Round(time.Second)
+	end := start.Add(2 * time.Second)
+	payload, err := json.Marshal(netlogtype.Message{
+		NodeID: tailcfg.StableNodeID(strconv.FormatInt(machine.ID, 10)),
+		Start:  start,
+		End:    end,
+		VirtualTraffic: []netlogtype.ConnectionCounts{
+			{
+				Connection: netlogtype.Connection{
+					Proto: ipproto.TCP,
+					Src:   netip.MustParseAddrPort("100.64.0.20:1234"),
+					Dst:   netip.MustParseAddrPort("100.64.0.21:443"),
+				},
+				Counts: netlogtype.Counts{
+					TxPackets: 3,
+					TxBytes:   300,
+					RxPackets: 2,
+					RxBytes:   200,
+				},
+			},
+		},
+		PhysicalTraffic: []netlogtype.ConnectionCounts{
+			{
+				Connection: netlogtype.Connection{
+					Proto: ipproto.UDP,
+					Src:   netip.MustParseAddrPort("100.64.0.21:0"),
+					Dst:   netip.MustParseAddrPort("198.51.100.5:41641"),
+				},
+				Counts: netlogtype.Counts{
+					TxPackets: 1,
+					TxBytes:   80,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload): %v", err)
+	}
+	if _, err := logger.Write(payload); err != nil {
+		t.Fatalf("logger.Write(payload): %v", err)
+	}
+	logger.StartFlush()
+	time.Sleep(200 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := logger.Shutdown(ctx); err != nil {
+		t.Fatalf("logger.Shutdown(): %v", err)
+	}
+
+	entries, err := queryFlowLogs(app.db, flowLogQuery{OrgID: owner.OrganizationID, Limit: 10, IncludePayload: true})
+	if err != nil {
+		t.Fatalf("queryFlowLogs(): %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 flow log entry, got %d (collector calls=%d status=%d body=%s)", len(entries), capturedCalls, capturedStatus, string(capturedBody))
+	}
+	entry := entries[0]
+	if entry.PrivateID != nodeLogID {
+		t.Fatalf("PrivateID=%q want %q", entry.PrivateID, nodeLogID)
+	}
+	if entry.CopyPrivateID != domainLogID {
+		t.Fatalf("CopyPrivateID=%q want %q", entry.CopyPrivateID, domainLogID)
+	}
+	if entry.MachineID != machine.ID {
+		t.Fatalf("MachineID=%d want %d", entry.MachineID, machine.ID)
+	}
+	if entry.OrgID != owner.OrganizationID {
+		t.Fatalf("OrgID=%d want %d", entry.OrgID, owner.OrganizationID)
+	}
+	if entry.VirtualTxBytes != 300 || entry.VirtualRxBytes != 200 {
+		t.Fatalf("virtual bytes tx/rx = %d/%d, want 300/200", entry.VirtualTxBytes, entry.VirtualRxBytes)
+	}
+	if !entry.HasPhysicalTraffic || entry.PhysicalTxBytes != 80 {
+		t.Fatalf("physical flow summary = has=%v bytes=%d, want has=true bytes=80", entry.HasPhysicalTraffic, entry.PhysicalTxBytes)
+	}
+	if !strings.Contains(entry.Payload, `"virtualTraffic"`) {
+		t.Fatalf("unexpected payload: %s", entry.Payload)
 	}
 }
 
