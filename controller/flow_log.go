@@ -36,9 +36,10 @@ const (
 )
 
 type FlowLogConfig struct {
-	Enabled       bool `json:"enabled"`
-	LogExitFlows  bool `json:"logExitFlows"`
-	RetentionDays int  `json:"retentionDays"`
+	Enabled       bool                `json:"enabled"`
+	LogExitFlows  bool                `json:"logExitFlows"`
+	RetentionDays int                 `json:"retentionDays"`
+	Export        FlowLogExportConfig `json:"export"`
 }
 
 func (cfg *FlowLogConfig) Scan(value interface{}) error {
@@ -69,50 +70,55 @@ func normalizeFlowLogConfig(cfg FlowLogConfig) FlowLogConfig {
 		Enabled:       cfg.Enabled,
 		LogExitFlows:  cfg.Enabled && cfg.LogExitFlows,
 		RetentionDays: retentionDays,
+		Export:        normalizeFlowLogExportConfig(cfg.Export),
 	}
 }
 
 type FlowLogEntry struct {
-	ID                 int64  `gorm:"primary_key;unique;not null"`
-	StableID           string `gorm:"uniqueIndex"`
-	Collection         string `gorm:"index:idx_flow_logs_collection_private,priority:1"`
-	PrivateID          string `gorm:"index:idx_flow_logs_collection_private,priority:2"`
-	CopyPrivateID      string
-	OrgID              int64  `gorm:"index"`
-	OrgStableID        string `gorm:"index"`
-	OrgName            string
-	MachineID          int64  `gorm:"index"`
-	MachineStableID    string `gorm:"index"`
-	MachineName        string
-	UserID             int64  `gorm:"index"`
-	UserStableID       string `gorm:"index"`
-	UserName           string
-	NodeStableID       string    `gorm:"index"`
-	StartTime          time.Time `gorm:"index"`
-	EndTime            time.Time `gorm:"index"`
-	LoggedAt           time.Time `gorm:"index"`
-	ClientTime         *time.Time
-	HasSubnetTraffic   bool `gorm:"index"`
-	HasExitTraffic     bool `gorm:"index"`
-	HasPhysicalTraffic bool `gorm:"index"`
-	VirtualTxPackets   uint64
-	VirtualTxBytes     uint64
-	VirtualRxPackets   uint64
-	VirtualRxBytes     uint64
-	SubnetTxPackets    uint64
-	SubnetTxBytes      uint64
-	SubnetRxPackets    uint64
-	SubnetRxBytes      uint64
-	ExitTxPackets      uint64
-	ExitTxBytes        uint64
-	ExitRxPackets      uint64
-	ExitRxBytes        uint64
-	PhysicalTxPackets  uint64
-	PhysicalTxBytes    uint64
-	PhysicalRxPackets  uint64
-	PhysicalRxBytes    uint64
-	Payload            string
-	CreatedAt          time.Time
+	ID                  int64  `gorm:"primary_key;unique;not null"`
+	StableID            string `gorm:"uniqueIndex"`
+	Collection          string `gorm:"index:idx_flow_logs_collection_private,priority:1"`
+	PrivateID           string `gorm:"index:idx_flow_logs_collection_private,priority:2"`
+	CopyPrivateID       string
+	OrgID               int64  `gorm:"index"`
+	OrgStableID         string `gorm:"index"`
+	OrgName             string
+	MachineID           int64  `gorm:"index"`
+	MachineStableID     string `gorm:"index"`
+	MachineName         string
+	UserID              int64  `gorm:"index"`
+	UserStableID        string `gorm:"index"`
+	UserName            string
+	NodeStableID        string    `gorm:"index"`
+	StartTime           time.Time `gorm:"index"`
+	EndTime             time.Time `gorm:"index"`
+	LoggedAt            time.Time `gorm:"index"`
+	ClientTime          *time.Time
+	HasSubnetTraffic    bool `gorm:"index"`
+	HasExitTraffic      bool `gorm:"index"`
+	HasPhysicalTraffic  bool `gorm:"index"`
+	VirtualTxPackets    uint64
+	VirtualTxBytes      uint64
+	VirtualRxPackets    uint64
+	VirtualRxBytes      uint64
+	SubnetTxPackets     uint64
+	SubnetTxBytes       uint64
+	SubnetRxPackets     uint64
+	SubnetRxBytes       uint64
+	ExitTxPackets       uint64
+	ExitTxBytes         uint64
+	ExitRxPackets       uint64
+	ExitRxBytes         uint64
+	PhysicalTxPackets   uint64
+	PhysicalTxBytes     uint64
+	PhysicalRxPackets   uint64
+	PhysicalRxBytes     uint64
+	LastExportAttemptAt *time.Time `gorm:"index"`
+	ExportedAt          *time.Time `gorm:"index"`
+	ExportAttempts      int
+	ExportError         string
+	Payload             string
+	CreatedAt           time.Time
 }
 
 func (entry *FlowLogEntry) BeforeCreate(tx *gorm.DB) error {
@@ -246,6 +252,8 @@ func flowLogConfigEnvelope(r *http.Request, cfg FlowLogConfig) map[string]any {
 		"netlogCollection":        flowLogCollectionTailtraffic,
 		"requiresClientLogTarget": true,
 		"retentionCutoffHintDays": cfg.RetentionDays,
+		"supportedExportTargets":  []string{flowLogExportTargetHTTP, flowLogExportTargetElasticsearch},
+		"exportBatchSizeMax":      flowLogExportMaxBatchSize,
 	}
 }
 
@@ -850,7 +858,11 @@ func serializeFlowLogEntry(entry FlowLogEntry, includePayload bool) map[string]a
 			"rxPkts":  entry.PhysicalRxPackets,
 			"rxBytes": entry.PhysicalRxBytes,
 		},
-		"createdAt": entry.CreatedAt,
+		"lastExportAttemptAt": entry.LastExportAttemptAt,
+		"exportedAt":          entry.ExportedAt,
+		"exportAttempts":      entry.ExportAttempts,
+		"exportError":         entry.ExportError,
+		"createdAt":           entry.CreatedAt,
 	}
 	if includePayload && entry.Payload != "" {
 		record["payload"] = json.RawMessage(entry.Payload)

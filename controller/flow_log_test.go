@@ -36,6 +36,12 @@ func TestInitFlowLogTables(t *testing.T) {
 	if !db.Migrator().HasColumn(&Organization{}, "domain_audit_log_id") {
 		t.Fatal("missing organization domain_audit_log_id column")
 	}
+	if !db.Migrator().HasColumn(&FlowLogEntry{}, "exported_at") {
+		t.Fatal("missing flow_log_entries exported_at column")
+	}
+	if !db.Migrator().HasColumn(&FlowLogEntry{}, "last_export_attempt_at") {
+		t.Fatal("missing flow_log_entries last_export_attempt_at column")
+	}
 }
 
 func TestGenerateMapResponseFlowLogsDisabledByDefault(t *testing.T) {
@@ -284,9 +290,16 @@ func TestCockpitFlowLogConfigAPI(t *testing.T) {
 	if !strings.Contains(data["logTargetHint"].(string), "http://") {
 		t.Fatalf("unexpected logTargetHint: %#v", data["logTargetHint"])
 	}
+	exportConfig := data["config"].(map[string]any)["export"].(map[string]any)
+	if exportConfig["enabled"].(bool) {
+		t.Fatal("flow log export should default to disabled")
+	}
+	if got := int(exportConfig["batchSize"].(float64)); got != flowLogExportDefaultBatchSize {
+		t.Fatalf("export batchSize=%d want %d", got, flowLogExportDefaultBatchSize)
+	}
 
 	rec = httptest.NewRecorder()
-	body := []byte(`{"enabled":true,"logExitFlows":true,"retentionDays":14}`)
+	body := []byte(`{"enabled":true,"logExitFlows":true,"retentionDays":14,"export":{"enabled":true,"target":"http","url":"https://collector.example.test/ingest","apiKey":"secret","batchSize":25}}`)
 	router.ServeHTTP(rec, funnelAuthedRequest(http.MethodPost, "/cockpit/api/flow-logs/config", body))
 	status, data = decodeFunnelAPIResponse(t, rec.Body.Bytes())
 	if status != "success" {
@@ -298,6 +311,16 @@ func TestCockpitFlowLogConfigAPI(t *testing.T) {
 	}
 	if got := int(config["retentionDays"].(float64)); got != 14 {
 		t.Fatalf("retentionDays=%d want 14", got)
+	}
+	exportConfig = config["export"].(map[string]any)
+	if !exportConfig["enabled"].(bool) || exportConfig["target"] != flowLogExportTargetHTTP {
+		t.Fatalf("unexpected export config: %#v", exportConfig)
+	}
+	if exportConfig["url"] != "https://collector.example.test/ingest" {
+		t.Fatalf("unexpected export url: %#v", exportConfig["url"])
+	}
+	if got := int(exportConfig["batchSize"].(float64)); got != 25 {
+		t.Fatalf("export batchSize=%d want 25", got)
 	}
 }
 

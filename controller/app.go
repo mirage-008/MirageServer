@@ -523,12 +523,15 @@ func (h *Mirage) Serve(ctrlChn chan CtrlMsg) error {
 	defer longTicker.Stop()
 	flowLogRetentionTicker := time.NewTicker(time.Hour)
 	defer flowLogRetentionTicker.Stop()
+	flowLogExportTicker := time.NewTicker(15 * time.Second)
+	defer flowLogExportTicker.Stop()
 
 	go h.expireEphemeralNodes(ticker)  //updateInterval)
 	go h.expireExpiredMachines(ticker) //updateInterval)
 	go h.failoverSubnetRoutes(ticker)  //updateInterval)
 	go h.refreshNaviStatusPoller(longTicker)
 	go h.pruneFlowLogs(flowLogRetentionTicker)
+	go h.exportFlowLogs(flowLogExportTicker)
 
 	// Prepare group for running listeners
 	errorGroup := new(errgroup.Group)
