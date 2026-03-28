@@ -1096,9 +1096,6 @@ func (h *Mirage) ListShareeMachinesBySourceMachineID(machineID int64) ([]Machine
 		if !machines[i].isOnline() {
 			continue
 		}
-		if !h.hasActivePollSession(machines[i].ID) {
-			continue
-		}
 		machines[i].ShareeNode = true
 		filtered = append(filtered, machines[i])
 	}

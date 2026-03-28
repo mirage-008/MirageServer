@@ -262,7 +262,6 @@ func (h *Mirage) pollNetMapStream(
 
 	sessionID := h.startPollSession(machine.ID)
 	defer h.finishPollSession(machine.ID, sessionID)
-	h.bumpShareConnectedOrgState(machine.User.OrganizationID)
 
 	go h.scheduledPollWorker(
 		ctx,

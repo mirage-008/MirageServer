@@ -130,14 +130,6 @@ func (h *Mirage) isCurrentPollSession(machineID int64, sessionID uint64) bool {
 	return ok && currentSessionID == sessionID
 }
 
-func (h *Mirage) hasActivePollSession(machineID int64) bool {
-	h.pollSessionMu.Lock()
-	defer h.pollSessionMu.Unlock()
-
-	_, ok := h.pollSessions[machineID]
-	return ok
-}
-
 func (h *Mirage) finishPollSession(machineID int64, sessionID uint64) bool {
 	h.pollSessionMu.Lock()
 	defer h.pollSessionMu.Unlock()

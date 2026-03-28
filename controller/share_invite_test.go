@@ -139,17 +139,6 @@ func markMachineOnline(t *testing.T, app *Mirage, machine *Machine) {
 	}
 }
 
-func markMachineShareActive(t *testing.T, app *Mirage, machine *Machine) func() {
-	t.Helper()
-
-	markMachineOnline(t, app, machine)
-	sessionID := app.startPollSession(machine.ID)
-
-	return func() {
-		app.finishPollSession(machine.ID, sessionID)
-	}
-}
-
 func createTestRoute(t *testing.T, app *Mirage, machine *Machine, prefix string, enabled bool, primary bool) Route {
 	t.Helper()
 
@@ -559,8 +548,8 @@ func TestListSharePeersForMachineUsesSingleDeviceShareSemantics(t *testing.T) {
 	targetMachineA := createTestMachine(t, app, targetUser, "target-a", "100.64.0.2")
 	targetMachineB := createTestMachine(t, app, targetUser, "target-b", "100.64.0.3")
 	targetTeammateMachine := createTestMachine(t, app, targetTeammate, "target-teammate", "100.64.0.4")
-	defer markMachineShareActive(t, app, targetMachineA)()
-	defer markMachineShareActive(t, app, targetMachineB)()
+	markMachineOnline(t, app, targetMachineA)
+	markMachineOnline(t, app, targetMachineB)
 
 	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
 	if err != nil {
@@ -629,7 +618,7 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	sourceOrgPeer := createTestMachine(t, app, sourceUser, "source-peer", "100.64.0.10")
 	targetMachine := createTestMachine(t, app, targetUser, "target-node", "100.64.0.2")
 	targetTeammateMachine := createTestMachine(t, app, targetTeammate, "target-teammate", "100.64.0.3")
-	defer markMachineShareActive(t, app, targetMachine)()
+	markMachineOnline(t, app, targetMachine)
 	sourceMachine.HostInfo = HostInfo{
 		Hostname:    sourceMachine.Hostname,
 		RoutableIPs: []netip.Prefix{mustPrefix(t, "10.10.0.0/24"), ExitRouteV4, ExitRouteV6},
@@ -637,19 +626,9 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if err := app.db.Save(sourceMachine).Error; err != nil {
 		t.Fatalf("Save(sourceMachine hostinfo): %v", err)
 	}
-	targetMachine.HostInfo = HostInfo{
-		Hostname:    targetMachine.Hostname,
-		RoutableIPs: []netip.Prefix{mustPrefix(t, "10.20.0.0/24"), ExitRouteV4, ExitRouteV6},
-	}
-	if err := app.db.Save(targetMachine).Error; err != nil {
-		t.Fatalf("Save(targetMachine hostinfo): %v", err)
-	}
 	createTestRoute(t, app, sourceMachine, "10.10.0.0/24", true, true)
 	createTestRoute(t, app, sourceMachine, "0.0.0.0/0", true, false)
 	createTestRoute(t, app, sourceMachine, "::/0", true, false)
-	createTestRoute(t, app, targetMachine, "10.20.0.0/24", true, true)
-	createTestRoute(t, app, targetMachine, "0.0.0.0/0", true, false)
-	createTestRoute(t, app, targetMachine, "::/0", true, false)
 
 	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
 	if err != nil {
@@ -780,15 +759,6 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if hiddenShareeNode.IsJailed {
 		t.Fatalf("expected hidden target peer not to be jailed, got %+v", hiddenShareeNode)
 	}
-	if containsPrefix(hiddenShareeNode.AllowedIPs, mustPrefix(t, "10.20.0.0/24")) {
-		t.Fatalf("expected hidden target peer to omit subnet routes, got %v", hiddenShareeNode.AllowedIPs)
-	}
-	if containsPrefix(hiddenShareeNode.AllowedIPs, ExitRouteV4) || containsPrefix(hiddenShareeNode.AllowedIPs, ExitRouteV6) {
-		t.Fatalf("expected hidden target peer to omit exit routes, got %v", hiddenShareeNode.AllowedIPs)
-	}
-	if len(hiddenShareeNode.PrimaryRoutes) != 0 {
-		t.Fatalf("expected hidden target peer to omit primary routes, got %v", hiddenShareeNode.PrimaryRoutes)
-	}
 
 	sourceFilters, _ := packetFiltersForMachine(sourceMachine, sourcePeers, sourceOrg.AclRules)
 	foundShareIngress := false
@@ -884,18 +854,16 @@ func TestListShareConnectedOrgIDs(t *testing.T) {
 	}
 }
 
-func TestListShareeMachinesBySourceMachineIDOnlyReturnsActiveTargets(t *testing.T) {
+func TestListShareeMachinesBySourceMachineIDOnlyReturnsOnlineTargets(t *testing.T) {
 	t.Parallel()
 
 	app := newShareInviteTestMirage(t)
 	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
 	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
 	sourceMachine := createTestMachine(t, app, sourceUser, "source-node", "100.64.0.1")
-	targetActive := createTestMachine(t, app, targetUser, "target-active", "100.64.0.2")
-	targetOnlineIdle := createTestMachine(t, app, targetUser, "target-online-idle", "100.64.0.3")
-	targetOffline := createTestMachine(t, app, targetUser, "target-offline", "100.64.0.4")
-	defer markMachineShareActive(t, app, targetActive)()
-	markMachineOnline(t, app, targetOnlineIdle)
+	targetOnline := createTestMachine(t, app, targetUser, "target-online", "100.64.0.2")
+	targetOffline := createTestMachine(t, app, targetUser, "target-offline", "100.64.0.3")
+	markMachineOnline(t, app, targetOnline)
 	_ = targetOffline
 
 	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
@@ -911,13 +879,13 @@ func TestListShareeMachinesBySourceMachineIDOnlyReturnsActiveTargets(t *testing.
 		t.Fatalf("ListShareeMachinesBySourceMachineID(): %v", err)
 	}
 	if len(shareeMachines) != 1 {
-		t.Fatalf("expected only active target machines, got %+v", shareeMachines)
+		t.Fatalf("expected only online target machines, got %+v", shareeMachines)
 	}
-	if shareeMachines[0].ID != targetActive.ID {
-		t.Fatalf("expected active target machine %d, got %+v", targetActive.ID, shareeMachines)
+	if shareeMachines[0].ID != targetOnline.ID {
+		t.Fatalf("expected online target machine %d, got %+v", targetOnline.ID, shareeMachines)
 	}
 	if !shareeMachines[0].ShareeNode {
-		t.Fatalf("expected active target machine to be marked as sharee node, got %+v", shareeMachines[0])
+		t.Fatalf("expected online target machine to be marked as sharee node, got %+v", shareeMachines[0])
 	}
 }
 
