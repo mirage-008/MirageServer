@@ -9,9 +9,13 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/patrickmn/go-cache"
+	"go4.org/netipx"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
+	"tailscale.com/types/ipproto"
 	"tailscale.com/types/key"
+	tslogger "tailscale.com/types/logger"
+	"tailscale.com/wgengine/filter"
 )
 
 func newShareInviteTestMirage(t *testing.T) *Mirage {
@@ -22,7 +26,7 @@ func newShareInviteTestMirage(t *testing.T) *Mirage {
 		sqlite.Open(dbPath+"?_journal_mode=WAL&_busy_timeout=5000"),
 		&gorm.Config{
 			DisableForeignKeyConstraintWhenMigrating: true,
-			Logger:                                   logger.Default.LogMode(logger.Silent),
+			Logger:                                   gormlogger.Default.LogMode(gormlogger.Silent),
 		},
 	)
 	if err != nil {
@@ -77,6 +81,21 @@ func createTestUser(t *testing.T, app *Mirage, name, displayName, orgName, provi
 	}
 
 	return user
+}
+
+func mustIPSetFromPrefixes(t *testing.T, prefixes []netip.Prefix) *netipx.IPSet {
+	t.Helper()
+
+	var builder netipx.IPSetBuilder
+	for _, prefix := range prefixes {
+		builder.AddPrefix(prefix)
+	}
+	ipSet, err := builder.IPSet()
+	if err != nil {
+		t.Fatalf("IPSet(): %v", err)
+	}
+
+	return ipSet
 }
 
 func createTestMachine(t *testing.T, app *Mirage, user *User, hostname string, addrs ...string) *Machine {
@@ -745,6 +764,38 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	}
 	if !foundShareIngress {
 		t.Fatalf("expected shared source machine packet filters to allow hidden target peer ingress, got %+v", sourceFilters)
+	}
+
+	sourceMatches, err := filter.MatchesFromFilterRules(sourceFilters)
+	if err != nil {
+		t.Fatalf("MatchesFromFilterRules(source): %v", err)
+	}
+	sourceFilter := filter.New(
+		sourceMatches,
+		nil,
+		mustIPSetFromPrefixes(t, allowedFilterDestinations(sourceMachine)),
+		&netipx.IPSet{},
+		nil,
+		tslogger.Discard,
+	)
+	if got := sourceFilter.CheckTCP(targetMachine.IPAddresses[0], sourceMachine.IPAddresses[0], 22); got != filter.Accept {
+		t.Fatalf("expected hidden target peer ingress to shared source machine to be allowed, got %v", got)
+	}
+	if got := sourceFilter.Check(targetMachine.IPAddresses[0], sourceMachine.IPAddresses[0], 0, ipproto.ICMPv4); got != filter.Accept {
+		t.Fatalf("expected hidden target peer ICMP ingress to shared source machine to be allowed, got %v", got)
+	}
+
+	targetJailedFilter := filter.NewShieldsUpFilter(
+		mustIPSetFromPrefixes(t, allowedFilterDestinations(targetMachine)),
+		&netipx.IPSet{},
+		nil,
+		tslogger.Discard,
+	)
+	if got := targetJailedFilter.CheckTCP(sourceMachine.IPAddresses[0], targetMachine.IPAddresses[0], 22); got != filter.Drop {
+		t.Fatalf("expected shared source machine TCP initiation into target machine to be blocked, got %v", got)
+	}
+	if got := targetJailedFilter.Check(sourceMachine.IPAddresses[0], targetMachine.IPAddresses[0], 0, ipproto.ICMPv4); got != filter.Drop {
+		t.Fatalf("expected shared source machine ICMP initiation into target machine to be blocked, got %v", got)
 	}
 }
 
