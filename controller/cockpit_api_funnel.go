@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -128,7 +127,7 @@ func (c *Cockpit) PostFunnelEdge(w http.ResponseWriter, r *http.Request) {
 		desired.Hostname = "server-edge"
 	}
 	if desired.SyncEndpoint == "" {
-		desired.SyncEndpoint = "/cockpit/api/funnel/edges/" + desired.EdgeType + "/sync"
+		desired.SyncEndpoint = defaultFunnelSyncEndpoint(desired.EdgeType)
 	}
 	if desired.HealthStatus == "" {
 		desired.HealthStatus = FunnelEdgeHealthUnknown
@@ -184,12 +183,7 @@ func (c *Cockpit) PostFunnelEdgeSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if edge.EdgeType != FunnelEdgeTypeServer {
-		now := time.Now().UTC()
-		edge.LastSeen = &now
-		if strings.TrimSpace(edge.HealthStatus) == "" {
-			edge.HealthStatus = FunnelEdgeHealthUnknown
-		}
-		if err := c.db.Save(edge).Error; err != nil {
+		if err := touchFunnelEdgeLastSeen(c.db, edge); err != nil {
 			c.doAPIResponse(w, "更新Funnel边缘状态失败:"+err.Error(), nil)
 			return
 		}

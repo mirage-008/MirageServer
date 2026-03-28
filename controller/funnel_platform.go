@@ -56,12 +56,12 @@ type FunnelEdgeSyncPayload struct {
 }
 
 type FunnelEdgeSyncService struct {
-	OrgID   int64                    `json:"orgId"`
-	Service map[string]any           `json:"service"`
-	Domain  map[string]any           `json:"domain"`
-	Cert    map[string]any           `json:"cert"`
-	Public  FunnelEdgeSyncPublic     `json:"public"`
-	Backend FunnelEdgeSyncBackend    `json:"backend"`
+	OrgID   int64                 `json:"orgId"`
+	Service map[string]any        `json:"service"`
+	Domain  map[string]any        `json:"domain"`
+	Cert    map[string]any        `json:"cert"`
+	Public  FunnelEdgeSyncPublic  `json:"public"`
+	Backend FunnelEdgeSyncBackend `json:"backend"`
 }
 
 type FunnelEdgeSyncPublic struct {
@@ -247,7 +247,7 @@ func buildDefaultServerEdge(cfg FunnelPlatformConfig) FunnelEdge {
 		EdgeNodeID:      "server-edge",
 		Hostname:        hostname,
 		PublicAddrs:     FunnelPublicAddrList(targets),
-		SyncEndpoint:    "/cockpit/api/funnel/edges/server-edge/sync",
+		SyncEndpoint:    defaultFunnelSyncEndpoint(FunnelEdgeTypeServer),
 		HealthStatus:    FunnelEdgeHealthUnknown,
 		Allocatable:     true,
 		TrustProxyCIDRs: normalizeProxyCIDRs(cfg.TrustedProxyCIDRs),
