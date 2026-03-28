@@ -1090,11 +1090,17 @@ func (h *Mirage) ListShareeMachinesBySourceMachineID(machineID int64) ([]Machine
 	if err != nil {
 		return nil, err
 	}
+
+	filtered := make([]Machine, 0, len(machines))
 	for i := range machines {
+		if !machines[i].isOnline() {
+			continue
+		}
 		machines[i].ShareeNode = true
+		filtered = append(filtered, machines[i])
 	}
 
-	return machines, nil
+	return filtered, nil
 }
 
 func (h *Mirage) ListVisibleMachinesByUserID(userID int64) ([]Machine, error) {

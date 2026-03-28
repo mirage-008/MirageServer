@@ -30,6 +30,7 @@ func (h *Mirage) handlePollCommon(
 	machine.HostInfo = HostInfo(*mapRequest.Hostinfo)
 	machine.DiscoKey = DiscoPublicKeyStripPrefix(mapRequest.DiscoKey)
 	now := time.Now().UTC()
+	wasOnline := machine.isOnline()
 
 	err := h.processMachineRoutes(machine)
 	if err != nil {
@@ -91,6 +92,9 @@ func (h *Mirage) handlePollCommon(
 
 			return
 		}
+	}
+	if !mapRequest.ReadOnly && !wasOnline && machine.isOnline() {
+		h.bumpShareConnectedOrgState(machine.User.OrganizationID)
 	}
 	var mapResponseState mapResponseStreamState
 	mapResp, err := h.getMapResponseData(mapRequest, machine, &mapResponseState)
@@ -222,6 +226,18 @@ func (h *Mirage) handlePollCommon(
 		Str("handler", "PollNetMap").
 		Str("machine", machine.Hostname).
 		Msg("Finished stream, closing PollNetMap session")
+}
+
+func (h *Mirage) bumpShareConnectedOrgState(orgID int64) {
+	if orgID == 0 {
+		return
+	}
+	orgIDs, err := h.ListShareConnectedOrgIDs(orgID)
+	if err != nil || len(orgIDs) == 0 {
+		h.setOrgLastStateChangeToNow(orgID)
+		return
+	}
+	h.setOrgLastStateChangeToNow(orgIDs...)
 }
 
 // pollNetMapStream stream logic for /machine/map,
@@ -575,9 +591,7 @@ func (h *Mirage) pollNetMapStream(
 					Err(err).
 					Msg("Cannot update machine LastSeen")
 			}
-			//cgao6 we should note sth for the machine gone w/o byebye
-			h.setOrgLastStateChangeToNow(machine.User.OrganizationID)
-			//cgao6
+			h.bumpShareConnectedOrgState(machine.User.OrganizationID)
 
 			// The connection has been closed, so we can stop polling.
 			return
