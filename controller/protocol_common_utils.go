@@ -112,6 +112,13 @@ func peerNodesForMachine(h *Mirage, peers Machines) ([]*tailcfg.Node, error) {
 	return h.toNodes(peers)
 }
 
+func mapRequestDisablesClientLogUploads(machine *Machine, mapRequest tailcfg.MapRequest) bool {
+	if machine != nil && machine.GetHostInfo().NoLogsNoSupport {
+		return true
+	}
+	return mapRequest.Hostinfo != nil && mapRequest.Hostinfo.NoLogsNoSupport
+}
+
 func nodesByID(nodes []*tailcfg.Node) map[tailcfg.NodeID]*tailcfg.Node {
 	byID := make(map[tailcfg.NodeID]*tailcfg.Node, len(nodes))
 	for _, node := range nodes {
@@ -257,11 +264,9 @@ func (h *Mirage) generateMapResponse(
 
 		ControlTime: &now,
 
-		Debug: &tailcfg.Debug{
-			DisableLogTail: !flowLogCfg.Enabled,
-		},
+		Debug: &tailcfg.Debug{},
 	}
-	if flowLogCfg.Enabled {
+	if flowLogCfg.Enabled && !mapRequestDisablesClientLogUploads(machine, mapRequest) {
 		domainAuditLogID, err := h.ensureOrganizationDomainAuditLogID(org)
 		if err != nil {
 			log.Error().Caller().Err(err).Msg("failed to ensure organization domain audit log id")

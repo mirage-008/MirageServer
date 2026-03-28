@@ -69,8 +69,8 @@ func TestGenerateMapResponseFlowLogsDisabledByDefault(t *testing.T) {
 	if _, ok := resp.Node.CapMap[tailcfg.CapabilityDataPlaneAuditLogs]; ok {
 		t.Fatal("unexpected data plane audit logs capability")
 	}
-	if resp.Debug == nil || !resp.Debug.DisableLogTail {
-		t.Fatalf("expected DisableLogTail=true, got %#v", resp.Debug)
+	if resp.Debug == nil || resp.Debug.DisableLogTail {
+		t.Fatalf("expected DisableLogTail=false, got %#v", resp.Debug)
 	}
 }
 
@@ -115,6 +115,39 @@ func TestGenerateMapResponseFlowLogsEnabled(t *testing.T) {
 	}
 	if org.DomainAuditLogID == "" {
 		t.Fatal("expected organization domain audit log id to persist")
+	}
+}
+
+func TestGenerateMapResponseFlowLogsSkipNoLogsClients(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	app.cfg.FlowLogCfg = FlowLogConfig{Enabled: true, LogExitFlows: true}
+	owner := createTestUser(t, app, "owner@example.com", "Owner", "flow-org", "Mirage")
+	machine := createTestMachine(t, app, owner, "flow-node", "100.64.0.10")
+
+	resp, err := app.generateMapResponse(tailcfg.MapRequest{Hostinfo: &tailcfg.Hostinfo{
+		Hostname:        machine.Hostname,
+		OS:              "linux",
+		NoLogsNoSupport: true,
+	}}, machine, &mapResponseStreamState{})
+	if err != nil {
+		t.Fatalf("generateMapResponse(): %v", err)
+	}
+	if resp.Node.DataPlaneAuditLogID != "" {
+		t.Fatalf("unexpected node audit log id: %q", resp.Node.DataPlaneAuditLogID)
+	}
+	if resp.DomainDataPlaneAuditLogID != "" {
+		t.Fatalf("unexpected domain audit log id: %q", resp.DomainDataPlaneAuditLogID)
+	}
+	if _, ok := resp.Node.CapMap[tailcfg.CapabilityDataPlaneAuditLogs]; ok {
+		t.Fatal("unexpected data plane audit logs capability")
+	}
+	if _, ok := resp.Node.CapMap[tailcfg.NodeAttrLogExitFlows]; ok {
+		t.Fatal("unexpected log-exit-flows attribute")
+	}
+	if resp.Debug == nil || resp.Debug.DisableLogTail {
+		t.Fatalf("expected DisableLogTail=false, got %#v", resp.Debug)
 	}
 }
 
