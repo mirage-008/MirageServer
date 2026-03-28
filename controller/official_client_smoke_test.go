@@ -1337,11 +1337,11 @@ func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
 		if !containsString(peer.AllowedIPs, ExitRouteV4.String()) || !containsString(peer.AllowedIPs, ExitRouteV6.String()) {
 			return fmt.Errorf("peer %s missing exit routes in AllowedIPs: %+v", routerNode.hostname, peer)
 		}
-		if containsString(peer.AllowedIPs, sharedSmokeSubnetRoute) {
-			return fmt.Errorf("peer %s should not advertise shared subnet route %s: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
+		if !containsString(peer.AllowedIPs, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("peer %s missing subnet route %s in AllowedIPs: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
 		}
-		if containsString(peer.PrimaryRoutes, sharedSmokeSubnetRoute) {
-			return fmt.Errorf("peer %s should not advertise shared subnet route %s in PrimaryRoutes: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
+		if !containsString(peer.PrimaryRoutes, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("peer %s missing subnet route %s in PrimaryRoutes: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
 		}
 		_ = status
 		return nil
@@ -1428,6 +1428,9 @@ func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
 
 	httpOutput := smokeHTTPViaProxy(t, clientNode.httpProxyAddr)
 	t.Logf("shared exit-node proxy egress succeeded via %s: %s", clientNode.httpProxyAddr, strings.TrimSpace(httpOutput))
+
+	routePing := waitForRoutePing(t, clientNode.socketPath, "192.168.1.1")
+	t.Logf("shared subnet route ping to 192.168.1.1 succeeded: %s", strings.TrimSpace(routePing))
 }
 
 func TestSmokePacketFilterRulesEmpty(t *testing.T) {

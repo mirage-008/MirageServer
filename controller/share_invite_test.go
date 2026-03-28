@@ -484,7 +484,7 @@ func TestAcceptPendingMachineSharesForUserAcceptsByIdentity(t *testing.T) {
 	}
 }
 
-func TestSharedNodeKeepsExitNodeCapabilitiesWithoutSubnetRoutes(t *testing.T) {
+func TestSharedNodeKeepsRoutesAndExitNodeCapabilities(t *testing.T) {
 	t.Parallel()
 
 	app := newShareInviteTestMirage(t)
@@ -521,14 +521,14 @@ func TestSharedNodeKeepsExitNodeCapabilitiesWithoutSubnetRoutes(t *testing.T) {
 		t.Fatalf("expected owned node allowed IPs to include exit routes, got %v", ownedNode.AllowedIPs)
 	}
 
+	if !containsPrefix(sharedNode.AllowedIPs, subnetPrefix) {
+		t.Fatalf("expected shared node allowed IPs to include subnet route, got %v", sharedNode.AllowedIPs)
+	}
 	if !containsPrefix(sharedNode.AllowedIPs, ExitRouteV4) || !containsPrefix(sharedNode.AllowedIPs, ExitRouteV6) {
 		t.Fatalf("expected shared node allowed IPs to include exit routes, got %v", sharedNode.AllowedIPs)
 	}
-	if containsPrefix(sharedNode.AllowedIPs, subnetPrefix) {
-		t.Fatalf("expected shared node allowed IPs to omit subnet route, got %v", sharedNode.AllowedIPs)
-	}
-	if len(sharedNode.PrimaryRoutes) != 0 {
-		t.Fatalf("expected shared node primary routes to omit subnet route, got %v", sharedNode.PrimaryRoutes)
+	if !containsPrefix(sharedNode.PrimaryRoutes, subnetPrefix) {
+		t.Fatalf("expected shared node primary routes to include subnet route, got %v", sharedNode.PrimaryRoutes)
 	}
 	selfPrefix := netip.PrefixFrom(machine.IPAddresses[0], machine.IPAddresses[0].BitLen())
 	if !containsPrefix(sharedNode.AllowedIPs, selfPrefix) {
@@ -739,14 +739,14 @@ func TestGetPeersWithACLIncludesAcceptedSharedMachine(t *testing.T) {
 	if !sharedNode.IsJailed {
 		t.Fatalf("expected shared source peer to be jailed for recipient, got %+v", sharedNode)
 	}
+	if !containsPrefix(sharedNode.AllowedIPs, mustPrefix(t, "10.10.0.0/24")) {
+		t.Fatalf("expected shared peer allowed IPs to include subnet route, got %v", sharedNode.AllowedIPs)
+	}
 	if !containsPrefix(sharedNode.AllowedIPs, ExitRouteV4) || !containsPrefix(sharedNode.AllowedIPs, ExitRouteV6) {
 		t.Fatalf("expected shared peer allowed IPs to include exit routes, got %v", sharedNode.AllowedIPs)
 	}
-	if containsPrefix(sharedNode.AllowedIPs, mustPrefix(t, "10.10.0.0/24")) {
-		t.Fatalf("expected shared peer allowed IPs to omit subnet route, got %v", sharedNode.AllowedIPs)
-	}
-	if len(sharedNode.PrimaryRoutes) != 0 {
-		t.Fatalf("expected shared peer primary routes to omit subnet route, got %v", sharedNode.PrimaryRoutes)
+	if !containsPrefix(sharedNode.PrimaryRoutes, mustPrefix(t, "10.10.0.0/24")) {
+		t.Fatalf("expected shared peer primary routes to include subnet route, got %v", sharedNode.PrimaryRoutes)
 	}
 
 	hiddenShareeNode, err := app.toNode(sourcePeersByID[targetMachine.ID], sourcePeersByID[targetMachine.ID].Shared)
