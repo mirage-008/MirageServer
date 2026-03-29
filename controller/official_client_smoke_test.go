@@ -2,16 +2,22 @@ package controller
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +46,7 @@ type smokeServer struct {
 type smokeNode struct {
 	hostname      string
 	socketPath    string
+	stateDir      string
 	httpProxyAddr string
 	tailscaledLog *strings.Builder
 }
@@ -591,6 +598,157 @@ func TestOfficialClientAuthKeySmoke(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestOfficialClientFunnelSmoke(t *testing.T) {
+	requireSmokeEnv(t)
+
+	tempDir := t.TempDir()
+	server := startSmokeServer(t, tempDir)
+
+	sysCfg := &SysConfig{}
+	if err := server.app.db.First(sysCfg).Error; err != nil {
+		t.Fatalf("First(sysCfg): %v", err)
+	}
+	listenPort := freeFunnelTestPort(t)
+	sysCfg.FunnelCfg.DirectBindAddrs = StringList{"127.0.0.1"}
+	sysCfg.FunnelCfg.DirectBindPorts = FunnelPortList{listenPort}
+	if err := server.app.db.Save(sysCfg).Error; err != nil {
+		t.Fatalf("Save(sysCfg): %v", err)
+	}
+	server.app.cfg.FunnelCfg = sysCfg.FunnelCfg
+	server.app.requestFunnelRuntimeReload()
+
+	rt := server.app.currentFunnelRuntime()
+	if rt == nil {
+		t.Fatal("expected funnel runtime to be started")
+	}
+	rt.getCertFunc = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		host := strings.TrimSpace(hello.ServerName)
+		if host == "" {
+			host = "localhost"
+		}
+		cert := newFunnelTestCertificate(t, host)
+		return &cert, nil
+	}
+
+	user, err := server.app.CreateUser("smoke", "Smoke Test", "smoke-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(): %v", err)
+	}
+	expiration := time.Now().Add(2 * time.Hour)
+	authKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(): %v", err)
+	}
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, fmt.Sprintf("path=%s query=%s host=%s", r.URL.Path, r.URL.RawQuery, r.Host))
+	}))
+	defer backend.Close()
+	backendPort := backend.Listener.Addr().(*net.TCPAddr).Port
+
+	node := startSmokeNode(t, filepath.Join(tempDir, "funnel-node"), server.serverAddr, authKey.Key, "funnel-node")
+	status := waitForNodeRunning(t, node.socketPath)
+
+	funnelOutput, err := runCommand(
+		t,
+		60*time.Second,
+		"tailscale",
+		"--socket", node.socketPath,
+		"funnel",
+		"--bg",
+		"--https="+strconv.Itoa(listenPort),
+		"localhost:"+strconv.Itoa(backendPort),
+	)
+	if err != nil {
+		t.Fatalf("tailscale funnel failed: %v\nstdout/stderr:\n%s", err, funnelOutput)
+	}
+
+	var machine *Machine
+	waitForCondition(t, 30*time.Second, func() error {
+		candidate, err := smokeMachineByHostname(server.app, node.hostname)
+		if err != nil {
+			return err
+		}
+		if !candidate.GetHostInfo().IngressEnabled {
+			return fmt.Errorf("machine %s has not reported ingress enabled yet", node.hostname)
+		}
+		if _, ok := machinePeerAPIAddress(candidate); !ok {
+			return fmt.Errorf("machine %s has not reported peerapi service yet", node.hostname)
+		}
+		machine = candidate
+		return nil
+	})
+	server.app.requestFunnelRuntimeReload()
+
+	domain := strings.TrimSuffix(status.Self.DNSName, ".")
+	if machine != nil {
+		if resolved := officialFunnelDomainForMachine(machine, server.app.cfg.IPPrefixes); resolved != "" {
+			domain = resolved
+		}
+	}
+	if domain == "" {
+		t.Fatal("expected funnel node to have dns name")
+	}
+	writeSmokeTLSCert(t, node.stateDir, domain)
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				ServerName:         domain,
+				InsecureSkipVerify: true, //nolint:gosec
+				MinVersion:         tls.VersionTLS12,
+			},
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				_, port, err := net.SplitHostPort(address)
+				if err != nil {
+					return nil, err
+				}
+				var dialer net.Dialer
+				return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+			},
+			ForceAttemptHTTP2: false,
+		},
+	}
+
+	var (
+		respBody string
+		lastErr  error
+	)
+	for attempt := 0; attempt < 30; attempt++ {
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s:%d/hello?x=1", domain, listenPort), nil)
+		if err != nil {
+			t.Fatalf("http.NewRequest(): %v", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("ReadAll(response): %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("status=%d body=%s", resp.StatusCode, string(body))
+			time.Sleep(250 * time.Millisecond)
+			continue
+		}
+		respBody = string(body)
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
+		t.Fatalf("official funnel request failed: %v\ntailscaled_log:\n%s", lastErr, smokeLogTail(node, 120))
+	}
+
+	if got, want := respBody, "path=/hello query=x=1 host="+domain+":"+strconv.Itoa(listenPort); got != want {
+		t.Fatalf("official funnel response = %q, want %q", got, want)
+	}
 }
 
 func TestOfficialClientPeerSmoke(t *testing.T) {
@@ -2101,6 +2259,7 @@ func startSmokeNodeSession(t *testing.T, tempDir, serverAddr, authKey, hostname 
 		"--verbose", "1",
 		"--outbound-http-proxy-listen", "127.0.0.1:0",
 	)
+	daemonCmd.Env = append(os.Environ(), "TS_DEBUG_ACME_DIRECTORY_URL=https://acme.invalid/directory")
 	daemonCmd.Stdout = &tailscaledLog
 	daemonCmd.Stderr = &tailscaledLog
 	if err := daemonCmd.Start(); err != nil {
@@ -2149,9 +2308,45 @@ func startSmokeNodeSession(t *testing.T, tempDir, serverAddr, authKey, hostname 
 	return &smokeNode{
 		hostname:      hostname,
 		socketPath:    socketPath,
+		stateDir:      stateDir,
 		httpProxyAddr: httpProxyAddr,
 		tailscaledLog: &tailscaledLog,
 	}, stop
+}
+
+func writeSmokeTLSCert(t *testing.T, stateDir, domain string) {
+	t.Helper()
+
+	cert := newFunnelTestCertificate(t, domain)
+	if len(cert.Certificate) == 0 {
+		t.Fatal("smoke cert missing certificate chain")
+	}
+	key, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatalf("smoke cert private key type = %T, want *ecdsa.PrivateKey", cert.PrivateKey)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("MarshalECPrivateKey(): %v", err)
+	}
+
+	certPEM := make([]byte, 0)
+	for _, der := range cert.Certificate {
+		certPEM = append(certPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	certDir := filepath.Join(stateDir, "certs")
+	if err := os.MkdirAll(certDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", certDir, err)
+	}
+	certPath := filepath.Join(certDir, domain+".crt")
+	keyPath := filepath.Join(certDir, domain+".key")
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", certPath, err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", keyPath, err)
+	}
 }
 
 func readSmokeStatus(t *testing.T, socketPath string) (smokeStatus, error) {

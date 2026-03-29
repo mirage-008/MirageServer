@@ -4,11 +4,138 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"tailscale.com/tailcfg"
 )
+
+func TestGenerateMapResponseAddsOfficialFunnelCapsAndIngressGrant(t *testing.T) {
+	app := newFunnelTenantTestMirage(t)
+
+	machines, err := app.ListMachinesByGivenName("tenant-machine")
+	if err != nil {
+		t.Fatalf("ListMachinesByGivenName(): %v", err)
+	}
+	if len(machines) != 1 {
+		t.Fatalf("tenant machine count = %d, want 1", len(machines))
+	}
+	machine, err := app.GetMachineByID(machines[0].ID)
+	if err != nil {
+		t.Fatalf("GetMachineByID(): %v", err)
+	}
+	machine.User.Organization.EnableMagic = true
+	machine.User.Organization.MagicDnsDomain = "tenant.example.test"
+	if err := app.db.Save(&machine.User.Organization).Error; err != nil {
+		t.Fatalf("Save(organization): %v", err)
+	}
+
+	hostInfo := machine.GetHostInfo()
+	hostInfo.IngressEnabled = true
+	machine.HostInfo = HostInfo(hostInfo)
+	if err := app.db.Save(machine).Error; err != nil {
+		t.Fatalf("Save(machine): %v", err)
+	}
+
+	resp, err := app.generateMapResponse(tailcfg.MapRequest{
+		Hostinfo: &tailcfg.Hostinfo{
+			Hostname: machine.Hostname,
+			OS:       "linux",
+		},
+	}, machine, &mapResponseStreamState{})
+	if err != nil {
+		t.Fatalf("generateMapResponse(): %v", err)
+	}
+
+	if !resp.Node.HasCap(tailcfg.CapabilityHTTPS) {
+		t.Fatal("expected https capability in node cap map")
+	}
+	if !resp.Node.HasCap(tailcfg.NodeAttrFunnel) {
+		t.Fatal("expected funnel capability in node cap map")
+	}
+	var foundPortCap bool
+	for cap := range resp.Node.CapMap {
+		if strings.HasPrefix(string(cap), string(tailcfg.CapabilityFunnelPorts)+"?ports=") {
+			foundPortCap = true
+			if got, want := string(cap), "https://tailscale.com/cap/funnel-ports?ports=443"; got != want {
+				t.Fatalf("funnel port capability = %q, want %q", got, want)
+			}
+		}
+	}
+	if !foundPortCap {
+		t.Fatal("expected funnel-ports capability in node cap map")
+	}
+
+	var foundIngressGrant bool
+	for _, rule := range resp.PacketFilter {
+		for _, grant := range rule.CapGrant {
+			for _, cap := range grant.Caps {
+				if cap != tailcfg.PeerCapabilityIngress {
+					continue
+				}
+				foundIngressGrant = true
+				if len(rule.SrcIPs) != 1 || rule.SrcIPs[0] != "*" {
+					t.Fatalf("ingress grant SrcIPs = %#v, want [\"*\"]", rule.SrcIPs)
+				}
+			}
+		}
+	}
+	if !foundIngressGrant {
+		t.Fatal("expected ingress cap grant in packet filter")
+	}
+
+	wantCertDomain := officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes)
+	if len(resp.DNSConfig.CertDomains) != 1 || resp.DNSConfig.CertDomains[0] != wantCertDomain {
+		t.Fatalf("cert domains = %#v, want [%q]", resp.DNSConfig.CertDomains, wantCertDomain)
+	}
+}
+
+func TestGenerateMapResponseAddsOfficialFunnelCertDomainWithoutMagicSearch(t *testing.T) {
+	app := newFunnelTenantTestMirage(t)
+
+	machines, err := app.ListMachinesByGivenName("tenant-machine")
+	if err != nil {
+		t.Fatalf("ListMachinesByGivenName(): %v", err)
+	}
+	if len(machines) != 1 {
+		t.Fatalf("tenant machine count = %d, want 1", len(machines))
+	}
+	machine, err := app.GetMachineByID(machines[0].ID)
+	if err != nil {
+		t.Fatalf("GetMachineByID(): %v", err)
+	}
+	machine.User.Organization.EnableMagic = false
+	machine.User.Organization.MagicDnsDomain = "tenant.example.test"
+	if err := app.db.Save(&machine.User.Organization).Error; err != nil {
+		t.Fatalf("Save(organization): %v", err)
+	}
+
+	hostInfo := machine.GetHostInfo()
+	hostInfo.IngressEnabled = true
+	machine.HostInfo = HostInfo(hostInfo)
+	if err := app.db.Save(machine).Error; err != nil {
+		t.Fatalf("Save(machine): %v", err)
+	}
+
+	resp, err := app.generateMapResponse(tailcfg.MapRequest{
+		Hostinfo: &tailcfg.Hostinfo{
+			Hostname: machine.Hostname,
+			OS:       "linux",
+		},
+	}, machine, &mapResponseStreamState{})
+	if err != nil {
+		t.Fatalf("generateMapResponse(): %v", err)
+	}
+
+	wantCertDomain := "tenant-machine.tenant.example.test"
+	if len(resp.DNSConfig.CertDomains) != 1 || resp.DNSConfig.CertDomains[0] != wantCertDomain {
+		t.Fatalf("cert domains = %#v, want [%q]", resp.DNSConfig.CertDomains, wantCertDomain)
+	}
+	if got := resp.Node.Name; got != "tenant-machine.tenant.example.test." {
+		t.Fatalf("node name = %q, want %q", got, "tenant-machine.tenant.example.test.")
+	}
+}
 
 func TestApplyMapResponseDeltaInitialMapSendsFullPeers(t *testing.T) {
 	t.Parallel()

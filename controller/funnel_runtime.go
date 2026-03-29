@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -76,6 +78,10 @@ type funnelRoute struct {
 	BackendAddress  string
 	TargetMachineID int64
 	Proxy           *httputil.ReverseProxy
+
+	OfficialIngress    bool
+	IngressPeerAPIAddr string
+	IngressTarget      string
 }
 
 type funnelPortRoutes struct {
@@ -270,6 +276,9 @@ func (rt *funnelRuntime) reload(reason string) {
 	if len(listenerErrors) > 0 {
 		for key, bindErr := range listenerErrors {
 			for _, route := range funnelRoutesForListener(snapshot, key) {
+				if route.ServiceID == 0 {
+					continue
+				}
 				status := snapshot.ServiceStatus[route.ServiceID]
 				status.ServiceConfigStatus = FunnelServiceConfigStatusError
 				status.ServiceEdgeStatus = FunnelServiceEdgeStatusUnavailable
@@ -308,10 +317,6 @@ func (rt *funnelRuntime) buildSnapshot() (*funnelRuntimeSnapshot, FunnelPlatform
 	if err := rt.app.db.Order("created_at ASC").Find(&services).Error; err != nil {
 		return nil, FunnelPlatformConfig{}, err
 	}
-	if len(services) == 0 {
-		return snapshot, cfg, nil
-	}
-
 	domainIDs := make([]int64, 0, len(services))
 	machineIDs := make([]int64, 0, len(services))
 	for _, service := range services {
@@ -614,6 +619,10 @@ func (rt *funnelRuntime) buildSnapshot() (*funnelRuntimeSnapshot, FunnelPlatform
 		snapshot.ServiceStatus[service.ID] = status
 	}
 
+	if err := rt.appendOfficialIngressRoutes(snapshot, cfg, seenRouteKeys, portFamilies); err != nil {
+		return nil, FunnelPlatformConfig{}, err
+	}
+
 	return snapshot, cfg, nil
 }
 
@@ -647,6 +656,74 @@ func funnelRuntimeRouteKey(family funnelPortFamily, route *funnelRoute) string {
 	default:
 		return fmt.Sprintf("%s:%d:%s:%s", family, route.ListenPort, route.Domain, route.MountPath)
 	}
+}
+
+func (rt *funnelRuntime) appendOfficialIngressRoutes(snapshot *funnelRuntimeSnapshot, cfg FunnelPlatformConfig, seenRouteKeys map[string]int64, portFamilies map[int]funnelPortFamily) error {
+	ports := officialFunnelPorts(cfg)
+	if len(ports) == 0 {
+		return nil
+	}
+
+	machines, err := rt.app.ListMachines()
+	if err != nil {
+		return err
+	}
+
+	for i := range machines {
+		machine := machines[i]
+		if !machine.isOnline() || !machineWantsOfficialFunnel(&machine) {
+			continue
+		}
+
+		peerAPIAddr, ok := machinePeerAPIAddress(&machine)
+		if !ok {
+			continue
+		}
+		domain := officialFunnelDomainForMachine(&machine, rt.app.cfg.IPPrefixes)
+		if domain == "" {
+			continue
+		}
+
+		for _, port := range ports {
+			if existingFamily, ok := portFamilies[port]; ok && existingFamily != funnelPortFamilyHTTPTLS {
+				continue
+			}
+			portFamilies[port] = funnelPortFamilyHTTPTLS
+
+			route := &funnelRoute{
+				OrgID:              machine.User.OrganizationID,
+				Domain:             domain,
+				ListenPort:         port,
+				ListenProto:        FunnelListenProtoHTTPS,
+				MountPath:          "/",
+				TargetMachineID:    machine.ID,
+				OfficialIngress:    true,
+				IngressPeerAPIAddr: peerAPIAddr,
+				IngressTarget:      net.JoinHostPort(domain, strconv.Itoa(port)),
+			}
+			listenerKey := funnelListenerKey{Port: port, TLS: true}
+			snapshot.TLSHosts[route.Domain] = struct{}{}
+
+			routeKey := funnelRuntimeRouteKey(funnelPortFamilyHTTPTLS, route)
+			if _, ok := seenRouteKeys[routeKey]; ok {
+				continue
+			}
+			seenRouteKeys[routeKey] = 0
+
+			portRoutes := snapshot.TLSPorts[listenerKey.Port]
+			if portRoutes == nil {
+				portRoutes = &funnelPortRoutes{RoutesByHost: make(map[string][]*funnelRoute)}
+				snapshot.TLSPorts[listenerKey.Port] = portRoutes
+			}
+			hostRoutes := append(portRoutes.RoutesByHost[route.Domain], route)
+			sort.SliceStable(hostRoutes, func(i, j int) bool {
+				return len(hostRoutes[i].MountPath) > len(hostRoutes[j].MountPath)
+			})
+			portRoutes.RoutesByHost[route.Domain] = hostRoutes
+		}
+	}
+
+	return nil
 }
 
 func (rt *funnelRuntime) syncListeners(cfg FunnelPlatformConfig, snapshot *funnelRuntimeSnapshot) map[funnelListenerKey]string {
@@ -890,6 +967,10 @@ func (rt *funnelRuntime) httpHandlerForListener(key funnelListenerKey) http.Hand
 			http.NotFound(w, r)
 			return
 		}
+		if route.OfficialIngress {
+			rt.serveOfficialIngressHTTP(w, r, route)
+			return
+		}
 		route.Proxy.ServeHTTP(w, r)
 	})
 }
@@ -1093,6 +1174,207 @@ func (rt *funnelRuntime) newReverseProxy(route *funnelRoute) *httputil.ReversePr
 			rt.appendLog(route.ServiceID, "error", "代理后端失败: "+err.Error())
 			http.Error(w, "funnel backend unavailable", http.StatusBadGateway)
 		},
+	}
+}
+
+type funnelBufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *funnelBufferedConn) Read(b []byte) (int, error) {
+	return c.reader.Read(b)
+}
+
+func (rt *funnelRuntime) dialOfficialIngressConn(ctx context.Context, route *funnelRoute, remoteAddr string) (net.Conn, *bufio.Reader, error) {
+	dialer, err := rt.dialerForOrg(ctx, route.OrgID)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", route.IngressPeerAPIAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := conn.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+
+	srcAddr := strings.TrimSpace(remoteAddr)
+	if _, err := netip.ParseAddrPort(srcAddr); err != nil {
+		srcAddr = "127.0.0.1:0"
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "/v0/ingress", nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	req.Host = route.IngressPeerAPIAddr
+	req.Header.Set("Tailscale-Ingress-Src", srcAddr)
+	req.Header.Set("Tailscale-Ingress-Target", route.IngressTarget)
+	if err := req.Write(conn); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+
+	br := bufio.NewReader(conn)
+	res, err := http.ReadResponse(br, req)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusSwitchingProtocols {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("ingress peer returned %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	if strings.EqualFold(route.ListenProto, "https") {
+		serverName := route.Domain
+		if host, _, err := net.SplitHostPort(route.IngressTarget); err == nil && strings.TrimSpace(host) != "" {
+			serverName = host
+		}
+		tlsConn := tls.Client(&funnelBufferedConn{Conn: conn, reader: br}, &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			ServerName:         serverName,
+			InsecureSkipVerify: true, //nolint:gosec
+		})
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, nil, err
+		}
+		if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+			_ = tlsConn.Close()
+			return nil, nil, err
+		}
+		return tlsConn, bufio.NewReader(tlsConn), nil
+	}
+
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+
+	return conn, br, nil
+}
+
+func removeHopByHopHeaders(header http.Header) {
+	if header == nil {
+		return
+	}
+	if connection := header.Values("Connection"); len(connection) > 0 {
+		for _, value := range connection {
+			for _, token := range strings.Split(value, ",") {
+				if token = strings.TrimSpace(token); token != "" {
+					header.Del(token)
+				}
+			}
+		}
+	}
+	for _, key := range []string{
+		"Connection",
+		"Proxy-Connection",
+		"Keep-Alive",
+		"Proxy-Authenticate",
+		"Proxy-Authorization",
+		"Te",
+		"Trailer",
+		"Transfer-Encoding",
+		"Upgrade",
+	} {
+		header.Del(key)
+	}
+}
+
+func copyHTTPHeaders(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func (rt *funnelRuntime) serveOfficialIngressHTTP(w http.ResponseWriter, r *http.Request, route *funnelRoute) {
+	ingressConn, br, err := rt.dialOfficialIngressConn(r.Context(), route, r.RemoteAddr)
+	if err != nil {
+		log.Error().Err(err).Str("host", route.Domain).Int("port", route.ListenPort).Msg("official funnel ingress dial failed")
+		http.Error(w, "funnel ingress unavailable", http.StatusBadGateway)
+		return
+	}
+
+	outURL := *r.URL
+	outReq := r.Clone(r.Context())
+	outReq.URL = &outURL
+	outReq.RequestURI = ""
+	outReq.Host = r.Host
+	outReq.Header = outReq.Header.Clone()
+	removeHopByHopHeaders(outReq.Header)
+	if outReq.Body == nil {
+		outReq.Body = http.NoBody
+	}
+	if err := outReq.Write(ingressConn); err != nil {
+		_ = ingressConn.Close()
+		log.Error().Err(err).Str("host", route.Domain).Int("port", route.ListenPort).Msg("official funnel ingress write failed")
+		http.Error(w, "funnel ingress unavailable", http.StatusBadGateway)
+		return
+	}
+
+	resp, err := http.ReadResponse(br, outReq)
+	if err != nil {
+		_ = ingressConn.Close()
+		log.Error().Err(err).Str("host", route.Domain).Int("port", route.ListenPort).Msg("official funnel ingress read failed")
+		http.Error(w, "funnel ingress unavailable", http.StatusBadGateway)
+		return
+	}
+
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			resp.Body.Close()
+			_ = ingressConn.Close()
+			http.Error(w, "websocket upgrade unsupported", http.StatusInternalServerError)
+			return
+		}
+		downstreamConn, downstreamBuf, err := hj.Hijack()
+		if err != nil {
+			resp.Body.Close()
+			_ = ingressConn.Close()
+			http.Error(w, "funnel ingress unavailable", http.StatusBadGateway)
+			return
+		}
+		if err := resp.Write(downstreamConn); err != nil {
+			resp.Body.Close()
+			_ = ingressConn.Close()
+			_ = downstreamConn.Close()
+			return
+		}
+		resp.Body.Close()
+
+		errCh := make(chan error, 2)
+		go func() {
+			_, copyErr := io.Copy(ingressConn, downstreamBuf)
+			errCh <- copyErr
+		}()
+		go func() {
+			_, copyErr := io.Copy(downstreamConn, &funnelBufferedConn{Conn: ingressConn, reader: br})
+			errCh <- copyErr
+		}()
+		<-errCh
+		_ = ingressConn.Close()
+		_ = downstreamConn.Close()
+		return
+	}
+
+	defer resp.Body.Close()
+	defer ingressConn.Close()
+	removeHopByHopHeaders(resp.Header)
+	copyHTTPHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil && !errors.Is(err, net.ErrClosed) {
+		log.Warn().Err(err).Str("host", route.Domain).Int("port", route.ListenPort).Msg("official funnel ingress response copy failed")
 	}
 }
 

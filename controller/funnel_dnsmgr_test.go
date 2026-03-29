@@ -53,12 +53,17 @@ func (s *dnsMgrTestState) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.URL.Path == "/api/domain":
-		s.writeJSON(w, dnsMgrDomainListResponse{
-			Total: 1,
-			Rows: []dnsMgrDomainRow{{
+		kw := strings.TrimSpace(r.Form.Get("kw"))
+		rows := []dnsMgrDomainRow{}
+		if kw == "" || strings.EqualFold(kw, s.zoneName) {
+			rows = append(rows, dnsMgrDomainRow{
 				ID:   s.zoneID,
 				Name: s.zoneName,
-			}},
+			})
+		}
+		s.writeJSON(w, dnsMgrDomainListResponse{
+			Total: len(rows),
+			Rows:  rows,
 		})
 	case r.URL.Path == "/api/domain/1":
 		s.writeJSON(w, dnsMgrDomainInfoResponse{
@@ -332,5 +337,81 @@ func TestDNSMgrManagedFunnelDNSProviderLookupTreatsRecordNotFoundAsNotReady(t *t
 	}
 	if !strings.Contains(result.Message, "未找到托管 DNS 记录") {
 		t.Fatalf("lookup message = %q", result.Message)
+	}
+}
+
+func TestDNSMgrManagedFunnelDNSProviderUpsertTXTRecord(t *testing.T) {
+	t.Parallel()
+
+	state, server := newDNSMgrTestServer(t)
+	state.zoneName = "mira.test"
+	defer server.Close()
+
+	provider, err := newManagedFunnelDNSProvider(FunnelPlatformConfig{
+		ManagedBaseDomain:    defaultFunnelDNSMgrBaseDomain,
+		ManagedDNSProvider:   FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSAPIBaseURL: server.URL,
+		ManagedDNSUID:        1000,
+		ManagedDNSAPIKey:     "secret",
+	})
+	if err != nil {
+		t.Fatalf("newManagedFunnelDNSProvider(): %v", err)
+	}
+
+	txtProvider, ok := provider.(managedFunnelDNSChallengeProvider)
+	if !ok {
+		t.Fatalf("provider type %T does not implement managedFunnelDNSChallengeProvider", provider)
+	}
+
+	fqdn := "_acme-challenge.tenant-machine.tenant-org.mira.test"
+	if err := txtProvider.UpsertTXTRecord(context.Background(), fqdn, "challenge-token-1"); err != nil {
+		t.Fatalf("UpsertTXTRecord(create): %v", err)
+	}
+	if len(state.records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(state.records))
+	}
+
+	var record dnsMgrRecordItem
+	for _, item := range state.records {
+		record = item
+	}
+	if record.Name != "_acme-challenge.tenant-machine.tenant-org" {
+		t.Fatalf("record name = %q", record.Name)
+	}
+	if record.Type != dnsMgrACMERecordType {
+		t.Fatalf("record type = %q, want %q", record.Type, dnsMgrACMERecordType)
+	}
+	if record.Value != "challenge-token-1" {
+		t.Fatalf("record value = %q", record.Value)
+	}
+
+	record.Status = "0"
+	record.Remark = "stale"
+	state.records[record.RecordID] = record
+	state.records["999"] = dnsMgrRecordItem{
+		RecordID: "999",
+		Domain:   state.zoneName,
+		Name:     record.Name,
+		Type:     dnsMgrACMERecordType,
+		Value:    "old-value",
+		Status:   "1",
+		TTL:      60,
+		Remark:   dnsMgrACMERecordRemark,
+	}
+	if err := txtProvider.UpsertTXTRecord(context.Background(), fqdn, "challenge-token-2"); err != nil {
+		t.Fatalf("UpsertTXTRecord(reconcile): %v", err)
+	}
+	if len(state.records) != 1 {
+		t.Fatalf("record count after reconcile = %d, want 1", len(state.records))
+	}
+	record = state.records[record.RecordID]
+	if record.Value != "challenge-token-2" {
+		t.Fatalf("record value after reconcile = %q", record.Value)
+	}
+	if record.Status != "1" {
+		t.Fatalf("record status after reconcile = %q", record.Status)
+	}
+	if record.Remark != dnsMgrACMERecordRemark {
+		t.Fatalf("record remark after reconcile = %q", record.Remark)
 	}
 }

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -19,6 +21,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"tailscale.com/tailcfg"
 )
 
 type funnelTestDialer struct{}
@@ -29,6 +33,19 @@ func (d *funnelTestDialer) DialContext(ctx context.Context, network, address str
 }
 
 func (d *funnelTestDialer) Close() error { return nil }
+
+type funnelIngressTestDialer struct{}
+
+func (d *funnelIngressTestDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+}
+
+func (d *funnelIngressTestDialer) Close() error { return nil }
 
 func TestMarkFunnelDomainVerifiedSetsDNSReady(t *testing.T) {
 	app := newFunnelTenantTestMirage(t)
@@ -349,6 +366,100 @@ func TestFunnelRuntimeProxiesTLSTerminatedTCP(t *testing.T) {
 	assertFunnelServiceActive(t, app, service)
 }
 
+func TestFunnelRuntimeProxiesOfficialIngressHTTP(t *testing.T) {
+	app := newFunnelTenantTestMirage(t)
+
+	sysCfg := &SysConfig{}
+	if err := app.db.First(sysCfg).Error; err != nil {
+		t.Fatalf("First(sysCfg): %v", err)
+	}
+	listenPort := freeFunnelTestPort(t)
+	sysCfg.FunnelCfg.DirectBindAddrs = StringList{"127.0.0.1"}
+	sysCfg.FunnelCfg.DirectBindPorts = FunnelPortList{80, listenPort}
+	if err := app.db.Save(sysCfg).Error; err != nil {
+		t.Fatalf("Save(sysCfg): %v", err)
+	}
+	app.cfg.FunnelCfg = sysCfg.FunnelCfg
+
+	machine := &Machine{}
+	if err := app.db.Preload("User").Preload("User.Organization").Where("hostname = ?", "tenant-machine").First(machine).Error; err != nil {
+		t.Fatalf("First(machine): %v", err)
+	}
+	domain := officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes)
+	peerAPIPort, stopPeerAPI := startFunnelPeerAPIServer(t, net.JoinHostPort(domain, strconv.Itoa(listenPort)), true)
+	defer stopPeerAPI()
+
+	now := time.Now().UTC()
+	hostInfo := machine.GetHostInfo()
+	hostInfo.IngressEnabled = true
+	hostInfo.Services = []tailcfg.Service{{
+		Proto: tailcfg.PeerAPI4,
+		Port:  uint16(peerAPIPort),
+	}}
+	machine.HostInfo = HostInfo(hostInfo)
+	machine.LastSeen = &now
+	if err := app.db.Save(machine).Error; err != nil {
+		t.Fatalf("Save(machine): %v", err)
+	}
+
+	cert := newFunnelTestCertificate(t, domain)
+	rt := newFunnelRuntime(app)
+	rt.newOrgDialer = func(ctx context.Context, orgID int64) (funnelOrgDialer, error) {
+		return &funnelIngressTestDialer{}, nil
+	}
+	rt.getCertFunc = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		return &cert, nil
+	}
+	app.setFunnelRuntime(rt)
+	defer app.setFunnelRuntime(nil)
+	if err := rt.start(); err != nil {
+		t.Fatalf("runtime.start(): %v", err)
+	}
+	defer rt.close()
+
+	rt.reload("test")
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				ServerName:         domain,
+				InsecureSkipVerify: true, //nolint:gosec
+				MinVersion:         tls.VersionTLS12,
+			},
+			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				_, port, err := net.SplitHostPort(address)
+				if err != nil {
+					return nil, err
+				}
+				var dialer net.Dialer
+				return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+			},
+			ForceAttemptHTTP2: false,
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s:%d/hello?x=1", domain, listenPort), nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest(): %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do(): %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(response): %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d, body = %s", resp.StatusCode, string(body))
+	}
+	if got, want := string(body), "path=/hello query=x=1 host="+domain+":"+strconv.Itoa(listenPort); got != want {
+		t.Fatalf("official ingress response = %q, want %q", got, want)
+	}
+}
+
 func freeFunnelTestPort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -390,6 +501,86 @@ func startFunnelTCPBackend(t *testing.T, prefix string) (string, int, func()) {
 	}()
 	return "127.0.0.1", ln.Addr().(*net.TCPAddr).Port, func() {
 		close(done)
+		_ = ln.Close()
+	}
+}
+
+func startFunnelPeerAPIServer(t *testing.T, expectedTarget string, backendTLS bool) (int, func()) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen(peerapi backend): %v", err)
+	}
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v0/ingress" {
+				http.NotFound(w, r)
+				return
+			}
+			if got := r.Header.Get("Tailscale-Ingress-Target"); got != expectedTarget {
+				http.Error(w, "unexpected ingress target: "+got, http.StatusBadRequest)
+				return
+			}
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+				return
+			}
+			conn, brw, err := hj.Hijack()
+			if err != nil {
+				t.Logf("peerapi hijack failed: %v", err)
+				return
+			}
+			defer conn.Close()
+			if _, err := io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\n\r\n"); err != nil {
+				t.Logf("peerapi write 101 failed: %v", err)
+				return
+			}
+
+			streamConn := net.Conn(conn)
+			streamReader := brw.Reader
+			if backendTLS {
+				host, _, err := net.SplitHostPort(expectedTarget)
+				if err != nil {
+					t.Logf("peerapi split target failed: %v", err)
+					return
+				}
+				cert := newFunnelTestCertificate(t, host)
+				tlsConn := tls.Server(&funnelBufferedConn{Conn: conn, reader: brw.Reader}, &tls.Config{
+					MinVersion:   tls.VersionTLS12,
+					Certificates: []tls.Certificate{cert},
+				})
+				if err := tlsConn.Handshake(); err != nil {
+					t.Logf("peerapi tunneled tls handshake failed: %v", err)
+					return
+				}
+				streamConn = tlsConn
+				streamReader = bufio.NewReader(tlsConn)
+			}
+
+			req, err := http.ReadRequest(streamReader)
+			if err != nil {
+				t.Logf("peerapi read tunneled request failed: %v", err)
+				return
+			}
+			defer req.Body.Close()
+
+			respBody := fmt.Sprintf("path=%s query=%s host=%s", req.URL.Path, req.URL.RawQuery, req.Host)
+			if _, err := io.WriteString(streamConn, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "+strconv.Itoa(len(respBody))+"\r\n\r\n"+respBody); err != nil {
+				t.Logf("peerapi write tunneled response failed: %v", err)
+			}
+		}),
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			t.Logf("peerapi backend stopped: %v", err)
+		}
+	}()
+
+	return ln.Addr().(*net.TCPAddr).Port, func() {
+		_ = srv.Close()
 		_ = ln.Close()
 	}
 }

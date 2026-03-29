@@ -98,6 +98,8 @@ func (h *Mirage) NoiseUpgradeHandler(
 	router.HandleFunc("/machine/register", noiseServer.NoiseRegistrationHandler).
 		Methods(http.MethodPost)
 	router.HandleFunc("/machine/map", noiseServer.NoisePollNetMapHandler)
+	router.HandleFunc("/machine/set-dns", noiseServer.NoiseSetDNSHandler).Methods(http.MethodPost)
+	router.HandleFunc("/machine/feature/query", noiseServer.NoiseQueryFeatureHandler).Methods(http.MethodPost)
 
 	router.HandleFunc("/navi/nodes", noiseServer.NoiseNaviPollNodesListHandler).Methods(http.MethodPost)
 	router.HandleFunc("/navi/funnel", noiseServer.NoiseNaviPullFunnelHandler).Methods(http.MethodPost)

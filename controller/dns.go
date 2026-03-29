@@ -217,7 +217,33 @@ func getMapResponseDNSConfig(
 		dnsConfig = dnsConfigOrig
 	}*/
 
+	if certDomains := officialCertDomainsForMachine(&machine, ipPrefixes); len(certDomains) > 0 {
+		dnsConfig.CertDomains = appendUniqueStrings(dnsConfig.CertDomains, certDomains...)
+	}
+
 	addNextDNSMetadata(dnsConfig.Resolvers, machine)
 
 	return dnsConfig
+}
+
+func appendUniqueStrings(values []string, items ...string) []string {
+	if len(items) == 0 {
+		return values
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		values = append(values, item)
+	}
+	return values
 }

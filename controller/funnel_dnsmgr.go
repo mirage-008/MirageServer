@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,12 +21,18 @@ import (
 const (
 	dnsMgrManagedRecordType   = "CNAME"
 	dnsMgrManagedRecordRemark = "Mirage Funnel managed"
+	dnsMgrACMERecordType      = "TXT"
+	dnsMgrACMERecordRemark    = "Mirage Funnel ACME"
 )
 
 type managedFunnelDNSProvider interface {
 	EnsureManagedDomain(ctx context.Context, fqdn string) error
 	DeleteManagedDomain(ctx context.Context, fqdn string) error
 	LookupManagedDomain(ctx context.Context, fqdn string) (managedFunnelDNSLookupResult, error)
+}
+
+type managedFunnelDNSChallengeProvider interface {
+	UpsertTXTRecord(ctx context.Context, fqdn, value string) error
 }
 
 type dnsMgrManagedFunnelDNSProvider struct {
@@ -116,6 +123,8 @@ type dnsMgrResolvedZone struct {
 	Line string
 	TTL  int
 }
+
+var errDNSMgrZoneNotFound = errors.New("dnsmgr zone not found")
 
 func newManagedFunnelDNSProvider(cfg FunnelPlatformConfig) (managedFunnelDNSProvider, error) {
 	switch strings.ToLower(strings.TrimSpace(cfg.ManagedDNSProvider)) {
@@ -311,22 +320,53 @@ func (p *dnsMgrManagedFunnelDNSProvider) LookupManagedDomain(ctx context.Context
 }
 
 func (p *dnsMgrManagedFunnelDNSProvider) resolveZone(ctx context.Context) (dnsMgrResolvedZone, error) {
+	return p.resolveZoneByName(ctx, p.zone)
+}
+
+func (p *dnsMgrManagedFunnelDNSProvider) resolveZoneForDomain(ctx context.Context, fqdn string) (dnsMgrResolvedZone, error) {
+	fqdn = normalizeManagedFQDN(fqdn)
+	if fqdn == "" {
+		return dnsMgrResolvedZone{}, fmt.Errorf("invalid managed funnel domain")
+	}
+	labels := strings.Split(fqdn, ".")
+	if len(labels) < 2 {
+		return dnsMgrResolvedZone{}, fmt.Errorf("dnsmgr 无法为 %s 解析域名区", fqdn)
+	}
+	for start := 0; start <= len(labels)-2; start++ {
+		zoneName := strings.Join(labels[start:], ".")
+		zone, err := p.resolveZoneByName(ctx, zoneName)
+		if err == nil {
+			return zone, nil
+		}
+		if errors.Is(err, errDNSMgrZoneNotFound) {
+			continue
+		}
+		return dnsMgrResolvedZone{}, err
+	}
+	return dnsMgrResolvedZone{}, fmt.Errorf("dnsmgr 未找到匹配域名区 %s", fqdn)
+}
+
+func (p *dnsMgrManagedFunnelDNSProvider) resolveZoneByName(ctx context.Context, zoneName string) (dnsMgrResolvedZone, error) {
+	zoneName = normalizeManagedFQDN(zoneName)
+	if zoneName == "" {
+		return dnsMgrResolvedZone{}, fmt.Errorf("invalid managed funnel domain")
+	}
 	resp := dnsMgrDomainListResponse{}
 	if err := p.postForm(ctx, "/api/domain", url.Values{
-		"kw":    []string{p.zone},
+		"kw":    []string{zoneName},
 		"limit": []string{"100"},
 	}, &resp); err != nil {
 		return dnsMgrResolvedZone{}, err
 	}
 	var zoneID int64
 	for _, row := range resp.Rows {
-		if strings.EqualFold(strings.TrimSpace(row.Name), p.zone) {
+		if strings.EqualFold(strings.TrimSpace(row.Name), zoneName) {
 			zoneID = row.ID
 			break
 		}
 	}
 	if zoneID == 0 {
-		return dnsMgrResolvedZone{}, fmt.Errorf("dnsmgr 未找到托管域名区 %s", p.zone)
+		return dnsMgrResolvedZone{}, fmt.Errorf("%w: %s", errDNSMgrZoneNotFound, zoneName)
 	}
 
 	infoResp := dnsMgrDomainInfoResponse{}
@@ -356,27 +396,35 @@ func (p *dnsMgrManagedFunnelDNSProvider) listRecords(ctx context.Context, zoneID
 }
 
 func (p *dnsMgrManagedFunnelDNSProvider) addRecord(ctx context.Context, zone dnsMgrResolvedZone, recordName, value string) error {
+	return p.addTypedRecord(ctx, zone, recordName, dnsMgrManagedRecordType, value, dnsMgrManagedRecordRemark)
+}
+
+func (p *dnsMgrManagedFunnelDNSProvider) addTypedRecord(ctx context.Context, zone dnsMgrResolvedZone, recordName, recordType, value, remark string) error {
 	resp := dnsMgrMutationResponse{}
 	return p.postForm(ctx, fmt.Sprintf("/api/record/add/%d", zone.ID), url.Values{
 		"name":   []string{recordName},
-		"type":   []string{dnsMgrManagedRecordType},
+		"type":   []string{recordType},
 		"value":  []string{value},
 		"line":   []string{zone.Line},
 		"ttl":    []string{strconv.Itoa(zone.TTL)},
-		"remark": []string{dnsMgrManagedRecordRemark},
+		"remark": []string{remark},
 	}, &resp)
 }
 
 func (p *dnsMgrManagedFunnelDNSProvider) updateRecord(ctx context.Context, zone dnsMgrResolvedZone, recordID, recordName, value string) error {
+	return p.updateTypedRecord(ctx, zone, recordID, recordName, dnsMgrManagedRecordType, value, dnsMgrManagedRecordRemark)
+}
+
+func (p *dnsMgrManagedFunnelDNSProvider) updateTypedRecord(ctx context.Context, zone dnsMgrResolvedZone, recordID, recordName, recordType, value, remark string) error {
 	resp := dnsMgrMutationResponse{}
 	return p.postForm(ctx, fmt.Sprintf("/api/record/update/%d", zone.ID), url.Values{
 		"recordid": []string{recordID},
 		"name":     []string{recordName},
-		"type":     []string{dnsMgrManagedRecordType},
+		"type":     []string{recordType},
 		"value":    []string{value},
 		"line":     []string{zone.Line},
 		"ttl":      []string{strconv.Itoa(zone.TTL)},
-		"remark":   []string{dnsMgrManagedRecordRemark},
+		"remark":   []string{remark},
 	}, &resp)
 }
 
@@ -441,8 +489,8 @@ func dnsMgrAPISign(uid int64, timestamp int64, apiKey string) string {
 }
 
 func dnsMgrRecordNameForDomain(fqdn, zone string) (string, error) {
-	fqdn = normalizeFunnelBaseDomain(fqdn)
-	zone = normalizeFunnelBaseDomain(zone)
+	fqdn = normalizeManagedFQDN(fqdn)
+	zone = normalizeManagedFQDN(zone)
 	if fqdn == "" || zone == "" {
 		return "", fmt.Errorf("invalid managed funnel domain")
 	}
@@ -459,6 +507,76 @@ func dnsMgrRecordNameForDomain(fqdn, zone string) (string, error) {
 		return "@", nil
 	}
 	return recordName, nil
+}
+
+func normalizeManagedFQDN(raw string) string {
+	return strings.TrimSuffix(normalizeFunnelBaseDomain(raw), ".")
+}
+
+func (p *dnsMgrManagedFunnelDNSProvider) UpsertTXTRecord(ctx context.Context, fqdn, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("empty txt value")
+	}
+	zone, err := p.resolveZoneForDomain(ctx, fqdn)
+	if err != nil {
+		return err
+	}
+	recordName, err := dnsMgrRecordNameForDomain(fqdn, zone.Name)
+	if err != nil {
+		return err
+	}
+	records, err := p.listRecords(ctx, zone.ID, recordName)
+	if err != nil {
+		return err
+	}
+
+	var (
+		conflictingType string
+		primary         *dnsMgrRecordItem
+		duplicates      []dnsMgrRecordItem
+	)
+	for _, record := range records {
+		if !strings.EqualFold(strings.TrimSpace(record.Name), recordName) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(record.Type), dnsMgrACMERecordType) {
+			conflictingType = strings.TrimSpace(record.Type)
+			break
+		}
+		rec := record
+		if primary == nil {
+			primary = &rec
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(rec.Value), strings.TrimSpace(value)) && !strings.EqualFold(strings.TrimSpace(primary.Value), strings.TrimSpace(value)) {
+			duplicates = append(duplicates, *primary)
+			primary = &rec
+			continue
+		}
+		duplicates = append(duplicates, rec)
+	}
+	if conflictingType != "" {
+		return fmt.Errorf("acme dns 记录冲突: %s 已存在 %s 记录", fqdn, conflictingType)
+	}
+	if primary == nil {
+		return p.addTypedRecord(ctx, zone, recordName, dnsMgrACMERecordType, value, dnsMgrACMERecordRemark)
+	}
+	if !strings.EqualFold(strings.TrimSpace(primary.Value), strings.TrimSpace(value)) || strings.TrimSpace(primary.Remark) != dnsMgrACMERecordRemark {
+		if err := p.updateTypedRecord(ctx, zone, primary.RecordID, recordName, dnsMgrACMERecordType, value, dnsMgrACMERecordRemark); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(primary.Status) != "1" {
+		if err := p.setRecordStatus(ctx, zone.ID, primary.RecordID, "1"); err != nil {
+			return err
+		}
+	}
+	for _, duplicate := range duplicates {
+		if err := p.deleteRecord(ctx, zone.ID, duplicate.RecordID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func dnsMgrDefaultRecordLine(lines []dnsMgrRecordLine) string {
