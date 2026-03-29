@@ -56,7 +56,15 @@ func officialFunnelPortCapability(cfg FunnelPlatformConfig) (tailcfg.NodeCapabil
 	return tailcfg.NodeCapability(fmt.Sprintf("%s?ports=%s", tailcfg.CapabilityFunnelPorts, strings.Join(parts, ","))), true
 }
 
-func machineWantsOfficialFunnel(machine *Machine) bool {
+func machineNeedsOfficialFunnelWiring(machine *Machine) bool {
+	if machine == nil {
+		return false
+	}
+	hostInfo := machine.GetHostInfo()
+	return hostInfo.IngressEnabled || hostInfo.WireIngress
+}
+
+func machineHasOfficialFunnelIngress(machine *Machine) bool {
 	if machine == nil {
 		return false
 	}
@@ -145,7 +153,7 @@ func machineAddressPrefixes(machine *Machine) []netip.Prefix {
 }
 
 func (h *Mirage) officialFunnelIngressRulesForMachine(machine *Machine) []tailcfg.FilterRule {
-	if h == nil || machine == nil || !machineWantsOfficialFunnel(machine) {
+	if h == nil || machine == nil || !machineHasOfficialFunnelIngress(machine) {
 		return nil
 	}
 	if _, ok := officialFunnelPortCapability(h.cfg.FunnelCfg); !ok {

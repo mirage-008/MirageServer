@@ -159,6 +159,7 @@ type funnelRuntime struct {
 	certManager *autocert.Manager
 	getCertFunc func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
+	resolveManagedDNSProvider func() (managedFunnelDNSProvider, error)
 	newOrgDialer func(ctx context.Context, orgID int64) (funnelOrgDialer, error)
 
 	wg sync.WaitGroup
@@ -176,6 +177,7 @@ func newFunnelRuntime(app *Mirage) *funnelRuntime {
 		orgDialers:   make(map[int64]funnelOrgDialer),
 		serviceLogs:  make(map[int64][]funnelLogEntry),
 	}
+	rt.resolveManagedDNSProvider = app.currentManagedFunnelDNSProvider
 	cacheDir := AbsolutePathFromConfigPath(filepath.Join(funnelRuntimeStateDir, "autocert"))
 	if cacheDir != "" {
 		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
@@ -622,8 +624,58 @@ func (rt *funnelRuntime) buildSnapshot() (*funnelRuntimeSnapshot, FunnelPlatform
 	if err := rt.appendOfficialIngressRoutes(snapshot, cfg, seenRouteKeys, portFamilies); err != nil {
 		return nil, FunnelPlatformConfig{}, err
 	}
+	if err := rt.ensureOfficialIngressDNS(); err != nil {
+		return nil, FunnelPlatformConfig{}, err
+	}
 
 	return snapshot, cfg, nil
+}
+
+func (rt *funnelRuntime) ensureOfficialIngressDNS() error {
+	if rt == nil || rt.resolveManagedDNSProvider == nil {
+		return nil
+	}
+
+	provider, err := rt.resolveManagedDNSProvider()
+	if err != nil {
+		return err
+	}
+	if provider == nil {
+		return nil
+	}
+
+	machines, err := rt.app.ListMachines()
+	if err != nil {
+		return err
+	}
+	if len(machines) == 0 {
+		return nil
+	}
+
+	ensured := make(map[string]struct{}, len(machines))
+	for i := range machines {
+		machine := &machines[i]
+		if !machineNeedsOfficialFunnelWiring(machine) {
+			continue
+		}
+		domain := strings.TrimSuffix(officialFunnelDomainForMachine(machine, rt.app.cfg.IPPrefixes), ".")
+		if domain == "" || !strings.Contains(domain, ".") {
+			continue
+		}
+		if _, ok := ensured[domain]; ok {
+			continue
+		}
+		if err := provider.EnsureManagedDomain(rt.ctx, domain); err != nil {
+			if errors.Is(err, errDNSMgrZoneNotFound) {
+				log.Debug().Str("domain", domain).Msg("official funnel domain is outside managed dns zones; skipping public dns prewire")
+				continue
+			}
+			return err
+		}
+		ensured[domain] = struct{}{}
+	}
+
+	return nil
 }
 
 func funnelPortFamilyForProto(proto string) (funnelPortFamily, bool) {
@@ -671,7 +723,7 @@ func (rt *funnelRuntime) appendOfficialIngressRoutes(snapshot *funnelRuntimeSnap
 
 	for i := range machines {
 		machine := machines[i]
-		if !machine.isOnline() || !machineWantsOfficialFunnel(&machine) {
+		if !machine.isOnline() || !machineHasOfficialFunnelIngress(&machine) {
 			continue
 		}
 

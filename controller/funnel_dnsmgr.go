@@ -160,7 +160,7 @@ func buildManagedFunnelDomainTarget(cfg FunnelPlatformConfig) string {
 }
 
 func (p *dnsMgrManagedFunnelDNSProvider) EnsureManagedDomain(ctx context.Context, fqdn string) error {
-	zone, err := p.resolveZone(ctx)
+	zone, err := p.resolveZoneForDomain(ctx, fqdn)
 	if err != nil {
 		return err
 	}
@@ -217,7 +217,7 @@ func (p *dnsMgrManagedFunnelDNSProvider) EnsureManagedDomain(ctx context.Context
 }
 
 func (p *dnsMgrManagedFunnelDNSProvider) DeleteManagedDomain(ctx context.Context, fqdn string) error {
-	zone, err := p.resolveZone(ctx)
+	zone, err := p.resolveZoneForDomain(ctx, fqdn)
 	if err != nil {
 		return err
 	}
@@ -247,7 +247,7 @@ func (p *dnsMgrManagedFunnelDNSProvider) DeleteManagedDomain(ctx context.Context
 }
 
 func (p *dnsMgrManagedFunnelDNSProvider) LookupManagedDomain(ctx context.Context, fqdn string) (managedFunnelDNSLookupResult, error) {
-	zone, err := p.resolveZone(ctx)
+	zone, err := p.resolveZoneForDomain(ctx, fqdn)
 	if err != nil {
 		return managedFunnelDNSLookupResult{}, err
 	}

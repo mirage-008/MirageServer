@@ -415,3 +415,38 @@ func TestDNSMgrManagedFunnelDNSProviderUpsertTXTRecord(t *testing.T) {
 		t.Fatalf("record remark after reconcile = %q", record.Remark)
 	}
 }
+
+func TestDNSMgrManagedFunnelDNSProviderResolvesManagedZoneFromDomain(t *testing.T) {
+	t.Parallel()
+
+	state, server := newDNSMgrTestServer(t)
+	state.zoneName = "tenant-org.mira.test"
+	defer server.Close()
+
+	provider, err := newManagedFunnelDNSProvider(FunnelPlatformConfig{
+		ManagedBaseDomain:    defaultFunnelDNSMgrBaseDomain,
+		ManagedDNSProvider:   FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSAPIBaseURL: server.URL,
+		ManagedDNSUID:        1000,
+		ManagedDNSAPIKey:     "secret",
+	})
+	if err != nil {
+		t.Fatalf("newManagedFunnelDNSProvider(): %v", err)
+	}
+
+	fqdn := "tenant-machine.tenant-org.mira.test"
+	if err := provider.EnsureManagedDomain(context.Background(), fqdn); err != nil {
+		t.Fatalf("EnsureManagedDomain(): %v", err)
+	}
+	if len(state.records) != 1 {
+		t.Fatalf("record count = %d, want 1", len(state.records))
+	}
+	for _, record := range state.records {
+		if record.Domain != state.zoneName {
+			t.Fatalf("record domain = %q, want %q", record.Domain, state.zoneName)
+		}
+		if record.Name != "tenant-machine" {
+			t.Fatalf("record name = %q, want %q", record.Name, "tenant-machine")
+		}
+	}
+}

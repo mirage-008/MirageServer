@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -457,6 +458,42 @@ func TestFunnelRuntimeProxiesOfficialIngressHTTP(t *testing.T) {
 	}
 	if got, want := string(body), "path=/hello query=x=1 host="+domain+":"+strconv.Itoa(listenPort); got != want {
 		t.Fatalf("official ingress response = %q, want %q", got, want)
+	}
+}
+
+func TestFunnelRuntimePrewiresOfficialIngressDNSForWireIntent(t *testing.T) {
+	app := newFunnelTenantTestMirage(t)
+
+	machine := &Machine{}
+	if err := app.db.Preload("User").Preload("User.Organization").Where("hostname = ?", "tenant-machine").First(machine).Error; err != nil {
+		t.Fatalf("First(machine): %v", err)
+	}
+
+	hostInfo := machine.GetHostInfo()
+	hostInfo.WireIngress = true
+	hostInfo.IngressEnabled = false
+	machine.HostInfo = HostInfo(hostInfo)
+	if err := app.db.Save(machine).Error; err != nil {
+		t.Fatalf("Save(machine): %v", err)
+	}
+
+	fakeDNS := &fakeManagedFunnelDNSProvider{}
+	rt := newFunnelRuntime(app)
+	rt.resolveManagedDNSProvider = func() (managedFunnelDNSProvider, error) {
+		return fakeDNS, nil
+	}
+
+	snapshot, _, err := rt.buildSnapshot()
+	if err != nil {
+		t.Fatalf("buildSnapshot(): %v", err)
+	}
+	if len(snapshot.TLSPorts) != 0 {
+		t.Fatalf("expected no active official ingress routes for wire-only funnel intent")
+	}
+
+	wantDomain := strings.TrimSuffix(officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes), ".")
+	if len(fakeDNS.ensured) != 1 || fakeDNS.ensured[0] != wantDomain {
+		t.Fatalf("ensured domains = %#v, want [%q]", fakeDNS.ensured, wantDomain)
 	}
 }
 
