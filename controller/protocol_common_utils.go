@@ -170,6 +170,7 @@ func peerNodesForMachine(h *Mirage, viewer *Machine, peers Machines) ([]*tailcfg
 			continue
 		}
 		applySharedPeerMasquerade(viewer, peer, node)
+		applySelectedExitNodeProjection(viewer, peer, node)
 	}
 
 	return nodes, nil

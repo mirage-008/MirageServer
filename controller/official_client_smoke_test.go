@@ -1025,6 +1025,124 @@ func TestOfficialClientExitNodeSmoke(t *testing.T) {
 	t.Logf("exit-node proxy egress succeeded via %s: %s", clientNode.httpProxyAddr, strings.TrimSpace(httpOutput))
 }
 
+func TestOfficialClientExitNodeSelectedPeerDropsSubnetRoutesSmoke(t *testing.T) {
+	requireSmokeEnv(t)
+
+	tempDir := t.TempDir()
+	server := startSmokeServer(t, tempDir)
+
+	user, err := server.app.CreateUser("smoke", "Smoke Test", "smoke-org", "Mirage")
+	if err != nil {
+		t.Fatalf("CreateUser(): %v", err)
+	}
+
+	org, err := server.app.GetOrgnaizationByID(user.OrganizationID)
+	if err != nil {
+		t.Fatalf("GetOrgnaizationByID(): %v", err)
+	}
+	if org.AclPolicy == nil {
+		t.Fatal("expected organization ACL policy to be initialized")
+	}
+	org.AclPolicy.ACLs = []ACL{{
+		Action:       "accept",
+		Sources:      []string{"*"},
+		Destinations: []string{"*:*"},
+	}}
+	if org.AclPolicy.AutoApprovers.Routes == nil {
+		org.AclPolicy.AutoApprovers.Routes = make(map[string][]string)
+	}
+	org.AclPolicy.AutoApprovers.Routes[sharedSmokeSubnetRoute] = []string{user.Name}
+	org.AclPolicy.AutoApprovers.ExitNode = []string{user.Name}
+	if err := server.app.SaveACLPolicyOfOrg(org); err != nil {
+		t.Fatalf("SaveACLPolicyOfOrg(): %v", err)
+	}
+
+	expiration := time.Now().Add(2 * time.Hour)
+	exitAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(exit): %v", err)
+	}
+	clientAuthKey, err := server.app.CreatePreAuthKey(user, false, false, &expiration, nil)
+	if err != nil {
+		t.Fatalf("CreatePreAuthKey(client): %v", err)
+	}
+
+	exitNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "en"),
+		server.serverAddr,
+		exitAuthKey.Key,
+		"exit-node-routes",
+		"--advertise-routes="+sharedSmokeSubnetRoute,
+		"--advertise-exit-node",
+	)
+	clientNode := startSmokeNode(
+		t,
+		filepath.Join(tempDir, "ec"),
+		server.serverAddr,
+		clientAuthKey.Key,
+		"exit-client-routes",
+		"--accept-routes=true",
+	)
+
+	_ = waitForNodeRunning(t, exitNode.socketPath)
+	_ = waitForNodeRunning(t, clientNode.socketPath)
+	_ = waitForMachineWithRouteState(t, server.app, exitNode.hostname, sharedSmokeSubnetRoute, true)
+	_ = waitForMachineWithRouteState(t, server.app, exitNode.hostname, ExitRouteV4.String(), true)
+	_ = waitForMachineWithRouteState(t, server.app, exitNode.hostname, ExitRouteV6.String(), true)
+
+	preSelectPeer := waitForPeerCondition(t, clientNode.socketPath, exitNode.hostname, func(peer smokePeerStatus, status smokeStatus) error {
+		if !peer.ExitNodeOption {
+			return fmt.Errorf("peer %s missing exit-node option before selection: %+v", exitNode.hostname, peer)
+		}
+		if !containsString(peer.AllowedIPs, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("peer %s missing subnet route %s before exit selection: %+v", exitNode.hostname, sharedSmokeSubnetRoute, peer)
+		}
+		if !containsString(peer.PrimaryRoutes, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("peer %s missing primary subnet route %s before exit selection: %+v", exitNode.hostname, sharedSmokeSubnetRoute, peer)
+		}
+		_ = status
+		return nil
+	})
+
+	setOutput, err := runCommand(
+		t,
+		30*time.Second,
+		"tailscale",
+		"--socket", clientNode.socketPath,
+		"set",
+		"--exit-node="+exitNode.hostname,
+	)
+	if err != nil {
+		t.Fatalf("tailscale set --exit-node failed: %v\nstdout/stderr:\n%s", err, setOutput)
+	}
+
+	selectedPeer := waitForPeerCondition(t, clientNode.socketPath, exitNode.hostname, func(peer smokePeerStatus, status smokeStatus) error {
+		if !peer.ExitNode {
+			return fmt.Errorf("peer %s not selected as exit node yet: %+v", exitNode.hostname, peer)
+		}
+		if containsString(peer.AllowedIPs, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("selected exit peer %s should not retain subnet route %s in AllowedIPs: %+v", exitNode.hostname, sharedSmokeSubnetRoute, peer)
+		}
+		if containsString(peer.PrimaryRoutes, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("selected exit peer %s should not retain subnet route %s in PrimaryRoutes: %+v", exitNode.hostname, sharedSmokeSubnetRoute, peer)
+		}
+		if status.ExitNodeStatus == nil {
+			return fmt.Errorf("status missing ExitNodeStatus: %+v", status)
+		}
+		if status.ExitNodeStatus.ID != peer.ID {
+			return fmt.Errorf("exit node ID mismatch: status=%q peer=%q", status.ExitNodeStatus.ID, peer.ID)
+		}
+		return nil
+	})
+	if preSelectPeer.ID != selectedPeer.ID {
+		t.Fatalf("expected selected peer ID %q to match pre-select peer ID %q", selectedPeer.ID, preSelectPeer.ID)
+	}
+
+	httpOutput := smokeHTTPViaProxy(t, clientNode.httpProxyAddr)
+	t.Logf("exit-node+subnet peer still proxies internet after subnet trim via %s: %s", clientNode.httpProxyAddr, strings.TrimSpace(httpOutput))
+}
+
 func TestOfficialClientExitNodeRapidReconnectSmoke(t *testing.T) {
 	requireSmokeEnv(t)
 
@@ -1426,6 +1544,12 @@ func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
 		if !peer.ExitNode {
 			return fmt.Errorf("peer %s not selected as exit node yet: %+v", routerNode.hostname, peer)
 		}
+		if containsString(peer.AllowedIPs, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("selected shared exit peer %s should not retain subnet route %s in AllowedIPs: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
+		}
+		if containsString(peer.PrimaryRoutes, sharedSmokeSubnetRoute) {
+			return fmt.Errorf("selected shared exit peer %s should not retain subnet route %s in PrimaryRoutes: %+v", routerNode.hostname, sharedSmokeSubnetRoute, peer)
+		}
 		if status.ExitNodeStatus == nil {
 			return fmt.Errorf("status missing ExitNodeStatus: %+v", status)
 		}
@@ -1448,9 +1572,6 @@ func TestOfficialClientSharedPeerExitAndSubnetSmoke(t *testing.T) {
 
 	httpOutput := smokeHTTPViaProxy(t, clientNode.httpProxyAddr)
 	t.Logf("shared exit-node proxy egress succeeded via %s: %s", clientNode.httpProxyAddr, strings.TrimSpace(httpOutput))
-
-	routePing := waitForRoutePing(t, clientNode.socketPath, "192.168.1.1")
-	t.Logf("shared subnet route ping to 192.168.1.1 succeeded: %s", strings.TrimSpace(routePing))
 }
 
 func TestSmokePacketFilterRulesEmpty(t *testing.T) {

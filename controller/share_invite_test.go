@@ -1018,6 +1018,50 @@ func TestListShareeMachinesBySourceMachineIDPrefersActiveExitSelectedTargets(t *
 	}
 }
 
+func TestPeerNodesForMachineDropsSubnetRoutesFromSelectedExitPeer(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	user := createTestUser(t, app, "user@example.com", "User", "user-org", "Mirage")
+	exitNode := createTestMachine(t, app, user, "exit-node", "100.64.0.1")
+	client := createTestMachine(t, app, user, "client", "100.64.0.2")
+	exitNode.HostInfo = HostInfo{
+		Hostname:    exitNode.Hostname,
+		RoutableIPs: []netip.Prefix{mustPrefix(t, "10.10.0.0/24"), ExitRouteV4, ExitRouteV6},
+	}
+	client.HostInfo = HostInfo{
+		Hostname:   client.Hostname,
+		ExitNodeID: tailcfg.StableNodeID(strconv.FormatInt(exitNode.ID, Base10)),
+	}
+	if err := app.db.Save(exitNode).Error; err != nil {
+		t.Fatalf("Save(exitNode hostinfo): %v", err)
+	}
+	if err := app.db.Save(client).Error; err != nil {
+		t.Fatalf("Save(client hostinfo): %v", err)
+	}
+	createTestRoute(t, app, exitNode, "10.10.0.0/24", true, true)
+	createTestRoute(t, app, exitNode, "0.0.0.0/0", true, false)
+	createTestRoute(t, app, exitNode, "::/0", true, false)
+
+	nodes, err := peerNodesForMachine(app, client, Machines{*exitNode})
+	if err != nil {
+		t.Fatalf("peerNodesForMachine(): %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected one projected exit node, got %+v", nodes)
+	}
+	node := nodes[0]
+	if !containsPrefix(node.AllowedIPs, ExitRouteV4) || !containsPrefix(node.AllowedIPs, ExitRouteV6) {
+		t.Fatalf("expected selected exit peer to retain exit routes, got %v", node.AllowedIPs)
+	}
+	if containsPrefix(node.AllowedIPs, mustPrefix(t, "10.10.0.0/24")) {
+		t.Fatalf("expected selected exit peer to drop subnet route projection, got %v", node.AllowedIPs)
+	}
+	if len(node.PrimaryRoutes) != 0 {
+		t.Fatalf("expected selected exit peer to clear primary routes, got %v", node.PrimaryRoutes)
+	}
+}
+
 func TestListShareeMachinesBySourceMachineIDKeepsAllOnlineTargetsWithoutExitSelection(t *testing.T) {
 	t.Parallel()
 

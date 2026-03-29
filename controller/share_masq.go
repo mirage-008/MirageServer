@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"hash/fnv"
 	"net/netip"
+	"strconv"
 
 	"go4.org/netipx"
 	"tailscale.com/tailcfg"
@@ -165,4 +166,25 @@ func applySharedPeerMasquerade(viewer *Machine, peer Machine, node *tailcfg.Node
 			break
 		}
 	}
+}
+
+func applySelectedExitNodeProjection(viewer *Machine, peer Machine, node *tailcfg.Node) {
+	if viewer == nil || node == nil {
+		return
+	}
+	if viewer.GetHostInfo().ExitNodeID != tailcfg.StableNodeID(strconv.FormatInt(peer.ID, Base10)) {
+		return
+	}
+
+	filteredAllowed := make([]netip.Prefix, 0, len(node.AllowedIPs))
+	for _, prefix := range node.AllowedIPs {
+		switch {
+		case prefix.Bits() == 0:
+			filteredAllowed = append(filteredAllowed, prefix)
+		case prefix.Bits() == prefix.Addr().BitLen():
+			filteredAllowed = append(filteredAllowed, prefix)
+		}
+	}
+	node.AllowedIPs = filteredAllowed
+	node.PrimaryRoutes = nil
 }
