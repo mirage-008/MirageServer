@@ -137,6 +137,52 @@ func TestGenerateMapResponseAddsOfficialFunnelCertDomainWithoutMagicSearch(t *te
 	}
 }
 
+func TestGenerateMapResponseSkipsOfficialFunnelCapsWithoutPublicDomain(t *testing.T) {
+	app := newFunnelTenantTestMirage(t)
+
+	machines, err := app.ListMachinesByGivenName("tenant-machine")
+	if err != nil {
+		t.Fatalf("ListMachinesByGivenName(): %v", err)
+	}
+	if len(machines) != 1 {
+		t.Fatalf("tenant machine count = %d, want 1", len(machines))
+	}
+	machine, err := app.GetMachineByID(machines[0].ID)
+	if err != nil {
+		t.Fatalf("GetMachineByID(): %v", err)
+	}
+	machine.User.Organization.EnableMagic = false
+	machine.User.Organization.MagicDnsDomain = ""
+	if err := app.db.Save(&machine.User.Organization).Error; err != nil {
+		t.Fatalf("Save(organization): %v", err)
+	}
+
+	resp, err := app.generateMapResponse(tailcfg.MapRequest{
+		Hostinfo: &tailcfg.Hostinfo{
+			Hostname: machine.Hostname,
+			OS:       "linux",
+		},
+	}, machine, &mapResponseStreamState{})
+	if err != nil {
+		t.Fatalf("generateMapResponse(): %v", err)
+	}
+
+	if resp.Node.HasCap(tailcfg.CapabilityHTTPS) {
+		t.Fatalf("did not expect https capability without public domain, got %#v", resp.Node.CapMap)
+	}
+	if resp.Node.HasCap(tailcfg.NodeAttrFunnel) {
+		t.Fatalf("did not expect funnel capability without public domain, got %#v", resp.Node.CapMap)
+	}
+	for cap := range resp.Node.CapMap {
+		if strings.HasPrefix(string(cap), string(tailcfg.CapabilityFunnelPorts)+"?ports=") {
+			t.Fatalf("did not expect funnel-ports capability without public domain, got %q", cap)
+		}
+	}
+	if len(resp.DNSConfig.CertDomains) != 0 {
+		t.Fatalf("cert domains = %#v, want empty", resp.DNSConfig.CertDomains)
+	}
+}
+
 func TestApplyMapResponseDeltaInitialMapSendsFullPeers(t *testing.T) {
 	t.Parallel()
 

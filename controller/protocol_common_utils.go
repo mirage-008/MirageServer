@@ -360,16 +360,24 @@ func (h *Mirage) generateMapResponse(
 		resp.Node.CapMap[nodeAttrDisableAndroidBindToActiveNetwork] = []tailcfg.RawMessage{}
 		resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, nodeAttrDisableAndroidBindToActiveNetwork)
 	}
-	if funnelPortCap, ok := officialFunnelPortCapability(h.cfg.FunnelCfg); ok {
+	serveEnabled := machineCanUseOfficialServe(machine, h.cfg.IPPrefixes, h.cfg.FunnelCfg)
+	funnelEnabled := machineCanUseOfficialFunnel(machine, h.cfg.IPPrefixes, h.cfg.FunnelCfg)
+	if serveEnabled || funnelEnabled {
 		if resp.Node.CapMap == nil {
 			resp.Node.CapMap = tailcfg.NodeCapMap{}
 		}
-		resp.Node.CapMap[tailcfg.CapabilityHTTPS] = []tailcfg.RawMessage{}
-		resp.Node.CapMap[tailcfg.NodeAttrFunnel] = []tailcfg.RawMessage{}
-		resp.Node.CapMap[funnelPortCap] = []tailcfg.RawMessage{}
-		resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, tailcfg.CapabilityHTTPS)
-		resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, tailcfg.NodeAttrFunnel)
-		resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, funnelPortCap)
+		if serveEnabled {
+			resp.Node.CapMap[tailcfg.CapabilityHTTPS] = []tailcfg.RawMessage{}
+			resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, tailcfg.CapabilityHTTPS)
+		}
+		if funnelEnabled {
+			resp.Node.CapMap[tailcfg.NodeAttrFunnel] = []tailcfg.RawMessage{}
+			resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, tailcfg.NodeAttrFunnel)
+			if funnelPortCap, ok := officialFunnelPortCapability(h.cfg.FunnelCfg); ok {
+				resp.Node.CapMap[funnelPortCap] = []tailcfg.RawMessage{}
+				resp.Node.Capabilities = appendNodeCapabilityIfMissing(resp.Node.Capabilities, funnelPortCap)
+			}
+		}
 	}
 	if ingressRules := h.officialFunnelIngressRulesForMachine(machine); len(ingressRules) > 0 {
 		resp.PacketFilter = append(resp.PacketFilter, ingressRules...)

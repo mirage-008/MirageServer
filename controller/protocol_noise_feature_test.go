@@ -99,6 +99,67 @@ func TestNoiseQueryFeatureHandlerReturnsInstructionsWhenFunnelUnavailable(t *tes
 	}
 }
 
+func TestNoiseQueryFeatureHandlerReturnsInstructionsWhenNodeHasNoPublicDomain(t *testing.T) {
+	t.Parallel()
+
+	app := newFunnelTenantTestMirage(t)
+
+	machine := &Machine{}
+	if err := app.db.Where("hostname = ?", "tenant-machine").First(machine).Error; err != nil {
+		t.Fatalf("First(machine): %v", err)
+	}
+	user := &User{}
+	if err := app.db.First(user, machine.UserID).Error; err != nil {
+		t.Fatalf("First(user): %v", err)
+	}
+	org := &Organization{}
+	if err := app.db.First(org, user.OrganizationID).Error; err != nil {
+		t.Fatalf("First(organization): %v", err)
+	}
+	org.EnableMagic = false
+	org.MagicDnsDomain = ""
+	if err := app.db.Save(org).Error; err != nil {
+		t.Fatalf("Save(organization): %v", err)
+	}
+
+	machineKey, nodeKey := mustNoiseTestKeys(t, machine)
+	for _, feature := range []string{"serve", "funnel"} {
+		reqBody, err := json.Marshal(tailcfg.QueryFeatureRequest{
+			NodeKey: nodeKey,
+			Feature: feature,
+		})
+		if err != nil {
+			t.Fatalf("json.Marshal(%q): %v", feature, err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/machine/feature/query", bytes.NewReader(reqBody))
+		rec := httptest.NewRecorder()
+
+		ns := &noiseServer{
+			mirage:     app,
+			machineKey: machineKey,
+		}
+		ns.NoiseQueryFeatureHandler(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status code = %d, body = %s", feature, rec.Code, rec.Body.String())
+		}
+
+		var resp tailcfg.QueryFeatureResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("json.Decode(%q): %v", feature, err)
+		}
+		if resp.Complete {
+			t.Fatalf("%s Complete = true, want false; resp=%+v", feature, resp)
+		}
+		if resp.Text == "" {
+			t.Fatalf("%s expected explanatory text, got %+v", feature, resp)
+		}
+		if resp.ShouldWait {
+			t.Fatalf("%s ShouldWait = true, want false; resp=%+v", feature, resp)
+		}
+	}
+}
+
 func mustNoiseTestKeys(t *testing.T, machine *Machine) (key.MachinePublic, key.NodePublic) {
 	t.Helper()
 

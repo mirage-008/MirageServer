@@ -67,19 +67,31 @@ func (h *Mirage) queryFeatureResponseForMachine(machine *Machine, req *tailcfg.Q
 	feature := strings.ToLower(strings.TrimSpace(req.Feature))
 	switch feature {
 	case "serve":
-		if officialServeAvailable(h.cfg.FunnelCfg) {
+		if machineCanUseOfficialServe(machine, h.cfg.IPPrefixes, h.cfg.FunnelCfg) {
 			return &tailcfg.QueryFeatureResponse{Complete: true}, nil
 		}
+		if !officialServeAvailable(h.cfg.FunnelCfg) {
+			return &tailcfg.QueryFeatureResponse{
+				Text:       "Serve is not available on this Mirage control plane because HTTPS/Funnel public ports are not configured.",
+				ShouldWait: false,
+			}, nil
+		}
 		return &tailcfg.QueryFeatureResponse{
-			Text:       "Serve is not available on this Mirage control plane because HTTPS/Funnel public ports are not configured.",
+			Text:       "Serve is not available for this node because Mirage cannot derive a public HTTPS name for it yet.",
 			ShouldWait: false,
 		}, nil
 	case "funnel":
-		if officialFunnelAvailable(h.cfg.FunnelCfg) {
+		if machineCanUseOfficialFunnel(machine, h.cfg.IPPrefixes, h.cfg.FunnelCfg) {
 			return &tailcfg.QueryFeatureResponse{Complete: true}, nil
 		}
+		if !officialFunnelAvailable(h.cfg.FunnelCfg) {
+			return &tailcfg.QueryFeatureResponse{
+				Text:       "Funnel is not available on this Mirage control plane because no public Funnel ports are configured.",
+				ShouldWait: false,
+			}, nil
+		}
 		return &tailcfg.QueryFeatureResponse{
-			Text:       "Funnel is not available on this Mirage control plane because no public Funnel ports are configured.",
+			Text:       "Funnel is not available for this node because Mirage cannot derive a public Funnel name for it yet.",
 			ShouldWait: false,
 		}, nil
 	default:

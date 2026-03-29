@@ -38,6 +38,20 @@ func officialFunnelAvailable(cfg FunnelPlatformConfig) bool {
 	return ok
 }
 
+func machineCanUseOfficialServe(machine *Machine, ipPrefixes []netip.Prefix, cfg FunnelPlatformConfig) bool {
+	if machine == nil || !officialServeAvailable(cfg) {
+		return false
+	}
+	return len(officialCertDomainsForMachine(machine, ipPrefixes)) > 0
+}
+
+func machineCanUseOfficialFunnel(machine *Machine, ipPrefixes []netip.Prefix, cfg FunnelPlatformConfig) bool {
+	if machine == nil || !officialFunnelAvailable(cfg) {
+		return false
+	}
+	return len(officialCertDomainsForMachine(machine, ipPrefixes)) > 0
+}
+
 func officialFunnelPortCapability(cfg FunnelPlatformConfig) (tailcfg.NodeCapability, bool) {
 	ports := officialFunnelPorts(cfg)
 	if len(ports) == 0 {
