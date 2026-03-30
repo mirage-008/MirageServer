@@ -295,8 +295,19 @@ func (c *Cockpit) PostFunnelDomainVerify(w http.ResponseWriter, r *http.Request)
 				if rt := c.App.currentFunnelRuntime(); rt != nil {
 					if err := rt.requestManagedCertificate(domain.Domain); err == nil {
 						response["verificationMessage"] = "DNS 已就绪，已开始尝试签发证书"
+					} else {
+						challengeType := FunnelCertChallengeHTTP01
+						if rt.dns01EligibleForHost(domain.Domain) {
+							challengeType = FunnelCertChallengeDNS01
+						}
+						_ = rt.persistCertificateFailure(domain.Domain, challengeType, err)
+						response["verificationMessage"] = "DNS 已就绪，但证书任务未能启动：" + err.Error()
 					}
+				} else {
+					response["verificationMessage"] = "DNS 已就绪，但 Funnel 运行时未就绪，尚未开始签发证书"
 				}
+			} else {
+				response["verificationMessage"] = "DNS 已就绪，但当前实例未挂载 Funnel 运行时，尚未开始签发证书"
 			}
 		}
 	} else {

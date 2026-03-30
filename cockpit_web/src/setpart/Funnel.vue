@@ -68,6 +68,14 @@ function numericID(value) {
   return Math.trunc(parsed);
 }
 
+function stringID(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  const raw = String(value).trim();
+  return raw === "" ? "" : raw;
+}
+
 function joinList(value) {
   if (!Array.isArray(value) || value.length == 0) {
     return "";
@@ -291,8 +299,8 @@ function verifyDomain(domain) {
   verifyingDomainID.value = domain?.id || domain?.stableId || "";
   axios
     .post("/cockpit/api/funnel/domains/verify", {
-      id: numericID(domain?.id),
-      domainId: numericID(domain?.id),
+      id: stringID(domain?.id),
+      domainId: stringID(domain?.id),
       stableId: domain?.stableId,
       domain: domain?.domain,
     })
@@ -319,9 +327,9 @@ function renewCert(domain) {
   renewingDomainID.value = domain?.id || domain?.stableId || "";
   axios
     .post("/cockpit/api/funnel/certs/renew", {
-      id: numericID(domain?.certId || domain?.certID || domain?.id),
-      certId: numericID(domain?.certId || domain?.certID),
-      domainId: numericID(domain?.id),
+      id: stringID(domain?.certId || domain?.certID || domain?.id),
+      certId: stringID(domain?.certId || domain?.certID),
+      domainId: stringID(domain?.id),
       stableId: domain?.stableId,
       domain: domain?.domain,
     })

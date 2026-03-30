@@ -1620,11 +1620,20 @@ func (rt *funnelRuntime) requestManagedCertificate(host string) error {
 		return fmt.Errorf("当前域名还没有进入证书签发列表")
 	}
 
+	challengeType := FunnelCertChallengeHTTP01
+	if rt.dns01EligibleForHost(host) {
+		challengeType = FunnelCertChallengeDNS01
+	}
+	log.Info().
+		Str("host", host).
+		Str("challenge", challengeType).
+		Msg("queueing managed funnel certificate issuance")
+
 	go func() {
 		ctx, cancel := context.WithTimeout(rt.ctx, funnelManagedCertReqTimout)
 		defer cancel()
 
-		if persistErr := rt.markCertificatePending(host); persistErr != nil {
+		if persistErr := rt.markCertificatePending(host, challengeType); persistErr != nil {
 			log.Error().Err(persistErr).Str("host", host).Msg("failed to mark funnel certificate request pending")
 		}
 
@@ -1727,7 +1736,7 @@ func (rt *funnelRuntime) persistCertificateFailure(host, challengeType string, c
 	return rt.app.db.Save(domain).Error
 }
 
-func (rt *funnelRuntime) markCertificatePending(host string) error {
+func (rt *funnelRuntime) markCertificatePending(host, challengeType string) error {
 	host = normalizeFunnelBaseDomain(host)
 	if host == "" {
 		return fmt.Errorf("未指定证书域名")
@@ -1741,6 +1750,9 @@ func (rt *funnelRuntime) markCertificatePending(host string) error {
 		return err
 	}
 	funnelCert.CertStatus = FunnelCertStatusPending
+	if strings.TrimSpace(challengeType) != "" {
+		funnelCert.ChallengeType = challengeType
+	}
 	funnelCert.LastError = ""
 	if err := rt.app.db.Save(funnelCert).Error; err != nil {
 		return err
@@ -1770,8 +1782,10 @@ func (rt *funnelRuntime) obtainManagedCertificate(ctx context.Context, host stri
 
 	value, err, _ := rt.certIssueGroup.Do(host, func() (any, error) {
 		if rt.dns01EligibleForHost(host) {
+			log.Info().Str("host", host).Msg("using dnsmgr DNS-01 for funnel certificate issuance")
 			return rt.obtainManagedCertificateViaDNS(ctx, host)
 		}
+		log.Info().Str("host", host).Msg("using autocert HTTP-01/TLS-ALPN-01 for funnel certificate issuance")
 		cert, err := rt.certManager.GetCertificate(&tls.ClientHelloInfo{ServerName: host})
 		if err != nil {
 			return funnelManagedCertRequestResult{ChallengeType: FunnelCertChallengeHTTP01}, err

@@ -20,6 +20,7 @@ import (
 	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -297,6 +298,11 @@ func (rt *funnelRuntime) obtainManagedCertificateViaDNS(ctx context.Context, hos
 	}); err != nil {
 		return funnelManagedCertRequestResult{ChallengeType: FunnelCertChallengeDNS01}, err
 	}
+
+	log.Info().
+		Str("host", host).
+		Str("ca", clientCfg.CADirURL).
+		Msg("starting dnsmgr DNS-01 certificate flow")
 
 	cachedCert, certPath, keyPath, err := loadFunnelManagedCertificate(host)
 	if err != nil {
