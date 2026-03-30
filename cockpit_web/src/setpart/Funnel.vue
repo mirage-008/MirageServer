@@ -60,6 +60,14 @@ function normalizePortList(value) {
     });
 }
 
+function numericID(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return Math.trunc(parsed);
+}
+
 function joinList(value) {
   if (!Array.isArray(value) || value.length == 0) {
     return "";
@@ -283,8 +291,8 @@ function verifyDomain(domain) {
   verifyingDomainID.value = domain?.id || domain?.stableId || "";
   axios
     .post("/cockpit/api/funnel/domains/verify", {
-      id: domain?.id,
-      domainId: domain?.id,
+      id: numericID(domain?.id),
+      domainId: numericID(domain?.id),
       stableId: domain?.stableId,
       domain: domain?.domain,
     })
@@ -311,9 +319,9 @@ function renewCert(domain) {
   renewingDomainID.value = domain?.id || domain?.stableId || "";
   axios
     .post("/cockpit/api/funnel/certs/renew", {
-      id: domain?.certId || domain?.certID || domain?.id,
-      certId: domain?.certId || domain?.certID,
-      domainId: domain?.id,
+      id: numericID(domain?.certId || domain?.certID || domain?.id),
+      certId: numericID(domain?.certId || domain?.certID),
+      domainId: numericID(domain?.id),
       stableId: domain?.stableId,
       domain: domain?.domain,
     })
@@ -321,7 +329,8 @@ function renewCert(domain) {
       if (response.data["status"] != "success") {
         throw new Error(response.data["status"]?.substring(6) || "证书续期请求失败");
       }
-      toastMsg.value = "已提交证书续期请求";
+      const payload = unwrapData(response.data) || {};
+      toastMsg.value = payload["renewMessage"] || "已提交证书续期请求";
       toastShow.value = true;
       loadDomains().then().catch();
     })
@@ -688,7 +697,13 @@ onMounted(() => {
                   </div>
                 </td>
                 <td>{{ domain.orgName || domain.orgID || domain.orgId || "-" }}</td>
-                <td>{{ domain.status || "-" }}</td>
+                <td>
+                  <span :class="summaryTone(domain.summaryStatus)">
+                    {{ domain.summaryLabel || domain.status || "-" }}
+                  </span>
+                  <div class="text-xs text-gray-500 mt-2">{{ domain.summaryReason || "-" }}</div>
+                  <div v-if="domain.nextAction" class="text-xs text-gray-400 mt-1">下一步：{{ domain.nextAction }}</div>
+                </td>
                 <td>{{ domain.dnsStatus || domain.dns_status || "-" }}</td>
                 <td>{{ domain.certStatus || domain.cert_status || "-" }}</td>
                 <td>

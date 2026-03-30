@@ -1572,6 +1572,43 @@ func (rt *funnelRuntime) getFunnelCertificate(hello *tls.ClientHelloInfo) (*tls.
 	return cert, nil
 }
 
+func (rt *funnelRuntime) requestManagedCertificate(host string) error {
+	host = normalizeFunnelBaseDomain(host)
+	if host == "" {
+		return fmt.Errorf("未指定证书域名")
+	}
+
+	rt.mu.RLock()
+	closed := rt.closed
+	snapshot := rt.snapshot
+	allowed := false
+	if snapshot != nil {
+		_, allowed = snapshot.TLSHosts[host]
+	}
+	rt.mu.RUnlock()
+
+	if closed {
+		return fmt.Errorf("Funnel 运行时已关闭")
+	}
+	if snapshot == nil {
+		return fmt.Errorf("Funnel 运行时尚未完成加载，请稍后重试")
+	}
+	if !allowed {
+		return fmt.Errorf("当前域名还没有进入证书签发列表")
+	}
+
+	go func() {
+		if _, err := rt.getFunnelCertificate(&tls.ClientHelloInfo{ServerName: host}); err != nil {
+			if persistErr := rt.persistCertificateFailure(host, err); persistErr != nil {
+				log.Error().Err(persistErr).Str("host", host).Msg("failed to persist funnel certificate error")
+			}
+			log.Error().Err(err).Str("host", host).Msg("failed to trigger funnel certificate issuance")
+		}
+	}()
+
+	return nil
+}
+
 func (rt *funnelRuntime) noteIssuedCertificate(host string, cert *tls.Certificate) {
 	if cert == nil {
 		return
@@ -1618,6 +1655,33 @@ func (rt *funnelRuntime) persistIssuedCertificate(host string, cert *tls.Certifi
 	}
 	rt.requestReload("cert-ready")
 	return nil
+}
+
+func (rt *funnelRuntime) persistCertificateFailure(host string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	host = normalizeFunnelBaseDomain(host)
+	domain := &FunnelDomain{}
+	if err := rt.app.db.Where("domain = ?", host).First(domain).Error; err != nil {
+		return err
+	}
+	funnelCert := &FunnelCert{}
+	if err := rt.app.db.Where("domain_id = ?", domain.ID).First(funnelCert).Error; err != nil {
+		return err
+	}
+	message := strings.TrimSpace(cause.Error())
+	if message == "" {
+		message = "证书签发失败"
+	}
+	funnelCert.CertStatus = FunnelCertStatusPending
+	funnelCert.LastError = message
+	if err := rt.app.db.Save(funnelCert).Error; err != nil {
+		return err
+	}
+	domain.Status = FunnelDomainStatusPendingCert
+	domain.LastError = message
+	return rt.app.db.Save(domain).Error
 }
 
 func (rt *funnelRuntime) applyStatusOverlay(service *FunnelService, domain *FunnelDomain, cert *FunnelCert) {

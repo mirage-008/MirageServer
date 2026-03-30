@@ -98,3 +98,32 @@ func TestEffectiveFunnelIngressTargets(t *testing.T) {
 		t.Fatalf("expected 4 targets, got %d", len(targets))
 	}
 }
+
+func TestFunnelDomainSummaryExplainsUnsupportedManagedCertPorts(t *testing.T) {
+	t.Parallel()
+
+	cfg := FunnelPlatformConfig{
+		DefaultListenerMode: FunnelListenerModeDirect,
+		DirectBindPorts:     FunnelPortList{880, 4443},
+	}
+	domain := &FunnelDomain{
+		Domain:       "managed.example.test",
+		DomainType:   FunnelDomainTypeManaged,
+		Status:       FunnelDomainStatusPendingCert,
+		DNSStatus:    FunnelDNSStatusReady,
+		TLSMode:      FunnelTLSModePlatformManaged,
+		ListenerMode: FunnelListenerModeDirect,
+		EdgeMode:     FunnelEdgeModeServer,
+	}
+
+	summary := funnelDomainSummaryWithConfig(domain, &cfg, nil)
+	if summary["status"] != "error" {
+		t.Fatalf("status = %#v", summary["status"])
+	}
+	if summary["label"] != "证书受阻" {
+		t.Fatalf("label = %#v", summary["label"])
+	}
+	if got := summary["reason"].(string); got == "" || got == "DNS 已就绪，等待证书签发" {
+		t.Fatalf("reason = %#v", got)
+	}
+}

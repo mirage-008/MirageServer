@@ -72,13 +72,18 @@ func (h *Mirage) CAPIGetFunnelDomains(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	cfg, err := effectiveFunnelPlatformConfigFromDB(h.db, h.cfg.BaseDomain)
+	if err != nil {
+		h.doAPIResponse(w, "读取Funnel平台配置失败:"+err.Error(), nil)
+		return
+	}
 	domains, err := h.listFunnelDomainsByOrgID(user.OrganizationID)
 	if err != nil {
 		h.doAPIResponse(w, "读取Funnel域名失败:"+err.Error(), nil)
 		return
 	}
 	h.doAPIResponse(w, "", map[string]any{
-		"domains": funnelDomainsResponse(domains),
+		"domains": funnelDomainsResponseWithConfig(domains, &cfg, h.lookupTenantFunnelEdge),
 	})
 }
 
@@ -101,8 +106,13 @@ func (h *Mirage) CAPIPostFunnelDomains(w http.ResponseWriter, r *http.Request) {
 		h.doAPIResponse(w, "记录Funnel审计失败:"+err.Error(), nil)
 		return
 	}
+	cfg, cfgErr := effectiveFunnelPlatformConfigFromDB(h.db, h.cfg.BaseDomain)
+	if cfgErr != nil {
+		h.doAPIResponse(w, "读取Funnel平台配置失败:"+cfgErr.Error(), nil)
+		return
+	}
 	h.doAPIResponse(w, "", map[string]any{
-		"domain":                 serializeFunnelDomainResponse(domain),
+		"domain":                 funnelDomainToMapWithConfig(domain, &cfg, h.lookupTenantFunnelEdge(domain)),
 		"cert":                   serializeFunnelCertResponse(cert),
 		"validationInstructions": funnelDomainValidationInstructions(domain),
 	})
@@ -118,6 +128,12 @@ func (h *Mirage) CAPIVerifyFunnelDomain(w http.ResponseWriter, r *http.Request) 
 		h.doAPIResponse(w, err.Error(), nil)
 		return
 	}
+	cfg, cfgErr := effectiveFunnelPlatformConfigFromDB(h.db, h.cfg.BaseDomain)
+	if cfgErr != nil {
+		h.doAPIResponse(w, "读取Funnel平台配置失败:"+cfgErr.Error(), nil)
+		return
+	}
+	edge := h.lookupTenantFunnelEdge(domain)
 	response := funnelDomainWithVerifiedFlag(domain)
 	if domain.DomainType == FunnelDomainTypeManaged {
 		provider, err := h.currentManagedFunnelDNSProvider()
@@ -131,6 +147,15 @@ func (h *Mirage) CAPIVerifyFunnelDomain(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		response = funnelDomainVerificationResponse(domain, result.Ready, false, result.Message)
+		if result.Ready {
+			if certState := funnelManagedCertAutomationState(&cfg, domain, edge); certState != nil && !certState.Eligible {
+				response["verificationMessage"] = fmt.Sprintf("DNS 已就绪，但%s。%s", certState.Reason, certState.NextAction)
+			} else if rt := h.currentFunnelRuntime(); rt != nil {
+				if err := rt.requestManagedCertificate(domain.Domain); err == nil {
+					response["verificationMessage"] = "DNS 已就绪，已开始尝试签发证书"
+				}
+			}
+		}
 	} else {
 		if err := markFunnelDomainVerified(h.db, domain); err != nil {
 			h.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
@@ -142,6 +167,7 @@ func (h *Mirage) CAPIVerifyFunnelDomain(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.requestFunnelRuntimeReload()
+	response["domain"] = funnelDomainToMapWithConfig(domain, &cfg, edge)
 	h.doAPIResponse(w, "", response)
 }
 
@@ -758,7 +784,11 @@ func (h *Mirage) buildTenantFunnelServiceStatus(service *FunnelService) (map[str
 		h.applyRemoteEdgeProjection(service, domain, cert, edge)
 	}
 	applyFunnelDomainReadinessProjection(service, domain)
-	return funnelServiceStatusResponse(service, domain, cert, edge), nil
+	cfg, err := effectiveFunnelPlatformConfigFromDB(h.db, h.cfg.BaseDomain)
+	if err != nil {
+		return nil, err
+	}
+	return funnelServiceStatusResponseWithConfig(service, domain, cert, edge, &cfg), nil
 }
 
 func applyFunnelDomainReadinessProjection(service *FunnelService, domain *FunnelDomain) {

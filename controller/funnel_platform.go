@@ -43,13 +43,74 @@ type FunnelEdgeUpsertRequest struct {
 }
 
 type FunnelDomainVerifyRequest struct {
-	DomainID int64  `json:"domainId"`
-	Domain   string `json:"domain"`
+	ID       FunnelFlexibleID `json:"id"`
+	DomainID FunnelFlexibleID `json:"domainId"`
+	Domain   string           `json:"domain"`
+	StableID string           `json:"stableId"`
 }
 
 type FunnelCertRenewRequest struct {
-	DomainID int64 `json:"domainId"`
-	CertID   int64 `json:"certId"`
+	ID       FunnelFlexibleID `json:"id"`
+	DomainID FunnelFlexibleID `json:"domainId"`
+	CertID   FunnelFlexibleID `json:"certId"`
+	StableID string           `json:"stableId"`
+}
+
+type FunnelFlexibleID int64
+
+func (id *FunnelFlexibleID) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		*id = 0
+		return nil
+	}
+
+	if strings.HasPrefix(trimmed, "\"") {
+		var raw string
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			*id = 0
+			return nil
+		}
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid funnel id %q", raw)
+		}
+		*id = FunnelFlexibleID(parsed)
+		return nil
+	}
+
+	parsed, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid funnel id %q", trimmed)
+	}
+	*id = FunnelFlexibleID(parsed)
+	return nil
+}
+
+func (id FunnelFlexibleID) Int64() int64 {
+	return int64(id)
+}
+
+func (req FunnelDomainVerifyRequest) resolvedDomainID() int64 {
+	if req.DomainID.Int64() != 0 {
+		return req.DomainID.Int64()
+	}
+	return req.ID.Int64()
+}
+
+func (req FunnelCertRenewRequest) resolvedDomainID() int64 {
+	return req.DomainID.Int64()
+}
+
+func (req FunnelCertRenewRequest) resolvedCertID() int64 {
+	if req.CertID.Int64() != 0 {
+		return req.CertID.Int64()
+	}
+	return req.ID.Int64()
 }
 
 type FunnelEdgeSyncPayload struct {
@@ -613,38 +674,7 @@ func certActionPayload(cert *FunnelCert, extra map[string]any) map[string]any {
 }
 
 func funnelDomainToMap(domain *FunnelDomain) map[string]any {
-	if domain == nil {
-		return nil
-	}
-	summary := funnelDomainSummary(domain)
-	return map[string]any{
-		"id":                  strconv.FormatInt(domain.ID, 10),
-		"stableId":            domain.StableID,
-		"orgId":               strconv.FormatInt(domain.OrgID, 10),
-		"domain":              domain.Domain,
-		"domainType":          domain.DomainType,
-		"status":              domain.Status,
-		"dnsStatus":           domain.DNSStatus,
-		"tlsMode":             domain.TLSMode,
-		"listenerMode":        domain.ListenerMode,
-		"edgeMode":            domain.EdgeMode,
-		"edgeTargetId":        domain.EdgeTargetID,
-		"httpPort":            domain.HTTPPort,
-		"httpsPort":           domain.HTTPSPort,
-		"validationMethod":    domain.ValidationMethod,
-		"validationTarget":    domain.ValidationTarget,
-		"validationToken":     domain.ValidationToken,
-		"validationCheckedAt": domain.ValidationCheckedAt,
-		"certId":              nullableInt64ToString(domain.CertID),
-		"lastError":           domain.LastError,
-		"lastDnsError":        domain.LastDNSError,
-		"summaryStatus":       summary["status"],
-		"summaryLabel":        summary["label"],
-		"summaryReason":       summary["reason"],
-		"nextAction":          summary["nextAction"],
-		"createdAt":           domain.CreatedAt,
-		"updatedAt":           domain.UpdatedAt,
-	}
+	return funnelDomainToMapWithConfig(domain, nil, nil)
 }
 
 func funnelServiceToMap(service *FunnelService) map[string]any {
@@ -908,6 +938,16 @@ func funnelCertWithRenewDeferred(cert *FunnelCert) map[string]any {
 	})
 }
 
+func funnelCertRenewResponse(cert *FunnelCert, accepted bool, message string) map[string]any {
+	payload := certActionPayload(cert, map[string]any{
+		"renewAccepted": accepted,
+	})
+	if strings.TrimSpace(message) != "" {
+		payload["renewMessage"] = message
+	}
+	return payload
+}
+
 func funnelEdgeWithSyncDeferred(edge *FunnelEdge) map[string]any {
 	return map[string]any{
 		"edge":         funnelEdgeToMap(edge),
@@ -916,9 +956,17 @@ func funnelEdgeWithSyncDeferred(edge *FunnelEdge) map[string]any {
 }
 
 func funnelDomainsResponse(domains []FunnelDomain) []map[string]any {
+	return funnelDomainsResponseWithConfig(domains, nil, nil)
+}
+
+func funnelDomainsResponseWithConfig(domains []FunnelDomain, cfg *FunnelPlatformConfig, edgeResolver func(*FunnelDomain) *FunnelEdge) []map[string]any {
 	items := make([]map[string]any, 0, len(domains))
 	for i := range domains {
-		items = append(items, funnelDomainToMap(&domains[i]))
+		var edge *FunnelEdge
+		if edgeResolver != nil {
+			edge = edgeResolver(&domains[i])
+		}
+		items = append(items, funnelDomainToMapWithConfig(&domains[i], cfg, edge))
 	}
 	return items
 }
@@ -932,10 +980,14 @@ func funnelEdgesResponse(edges []FunnelEdge) []map[string]any {
 }
 
 func funnelServiceStatusResponse(service *FunnelService, domain *FunnelDomain, cert *FunnelCert, edge *FunnelEdge) map[string]any {
-	summary := funnelServiceSummary(service, domain, cert, edge)
+	return funnelServiceStatusResponseWithConfig(service, domain, cert, edge, nil)
+}
+
+func funnelServiceStatusResponseWithConfig(service *FunnelService, domain *FunnelDomain, cert *FunnelCert, edge *FunnelEdge, cfg *FunnelPlatformConfig) map[string]any {
+	summary := funnelServiceSummaryWithConfig(service, domain, cert, edge, cfg)
 	return map[string]any{
 		"service":        funnelServiceToMap(service),
-		"domain":         funnelDomainToMap(domain),
+		"domain":         funnelDomainToMapWithConfig(domain, cfg, edge),
 		"cert":           funnelCertToMap(cert),
 		"currentEdge":    funnelEdgeToMap(edge),
 		"lastError":      service.LastError,
@@ -948,6 +1000,10 @@ func funnelServiceStatusResponse(service *FunnelService, domain *FunnelDomain, c
 }
 
 func funnelDomainSummary(domain *FunnelDomain) map[string]any {
+	return funnelDomainSummaryWithConfig(domain, nil, nil)
+}
+
+func funnelDomainSummaryWithConfig(domain *FunnelDomain, cfg *FunnelPlatformConfig, edge *FunnelEdge) map[string]any {
 	if domain == nil {
 		return map[string]any{
 			"status":     "pending",
@@ -1005,6 +1061,14 @@ func funnelDomainSummary(domain *FunnelDomain) map[string]any {
 	}
 
 	if strings.TrimSpace(domain.Status) == FunnelDomainStatusPendingCert {
+		if certState := funnelManagedCertAutomationState(cfg, domain, edge); certState != nil && !certState.Eligible {
+			return map[string]any{
+				"status":     "error",
+				"label":      "证书受阻",
+				"reason":     certState.Reason,
+				"nextAction": certState.NextAction,
+			}
+		}
 		return map[string]any{
 			"status":     "pending",
 			"label":      "待证书",
@@ -1022,6 +1086,10 @@ func funnelDomainSummary(domain *FunnelDomain) map[string]any {
 }
 
 func funnelServiceSummary(service *FunnelService, domain *FunnelDomain, cert *FunnelCert, edge *FunnelEdge) map[string]any {
+	return funnelServiceSummaryWithConfig(service, domain, cert, edge, nil)
+}
+
+func funnelServiceSummaryWithConfig(service *FunnelService, domain *FunnelDomain, cert *FunnelCert, edge *FunnelEdge, cfg *FunnelPlatformConfig) map[string]any {
 	if service == nil {
 		return map[string]any{
 			"status":     "pending",
@@ -1041,7 +1109,7 @@ func funnelServiceSummary(service *FunnelService, domain *FunnelDomain, cert *Fu
 		}
 	}
 
-	domainSummary := funnelDomainSummary(domain)
+	domainSummary := funnelDomainSummaryWithConfig(domain, cfg, edge)
 	switch strings.TrimSpace(domain.Status) {
 	case FunnelDomainStatusDisabled:
 		return map[string]any{
@@ -1087,6 +1155,15 @@ func funnelServiceSummary(service *FunnelService, domain *FunnelDomain, cert *Fu
 			}
 		case FunnelCertStatusPending:
 			if requiresFunnelCert(service) {
+				if certState := funnelManagedCertAutomationState(cfg, domain, edge); certState != nil && !certState.Eligible {
+					return map[string]any{
+						"status":         "error",
+						"label":          "证书受阻",
+						"reason":         certState.Reason,
+						"nextAction":     certState.NextAction,
+						"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+					}
+				}
 				return map[string]any{
 					"status":         "pending",
 					"label":          "待证书",
@@ -1200,6 +1277,132 @@ func funnelServiceSummary(service *FunnelService, domain *FunnelDomain, cert *Fu
 	}
 }
 
+func funnelDomainToMapWithConfig(domain *FunnelDomain, cfg *FunnelPlatformConfig, edge *FunnelEdge) map[string]any {
+	if domain == nil {
+		return nil
+	}
+	summary := funnelDomainSummaryWithConfig(domain, cfg, edge)
+	return map[string]any{
+		"id":                  strconv.FormatInt(domain.ID, 10),
+		"stableId":            domain.StableID,
+		"orgId":               strconv.FormatInt(domain.OrgID, 10),
+		"domain":              domain.Domain,
+		"domainType":          domain.DomainType,
+		"status":              domain.Status,
+		"dnsStatus":           domain.DNSStatus,
+		"tlsMode":             domain.TLSMode,
+		"listenerMode":        domain.ListenerMode,
+		"edgeMode":            domain.EdgeMode,
+		"edgeTargetId":        domain.EdgeTargetID,
+		"httpPort":            domain.HTTPPort,
+		"httpsPort":           domain.HTTPSPort,
+		"validationMethod":    domain.ValidationMethod,
+		"validationTarget":    domain.ValidationTarget,
+		"validationToken":     domain.ValidationToken,
+		"validationCheckedAt": domain.ValidationCheckedAt,
+		"certId":              nullableInt64ToString(domain.CertID),
+		"lastError":           domain.LastError,
+		"lastDnsError":        domain.LastDNSError,
+		"summaryStatus":       summary["status"],
+		"summaryLabel":        summary["label"],
+		"summaryReason":       summary["reason"],
+		"nextAction":          summary["nextAction"],
+		"createdAt":           domain.CreatedAt,
+		"updatedAt":           domain.UpdatedAt,
+	}
+}
+
+func funnelManagedCertAutomationState(cfg *FunnelPlatformConfig, domain *FunnelDomain, edge *FunnelEdge) *struct {
+	Eligible   bool
+	Reason     string
+	NextAction string
+} {
+	if domain == nil || !strings.EqualFold(strings.TrimSpace(domain.TLSMode), FunnelTLSModePlatformManaged) {
+		return nil
+	}
+
+	if strings.EqualFold(strings.TrimSpace(domain.ListenerMode), FunnelListenerModeBehindProxy) {
+		return &struct {
+			Eligible   bool
+			Reason     string
+			NextAction string
+		}{
+			Eligible:   false,
+			Reason:     "当前是前置代理模式，平台托管证书不会自动签发",
+			NextAction: "改为直接监听 80/443，或在前置代理上自行配置证书",
+		}
+	}
+
+	ports := funnelManagedCertReachablePorts(cfg, edge)
+	if len(ports) == 0 {
+		return nil
+	}
+	if containsInt(ports, 80) || containsInt(ports, 443) {
+		return &struct {
+			Eligible   bool
+			Reason     string
+			NextAction string
+		}{Eligible: true}
+	}
+
+	return &struct {
+		Eligible   bool
+		Reason     string
+		NextAction string
+	}{
+		Eligible:   false,
+		Reason:     fmt.Sprintf("当前入口端口是 %s，平台托管证书需要公网 80 或 443", joinFunnelPortNumbers(ports)),
+		NextAction: "把入口改到 80/443，或改用自带证书/前置代理",
+	}
+}
+
+func funnelManagedCertReachablePorts(cfg *FunnelPlatformConfig, edge *FunnelEdge) []int {
+	if edge != nil && len(edge.PublicAddrs) > 0 {
+		ports := make([]int, 0, len(edge.PublicAddrs))
+		seen := make(map[int]struct{}, len(edge.PublicAddrs))
+		for _, addr := range edge.PublicAddrs {
+			if addr.Port <= 0 {
+				continue
+			}
+			if _, ok := seen[addr.Port]; ok {
+				continue
+			}
+			seen[addr.Port] = struct{}{}
+			ports = append(ports, addr.Port)
+		}
+		sort.Ints(ports)
+		return ports
+	}
+	if cfg == nil {
+		return nil
+	}
+	ports := make([]int, 0, len(cfg.DirectBindPorts))
+	seen := make(map[int]struct{}, len(cfg.DirectBindPorts))
+	for _, port := range cfg.DirectBindPorts {
+		if port <= 0 {
+			continue
+		}
+		if _, ok := seen[port]; ok {
+			continue
+		}
+		seen[port] = struct{}{}
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+	return ports
+}
+
+func joinFunnelPortNumbers(ports []int) string {
+	if len(ports) == 0 {
+		return "-"
+	}
+	items := make([]string, 0, len(ports))
+	for _, port := range ports {
+		items = append(items, strconv.Itoa(port))
+	}
+	return strings.Join(items, ", ")
+}
+
 func funnelServicePublicEndpoint(service *FunnelService, domain *FunnelDomain) string {
 	if service == nil || domain == nil {
 		return ""
@@ -1265,6 +1468,20 @@ func funnelPlatformSummary(cfg FunnelPlatformConfig) map[string]any {
 			"officialFunnelAvailable": false,
 			"publicPorts":             ports,
 			"ingressTargetCount":      0,
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.DefaultListenerMode), FunnelListenerModeDirect) &&
+		!containsInt(funnelManagedCertReachablePorts(&cfg, nil), 80) &&
+		!containsInt(funnelManagedCertReachablePorts(&cfg, nil), 443) {
+		return map[string]any{
+			"status":                  "pending",
+			"label":                   "需调整",
+			"reason":                  fmt.Sprintf("当前入口端口是 %s，平台托管证书需要公网 80 或 443", joinFunnelPortNumbers(funnelManagedCertReachablePorts(&cfg, nil))),
+			"nextAction":              "如果要用平台托管 HTTPS，请改回 80/443；否则改用自带证书或前置代理",
+			"officialServeAvailable":  officialServeAvailable(cfg),
+			"officialFunnelAvailable": officialFunnelAvailable(cfg),
+			"publicPorts":             ports,
+			"ingressTargetCount":      len(targets),
 		}
 	}
 	return map[string]any{

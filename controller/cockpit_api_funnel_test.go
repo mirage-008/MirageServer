@@ -240,7 +240,7 @@ func TestCockpitFunnelDeferredActions(t *testing.T) {
 		t.Fatalf("syncDeferred = %#v", data["syncDeferred"])
 	}
 
-	body, _ := json.Marshal(FunnelDomainVerifyRequest{DomainID: domain.ID})
+	body, _ := json.Marshal(map[string]any{"domainId": strconv.FormatInt(domain.ID, 10)})
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, funnelAuthedRequest(http.MethodPost, "/cockpit/api/funnel/domains/verify", body))
 	status, data = decodeFunnelAPIResponse(t, rec.Body.Bytes())
@@ -254,15 +254,18 @@ func TestCockpitFunnelDeferredActions(t *testing.T) {
 		t.Fatal("expected domain payload")
 	}
 
-	body, _ = json.Marshal(FunnelCertRenewRequest{DomainID: domain.ID})
+	body, _ = json.Marshal(map[string]any{"domainId": strconv.FormatInt(domain.ID, 10)})
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, funnelAuthedRequest(http.MethodPost, "/cockpit/api/funnel/certs/renew", body))
 	status, data = decodeFunnelAPIResponse(t, rec.Body.Bytes())
 	if status != "success" {
 		t.Fatalf("unexpected cert renew status: %s", status)
 	}
-	if data["renewDeferred"] != true {
-		t.Fatalf("renewDeferred = %#v", data["renewDeferred"])
+	if data["renewAccepted"] != false {
+		t.Fatalf("renewAccepted = %#v", data["renewAccepted"])
+	}
+	if data["renewMessage"] == "" {
+		t.Fatal("expected renew message")
 	}
 	if data["cert"] == nil {
 		t.Fatal("expected cert payload")

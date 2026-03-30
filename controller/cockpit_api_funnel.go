@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -211,12 +212,28 @@ func (c *Cockpit) GetFunnelDomains(w http.ResponseWriter, r *http.Request) {
 	if !c.authFunnelActor(w, r) {
 		return
 	}
+	sysCfg, err := c.currentFunnelSysCfg()
+	if err != nil {
+		c.doAPIResponse(w, err.Error(), nil)
+		return
+	}
+	cfg, err := effectiveFunnelPlatformConfig(sysCfg)
+	if err != nil {
+		c.doAPIResponse(w, err.Error(), nil)
+		return
+	}
 	domains := []FunnelDomain{}
 	if err := c.db.Find(&domains).Error; err != nil {
 		c.doAPIResponse(w, "读取Funnel域名失败:"+err.Error(), nil)
 		return
 	}
-	c.doAPIResponse(w, "", map[string]any{"domains": funnelDomainsResponse(domains)})
+	c.doAPIResponse(w, "", map[string]any{"domains": funnelDomainsResponseWithConfig(domains, &cfg, func(domain *FunnelDomain) *FunnelEdge {
+		edge, err := resolveFunnelEdgeForService(c.db, domain, nil)
+		if err != nil {
+			return nil
+		}
+		return edge
+	})})
 }
 
 func (c *Cockpit) PostFunnelDomainVerify(w http.ResponseWriter, r *http.Request) {
@@ -229,9 +246,9 @@ func (c *Cockpit) PostFunnelDomainVerify(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var domain *FunnelDomain
-	if req.DomainID != 0 {
+	if req.resolvedDomainID() != 0 {
 		domain = &FunnelDomain{}
-		if err := c.db.First(domain, req.DomainID).Error; err != nil {
+		if err := c.db.First(domain, req.resolvedDomainID()).Error; err != nil {
 			c.doAPIResponse(w, "未找到Funnel域名:"+err.Error(), nil)
 			return
 		}
@@ -247,6 +264,17 @@ func (c *Cockpit) PostFunnelDomainVerify(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	sysCfg, err := c.currentFunnelSysCfg()
+	if err != nil {
+		c.doAPIResponse(w, err.Error(), nil)
+		return
+	}
+	cfg, err := effectiveFunnelPlatformConfig(sysCfg)
+	if err != nil {
+		c.doAPIResponse(w, err.Error(), nil)
+		return
+	}
+	edge, _ := resolveFunnelEdgeForService(c.db, domain, nil)
 	response := funnelDomainWithVerifiedFlag(domain)
 	if domain.DomainType == FunnelDomainTypeManaged {
 		provider, err := c.currentManagedFunnelDNSProvider()
@@ -260,6 +288,17 @@ func (c *Cockpit) PostFunnelDomainVerify(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		response = funnelDomainVerificationResponse(domain, result.Ready, false, result.Message)
+		if result.Ready {
+			if certState := funnelManagedCertAutomationState(&cfg, domain, edge); certState != nil && !certState.Eligible {
+				response["verificationMessage"] = fmt.Sprintf("DNS 已就绪，但%s。%s", certState.Reason, certState.NextAction)
+			} else if c.App != nil {
+				if rt := c.App.currentFunnelRuntime(); rt != nil {
+					if err := rt.requestManagedCertificate(domain.Domain); err == nil {
+						response["verificationMessage"] = "DNS 已就绪，已开始尝试签发证书"
+					}
+				}
+			}
+		}
 	} else {
 		if err := markFunnelDomainVerified(c.db, domain); err != nil {
 			c.doAPIResponse(w, "更新Funnel域名失败:"+err.Error(), nil)
@@ -274,6 +313,7 @@ func (c *Cockpit) PostFunnelDomainVerify(w http.ResponseWriter, r *http.Request)
 	case c.CtrlChn <- CtrlMsg{Msg: "reload-funnel"}:
 	default:
 	}
+	response["domain"] = funnelDomainToMapWithConfig(domain, &cfg, edge)
 	c.doAPIResponse(w, "", response)
 }
 
@@ -287,26 +327,59 @@ func (c *Cockpit) PostFunnelCertRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var cert *FunnelCert
-	if req.CertID != 0 {
+	if req.resolvedCertID() != 0 {
 		cert = &FunnelCert{}
-		if err := c.db.First(cert, req.CertID).Error; err != nil {
+		if err := c.db.First(cert, req.resolvedCertID()).Error; err != nil {
 			c.doAPIResponse(w, "未找到Funnel证书:"+err.Error(), nil)
 			return
 		}
 	} else {
-		if req.DomainID == 0 {
+		if req.resolvedDomainID() == 0 {
 			c.doAPIResponse(w, "未指定Funnel域名", nil)
 			return
 		}
 		cert = &FunnelCert{}
-		if err := c.db.Where("domain_id = ?", req.DomainID).First(cert).Error; err != nil {
+		if err := c.db.Where("domain_id = ?", req.resolvedDomainID()).First(cert).Error; err != nil {
 			c.doAPIResponse(w, "未找到Funnel证书:"+err.Error(), nil)
 			return
 		}
 	}
+	domain := &FunnelDomain{}
+	if err := c.db.First(domain, cert.DomainID).Error; err != nil {
+		c.doAPIResponse(w, "未找到Funnel域名:"+err.Error(), nil)
+		return
+	}
+	sysCfg, err := c.currentFunnelSysCfg()
+	if err != nil {
+		c.doAPIResponse(w, err.Error(), nil)
+		return
+	}
+	cfg, err := effectiveFunnelPlatformConfig(sysCfg)
+	if err != nil {
+		c.doAPIResponse(w, err.Error(), nil)
+		return
+	}
+	edge, _ := resolveFunnelEdgeForService(c.db, domain, nil)
 	if err := recordFunnelAudit(c.db, 0, "super_admin", "cockpit", "cert", cert.StableID, "cert_renew_requested", funnelCertActionData(cert, nil)); err != nil {
 		c.doAPIResponse(w, "记录Funnel审计失败:"+err.Error(), nil)
 		return
 	}
-	c.doAPIResponse(w, "", funnelCertWithRenewDeferred(cert))
+	if certState := funnelManagedCertAutomationState(&cfg, domain, edge); certState != nil && !certState.Eligible {
+		c.doAPIResponse(w, "", funnelCertRenewResponse(cert, false, fmt.Sprintf("%s。%s", certState.Reason, certState.NextAction)))
+		return
+	}
+	if c.App == nil {
+		c.doAPIResponse(w, "", funnelCertRenewResponse(cert, false, "Funnel 运行时尚未就绪，请稍后重试"))
+		return
+	}
+	rt := c.App.currentFunnelRuntime()
+	if rt == nil {
+		c.doAPIResponse(w, "", funnelCertRenewResponse(cert, false, "Funnel 运行时尚未就绪，请稍后重试"))
+		return
+	}
+	if err := rt.requestManagedCertificate(domain.Domain); err != nil {
+		c.doAPIResponse(w, "", funnelCertRenewResponse(cert, false, err.Error()))
+		return
+	}
+	c.doAPIResponse(w, "", funnelCertRenewResponse(cert, true, "已开始尝试签发/续期证书，请稍后刷新"))
 }
