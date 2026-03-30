@@ -23,6 +23,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 	"tailscale.com/tsnet"
 )
@@ -161,8 +162,10 @@ type funnelRuntime struct {
 
 	resolveManagedDNSProvider func() (managedFunnelDNSProvider, error)
 	newOrgDialer              func(ctx context.Context, orgID int64) (funnelOrgDialer, error)
+	managedCertRequestFunc    func(ctx context.Context, host string) (funnelManagedCertRequestResult, error)
 
-	wg sync.WaitGroup
+	certIssueGroup singleflight.Group
+	wg             sync.WaitGroup
 }
 
 func newFunnelRuntime(app *Mirage) *funnelRuntime {
@@ -191,6 +194,7 @@ func newFunnelRuntime(app *Mirage) *funnelRuntime {
 	}
 	rt.getCertFunc = rt.getFunnelCertificate
 	rt.newOrgDialer = rt.newTSNetOrgDialer
+	rt.managedCertRequestFunc = rt.obtainManagedCertificate
 	return rt
 }
 
@@ -1562,12 +1566,31 @@ func (rt *funnelRuntime) autocertHostPolicy(_ context.Context, host string) erro
 }
 
 func (rt *funnelRuntime) getFunnelCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	host := ""
+	if hello != nil {
+		host = normalizeFunnelBaseDomain(hello.ServerName)
+	}
+	if host != "" {
+		if cert, certPath, keyPath, err := loadFunnelManagedCertificate(host); err == nil && cert != nil {
+			return cert, nil
+		} else if err != nil {
+			log.Error().Err(err).Str("host", host).Str("certRef", certPath).Str("keyRef", keyPath).Msg("failed to load funnel managed certificate from cache")
+		}
+	}
+
 	cert, err := rt.certManager.GetCertificate(hello)
 	if err != nil {
+		if host != "" && rt.dns01EligibleForHost(host) {
+			go func() {
+				if reqErr := rt.requestManagedCertificate(host); reqErr != nil {
+					log.Error().Err(reqErr).Str("host", host).Msg("failed to queue dns-01 managed certificate issuance")
+				}
+			}()
+		}
 		return nil, err
 	}
-	if cert != nil && hello != nil && hello.ServerName != "" {
-		rt.noteIssuedCertificate(hello.ServerName, cert)
+	if cert != nil && host != "" {
+		rt.noteIssuedCertificate(host, cert, FunnelCertChallengeHTTP01, "", "")
 	}
 	return cert, nil
 }
@@ -1598,30 +1621,42 @@ func (rt *funnelRuntime) requestManagedCertificate(host string) error {
 	}
 
 	go func() {
-		if _, err := rt.getFunnelCertificate(&tls.ClientHelloInfo{ServerName: host}); err != nil {
-			if persistErr := rt.persistCertificateFailure(host, err); persistErr != nil {
+		ctx, cancel := context.WithTimeout(rt.ctx, funnelManagedCertReqTimout)
+		defer cancel()
+
+		if persistErr := rt.markCertificatePending(host); persistErr != nil {
+			log.Error().Err(persistErr).Str("host", host).Msg("failed to mark funnel certificate request pending")
+		}
+
+		result, err := rt.managedCertRequestFunc(ctx, host)
+		if err != nil {
+			if persistErr := rt.persistCertificateFailure(host, result.ChallengeType, err); persistErr != nil {
 				log.Error().Err(persistErr).Str("host", host).Msg("failed to persist funnel certificate error")
 			}
 			log.Error().Err(err).Str("host", host).Msg("failed to trigger funnel certificate issuance")
+			return
+		}
+		if result.Cert != nil {
+			rt.noteIssuedCertificate(host, result.Cert, result.ChallengeType, result.CertificateRef, result.PrivateKeyRef)
 		}
 	}()
 
 	return nil
 }
 
-func (rt *funnelRuntime) noteIssuedCertificate(host string, cert *tls.Certificate) {
+func (rt *funnelRuntime) noteIssuedCertificate(host string, cert *tls.Certificate, challengeType, certificateRef, privateKeyRef string) {
 	if cert == nil {
 		return
 	}
 	host = normalizeFunnelBaseDomain(host)
 	go func() {
-		if err := rt.persistIssuedCertificate(host, cert); err != nil {
+		if err := rt.persistIssuedCertificate(host, cert, challengeType, certificateRef, privateKeyRef); err != nil {
 			log.Error().Err(err).Str("host", host).Msg("failed to persist funnel certificate metadata")
 		}
 	}()
 }
 
-func (rt *funnelRuntime) persistIssuedCertificate(host string, cert *tls.Certificate) error {
+func (rt *funnelRuntime) persistIssuedCertificate(host string, cert *tls.Certificate, challengeType, certificateRef, privateKeyRef string) error {
 	domain := &FunnelDomain{}
 	if err := rt.app.db.Where("domain = ?", host).First(domain).Error; err != nil {
 		return err
@@ -1639,7 +1674,12 @@ func (rt *funnelRuntime) persistIssuedCertificate(host string, cert *tls.Certifi
 	}
 	renewAfter := leaf.NotAfter.Add(-30 * 24 * time.Hour)
 	funnelCert.Issuer = leaf.Issuer.String()
+	if strings.TrimSpace(challengeType) != "" {
+		funnelCert.ChallengeType = challengeType
+	}
 	funnelCert.CertStatus = FunnelCertStatusReady
+	funnelCert.CertificateRef = strings.TrimSpace(certificateRef)
+	funnelCert.PrivateKeyRef = strings.TrimSpace(privateKeyRef)
 	funnelCert.NotBefore = &leaf.NotBefore
 	funnelCert.NotAfter = &leaf.NotAfter
 	funnelCert.RenewAfter = &renewAfter
@@ -1657,7 +1697,7 @@ func (rt *funnelRuntime) persistIssuedCertificate(host string, cert *tls.Certifi
 	return nil
 }
 
-func (rt *funnelRuntime) persistCertificateFailure(host string, cause error) error {
+func (rt *funnelRuntime) persistCertificateFailure(host, challengeType string, cause error) error {
 	if cause == nil {
 		return nil
 	}
@@ -1674,6 +1714,9 @@ func (rt *funnelRuntime) persistCertificateFailure(host string, cause error) err
 	if message == "" {
 		message = "证书签发失败"
 	}
+	if strings.TrimSpace(challengeType) != "" {
+		funnelCert.ChallengeType = challengeType
+	}
 	funnelCert.CertStatus = FunnelCertStatusPending
 	funnelCert.LastError = message
 	if err := rt.app.db.Save(funnelCert).Error; err != nil {
@@ -1682,6 +1725,73 @@ func (rt *funnelRuntime) persistCertificateFailure(host string, cause error) err
 	domain.Status = FunnelDomainStatusPendingCert
 	domain.LastError = message
 	return rt.app.db.Save(domain).Error
+}
+
+func (rt *funnelRuntime) markCertificatePending(host string) error {
+	host = normalizeFunnelBaseDomain(host)
+	if host == "" {
+		return fmt.Errorf("未指定证书域名")
+	}
+	domain := &FunnelDomain{}
+	if err := rt.app.db.Where("domain = ?", host).First(domain).Error; err != nil {
+		return err
+	}
+	funnelCert := &FunnelCert{}
+	if err := rt.app.db.Where("domain_id = ?", domain.ID).First(funnelCert).Error; err != nil {
+		return err
+	}
+	funnelCert.CertStatus = FunnelCertStatusPending
+	funnelCert.LastError = ""
+	if err := rt.app.db.Save(funnelCert).Error; err != nil {
+		return err
+	}
+	domain.Status = FunnelDomainStatusPendingCert
+	domain.LastError = ""
+	return rt.app.db.Save(domain).Error
+}
+
+func (rt *funnelRuntime) dns01EligibleForHost(host string) bool {
+	domain := &FunnelDomain{}
+	if err := rt.app.db.Where("domain = ?", normalizeFunnelBaseDomain(host)).First(domain).Error; err != nil {
+		return false
+	}
+	cfg, err := effectiveFunnelPlatformConfigFromDB(rt.app.db, rt.app.cfg.BaseDomain)
+	if err != nil {
+		return false
+	}
+	return funnelManagedCertCanUseDNS01(&cfg, domain)
+}
+
+func (rt *funnelRuntime) obtainManagedCertificate(ctx context.Context, host string) (funnelManagedCertRequestResult, error) {
+	host = normalizeFunnelBaseDomain(host)
+	if host == "" {
+		return funnelManagedCertRequestResult{}, fmt.Errorf("未指定证书域名")
+	}
+
+	value, err, _ := rt.certIssueGroup.Do(host, func() (any, error) {
+		if rt.dns01EligibleForHost(host) {
+			return rt.obtainManagedCertificateViaDNS(ctx, host)
+		}
+		cert, err := rt.certManager.GetCertificate(&tls.ClientHelloInfo{ServerName: host})
+		if err != nil {
+			return funnelManagedCertRequestResult{ChallengeType: FunnelCertChallengeHTTP01}, err
+		}
+		return funnelManagedCertRequestResult{
+			Cert:          cert,
+			ChallengeType: FunnelCertChallengeHTTP01,
+		}, nil
+	})
+	if err != nil {
+		if result, ok := value.(funnelManagedCertRequestResult); ok {
+			return result, err
+		}
+		return funnelManagedCertRequestResult{}, err
+	}
+	result, ok := value.(funnelManagedCertRequestResult)
+	if !ok {
+		return funnelManagedCertRequestResult{}, fmt.Errorf("unexpected managed certificate result type %T", value)
+	}
+	return result, nil
 }
 
 func (rt *funnelRuntime) applyStatusOverlay(service *FunnelService, domain *FunnelDomain, cert *FunnelCert) {

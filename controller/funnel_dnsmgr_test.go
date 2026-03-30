@@ -237,6 +237,50 @@ func TestDNSMgrManagedFunnelDNSProviderEnsureAndDelete(t *testing.T) {
 	}
 }
 
+func TestDNSMgrManagedFunnelDNSProviderDeleteTXTRecord(t *testing.T) {
+	t.Parallel()
+
+	state, server := newDNSMgrTestServer(t)
+	defer server.Close()
+
+	provider, err := newManagedFunnelDNSProvider(FunnelPlatformConfig{
+		ManagedBaseDomain:    defaultFunnelDNSMgrBaseDomain,
+		ManagedDNSProvider:   FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSAPIBaseURL: server.URL,
+		ManagedDNSUID:        1000,
+		ManagedDNSAPIKey:     "secret",
+	})
+	if err != nil {
+		t.Fatalf("newManagedFunnelDNSProvider(): %v", err)
+	}
+	challengeProvider, ok := provider.(managedFunnelDNSChallengeProvider)
+	if !ok {
+		t.Fatal("provider does not implement managedFunnelDNSChallengeProvider")
+	}
+
+	fqdn := "_acme-challenge.demo." + defaultFunnelDNSMgrBaseDomain
+	if err := challengeProvider.UpsertTXTRecord(context.Background(), fqdn, "wanted-token"); err != nil {
+		t.Fatalf("UpsertTXTRecord(): %v", err)
+	}
+	if len(state.records) != 1 {
+		t.Fatalf("record count after upsert = %d", len(state.records))
+	}
+
+	if err := challengeProvider.DeleteTXTRecord(context.Background(), fqdn, "other-token"); err != nil {
+		t.Fatalf("DeleteTXTRecord(non-match): %v", err)
+	}
+	if len(state.records) != 1 {
+		t.Fatalf("record count after non-match delete = %d", len(state.records))
+	}
+
+	if err := challengeProvider.DeleteTXTRecord(context.Background(), fqdn, "wanted-token"); err != nil {
+		t.Fatalf("DeleteTXTRecord(): %v", err)
+	}
+	if len(state.records) != 0 {
+		t.Fatalf("record count after delete = %d", len(state.records))
+	}
+}
+
 func TestDNSMgrRecordItemAcceptsNumericRecordID(t *testing.T) {
 	t.Parallel()
 

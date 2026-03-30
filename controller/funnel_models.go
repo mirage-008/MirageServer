@@ -48,6 +48,9 @@ const (
 	FunnelCertStatusError   = "error"
 	FunnelCertStatusExpired = "expired"
 
+	FunnelCertChallengeHTTP01 = "http-01"
+	FunnelCertChallengeDNS01  = "dns-01"
+
 	FunnelListenProtoHTTP              = "http"
 	FunnelListenProtoHTTPS             = "https"
 	FunnelListenProtoWS                = "ws"

@@ -34,6 +34,7 @@ type managedFunnelDNSProvider interface {
 
 type managedFunnelDNSChallengeProvider interface {
 	UpsertTXTRecord(ctx context.Context, fqdn, value string) error
+	DeleteTXTRecord(ctx context.Context, fqdn, value string) error
 }
 
 type dnsMgrManagedFunnelDNSProvider struct {
@@ -634,6 +635,40 @@ func (p *dnsMgrManagedFunnelDNSProvider) UpsertTXTRecord(ctx context.Context, fq
 	}
 	for _, duplicate := range duplicates {
 		if err := p.deleteRecord(ctx, zone.ID, duplicate.RecordID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *dnsMgrManagedFunnelDNSProvider) DeleteTXTRecord(ctx context.Context, fqdn, value string) error {
+	zone, err := p.resolveZoneForDomain(ctx, fqdn)
+	if err != nil {
+		return err
+	}
+	recordName, err := dnsMgrRecordNameForDomain(fqdn, zone.Name)
+	if err != nil {
+		return err
+	}
+	records, err := p.listRecords(ctx, zone.ID, recordName)
+	if err != nil {
+		return err
+	}
+	wantValue := strings.TrimSpace(value)
+	for _, record := range records {
+		if !strings.EqualFold(strings.TrimSpace(record.Name), recordName) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(record.Type), dnsMgrACMERecordType) {
+			continue
+		}
+		if strings.TrimSpace(record.Remark) != dnsMgrACMERecordRemark {
+			continue
+		}
+		if wantValue != "" && !strings.EqualFold(strings.TrimSpace(record.Value), wantValue) {
+			continue
+		}
+		if err := p.deleteRecord(ctx, zone.ID, record.RecordID); err != nil {
 			return err
 		}
 	}

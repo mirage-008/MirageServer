@@ -25,6 +25,7 @@ import (
 type fakeManagedFunnelDNSProvider struct {
 	ensured   []string
 	deleted   []string
+	txtUpserts map[string]string
 	ensureErr error
 	deleteErr error
 	lookupErr error
@@ -52,6 +53,21 @@ func (f *fakeManagedFunnelDNSProvider) LookupManagedDomain(_ context.Context, fq
 		return managedFunnelDNSLookupResult{}, f.lookupErr
 	}
 	return f.lookup, nil
+}
+
+func (f *fakeManagedFunnelDNSProvider) UpsertTXTRecord(_ context.Context, fqdn, value string) error {
+	if f.txtUpserts == nil {
+		f.txtUpserts = make(map[string]string)
+	}
+	f.txtUpserts[fqdn] = value
+	return nil
+}
+
+func (f *fakeManagedFunnelDNSProvider) DeleteTXTRecord(_ context.Context, fqdn, _ string) error {
+	if f.txtUpserts != nil {
+		delete(f.txtUpserts, fqdn)
+	}
+	return nil
 }
 
 func newFunnelTenantTestMirage(t *testing.T) *Mirage {

@@ -1061,10 +1061,18 @@ func funnelDomainSummaryWithConfig(domain *FunnelDomain, cfg *FunnelPlatformConf
 	}
 
 	if strings.TrimSpace(domain.Status) == FunnelDomainStatusPendingCert {
-		if certState := funnelManagedCertAutomationState(cfg, domain, edge); certState != nil && !certState.Eligible {
+		if certState := funnelManagedCertAutomationState(cfg, domain, edge); certState != nil {
+			if !certState.Eligible {
+				return map[string]any{
+					"status":     "error",
+					"label":      "证书受阻",
+					"reason":     certState.Reason,
+					"nextAction": certState.NextAction,
+				}
+			}
 			return map[string]any{
-				"status":     "error",
-				"label":      "证书受阻",
+				"status":     "pending",
+				"label":      "待证书",
 				"reason":     certState.Reason,
 				"nextAction": certState.NextAction,
 			}
@@ -1155,10 +1163,19 @@ func funnelServiceSummaryWithConfig(service *FunnelService, domain *FunnelDomain
 			}
 		case FunnelCertStatusPending:
 			if requiresFunnelCert(service) {
-				if certState := funnelManagedCertAutomationState(cfg, domain, edge); certState != nil && !certState.Eligible {
+				if certState := funnelManagedCertAutomationState(cfg, domain, edge); certState != nil {
+					if !certState.Eligible {
+						return map[string]any{
+							"status":         "error",
+							"label":          "证书受阻",
+							"reason":         certState.Reason,
+							"nextAction":     certState.NextAction,
+							"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+						}
+					}
 					return map[string]any{
-						"status":         "error",
-						"label":          "证书受阻",
+						"status":         "pending",
+						"label":          "待证书",
 						"reason":         certState.Reason,
 						"nextAction":     certState.NextAction,
 						"publicEndpoint": funnelServicePublicEndpoint(service, domain),
@@ -1321,6 +1338,18 @@ func funnelManagedCertAutomationState(cfg *FunnelPlatformConfig, domain *FunnelD
 		return nil
 	}
 
+	if funnelManagedCertCanUseDNS01(cfg, domain) {
+		return &struct {
+			Eligible   bool
+			Reason     string
+			NextAction string
+		}{
+			Eligible:   true,
+			Reason:     "DNS 已就绪，将通过 DNS-01 签发证书",
+			NextAction: "稍后刷新，必要时手动续期",
+		}
+	}
+
 	if strings.EqualFold(strings.TrimSpace(domain.ListenerMode), FunnelListenerModeBehindProxy) {
 		return &struct {
 			Eligible   bool
@@ -1342,7 +1371,11 @@ func funnelManagedCertAutomationState(cfg *FunnelPlatformConfig, domain *FunnelD
 			Eligible   bool
 			Reason     string
 			NextAction string
-		}{Eligible: true}
+		}{
+			Eligible:   true,
+			Reason:     "DNS 已就绪，将通过平台托管入口签发证书",
+			NextAction: "稍后刷新，必要时手动续期",
+		}
 	}
 
 	return &struct {
@@ -1354,6 +1387,27 @@ func funnelManagedCertAutomationState(cfg *FunnelPlatformConfig, domain *FunnelD
 		Reason:     fmt.Sprintf("当前入口端口是 %s，平台托管证书需要公网 80 或 443", joinFunnelPortNumbers(ports)),
 		NextAction: "把入口改到 80/443，或改用自带证书/前置代理",
 	}
+}
+
+func funnelManagedCertCanUseDNS01(cfg *FunnelPlatformConfig, domain *FunnelDomain) bool {
+	if cfg == nil || domain == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(domain.TLSMode), FunnelTLSModePlatformManaged) {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(cfg.ManagedDNSProvider)) != FunnelManagedDNSProviderDNSMgr {
+		return false
+	}
+	base := normalizeManagedFQDN(cfg.ManagedBaseDomain)
+	if base == "" {
+		return false
+	}
+	host := normalizeManagedFQDN(domain.Domain)
+	if host == "" {
+		return false
+	}
+	return host == base || strings.HasSuffix(host, "."+base)
 }
 
 func funnelManagedCertReachablePorts(cfg *FunnelPlatformConfig, edge *FunnelEdge) []int {
@@ -1472,7 +1526,8 @@ func funnelPlatformSummary(cfg FunnelPlatformConfig) map[string]any {
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.DefaultListenerMode), FunnelListenerModeDirect) &&
 		!containsInt(funnelManagedCertReachablePorts(&cfg, nil), 80) &&
-		!containsInt(funnelManagedCertReachablePorts(&cfg, nil), 443) {
+		!containsInt(funnelManagedCertReachablePorts(&cfg, nil), 443) &&
+		!funnelPlatformSupportsDNS01(cfg) {
 		return map[string]any{
 			"status":                  "pending",
 			"label":                   "需调整",
@@ -1484,16 +1539,26 @@ func funnelPlatformSummary(cfg FunnelPlatformConfig) map[string]any {
 			"ingressTargetCount":      len(targets),
 		}
 	}
+	reason := "平台入口已就绪，可以向客户端开放 Funnel 能力"
+	nextAction := "现在可以开始测试客户端 Funnel"
+	if funnelPlatformSupportsDNS01(cfg) {
+		reason = "平台入口和 DNS-01 已就绪，可以给托管域名自动签证"
+		nextAction = "现在可以直接创建 HTTPS/WSS/TLS 服务"
+	}
 	return map[string]any{
 		"status":                  "ready",
 		"label":                   "已可用",
-		"reason":                  "平台入口已就绪，可以向客户端开放 Funnel 能力",
-		"nextAction":              "现在可以开始测试客户端 Funnel",
+		"reason":                  reason,
+		"nextAction":              nextAction,
 		"officialServeAvailable":  officialServeAvailable(cfg),
 		"officialFunnelAvailable": officialFunnelAvailable(cfg),
 		"publicPorts":             ports,
 		"ingressTargetCount":      len(targets),
 	}
+}
+
+func funnelPlatformSupportsDNS01(cfg FunnelPlatformConfig) bool {
+	return strings.ToLower(strings.TrimSpace(cfg.ManagedDNSProvider)) == FunnelManagedDNSProviderDNSMgr
 }
 
 func funnelDomainFromRequest(req FunnelPlatformConfigRequest) FunnelPlatformConfig {

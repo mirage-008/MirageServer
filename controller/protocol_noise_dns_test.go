@@ -35,6 +35,10 @@ func (p *testSetDNSProvider) UpsertTXTRecord(_ context.Context, fqdn, value stri
 	return nil
 }
 
+func (p *testSetDNSProvider) DeleteTXTRecord(_ context.Context, _, _ string) error {
+	return nil
+}
+
 func TestNoiseSetDNSHandlerUpsertsTXTRecord(t *testing.T) {
 	t.Parallel()
 

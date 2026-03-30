@@ -127,3 +127,53 @@ func TestFunnelDomainSummaryExplainsUnsupportedManagedCertPorts(t *testing.T) {
 		t.Fatalf("reason = %#v", got)
 	}
 }
+
+func TestFunnelDomainSummaryAllowsDNS01ManagedCertsWithout443(t *testing.T) {
+	t.Parallel()
+
+	cfg := FunnelPlatformConfig{
+		ManagedBaseDomain:    defaultFunnelDNSMgrBaseDomain,
+		ManagedDNSProvider:   FunnelManagedDNSProviderDNSMgr,
+		DefaultListenerMode:  FunnelListenerModeDirect,
+		DirectBindPorts:      FunnelPortList{880, 4443},
+	}
+	domain := &FunnelDomain{
+		Domain:       "managed.example." + defaultFunnelDNSMgrBaseDomain,
+		DomainType:   FunnelDomainTypeManaged,
+		Status:       FunnelDomainStatusPendingCert,
+		DNSStatus:    FunnelDNSStatusReady,
+		TLSMode:      FunnelTLSModePlatformManaged,
+		ListenerMode: FunnelListenerModeDirect,
+		EdgeMode:     FunnelEdgeModeServer,
+	}
+
+	summary := funnelDomainSummaryWithConfig(domain, &cfg, nil)
+	if summary["status"] != "pending" {
+		t.Fatalf("status = %#v", summary["status"])
+	}
+	if summary["label"] != "待证书" {
+		t.Fatalf("label = %#v", summary["label"])
+	}
+	if got, want := summary["reason"], "DNS 已就绪，将通过 DNS-01 签发证书"; got != want {
+		t.Fatalf("reason = %#v, want %#v", got, want)
+	}
+}
+
+func TestFunnelPlatformSummaryAllowsDNS01Without443(t *testing.T) {
+	t.Parallel()
+
+	summary := funnelPlatformSummary(FunnelPlatformConfig{
+		ManagedBaseDomain:    defaultFunnelDNSMgrBaseDomain,
+		ManagedDNSProvider:   FunnelManagedDNSProviderDNSMgr,
+		DefaultListenerMode:  FunnelListenerModeDirect,
+		DefaultEdgeMode:      FunnelEdgeModeServer,
+		DirectBindPorts:      FunnelPortList{880, 4443},
+		DirectBindAddrs:      StringList{"0.0.0.0"},
+	})
+	if summary["status"] != "ready" {
+		t.Fatalf("status = %#v", summary["status"])
+	}
+	if got, want := summary["reason"], "平台入口和 DNS-01 已就绪，可以给托管域名自动签证"; got != want {
+		t.Fatalf("reason = %#v, want %#v", got, want)
+	}
+}
