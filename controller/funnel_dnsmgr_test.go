@@ -327,6 +327,50 @@ func TestDNSMgrManagedFunnelDNSProviderLookup(t *testing.T) {
 	}
 }
 
+func TestDNSMgrManagedFunnelDNSProviderLookupAcceptsTrailingDotTarget(t *testing.T) {
+	t.Parallel()
+
+	state, server := newDNSMgrTestServer(t)
+	defer server.Close()
+
+	provider, err := newManagedFunnelDNSProvider(FunnelPlatformConfig{
+		ManagedBaseDomain:    defaultFunnelDNSMgrBaseDomain,
+		ManagedDNSProvider:   FunnelManagedDNSProviderDNSMgr,
+		ManagedDNSAPIBaseURL: server.URL,
+		ManagedDNSUID:        1000,
+		ManagedDNSAPIKey:     "secret",
+	})
+	if err != nil {
+		t.Fatalf("newManagedFunnelDNSProvider(): %v", err)
+	}
+
+	fqdn := "machine-2-org." + defaultFunnelDNSMgrBaseDomain
+	state.records["200"] = dnsMgrRecordItem{
+		RecordID: "200",
+		Domain:   state.zoneName,
+		Name:     "machine-2-org",
+		Type:     dnsMgrManagedRecordType,
+		Value:    defaultFunnelDNSMgrBaseDomain + ".",
+		Status:   "1",
+		TTL:      60,
+	}
+
+	result, err := provider.LookupManagedDomain(context.Background(), fqdn)
+	if err != nil {
+		t.Fatalf("LookupManagedDomain(trailing dot): %v", err)
+	}
+	if !result.Ready {
+		t.Fatalf("trailing-dot lookup result = %#v", result)
+	}
+
+	if err := provider.DeleteManagedDomain(context.Background(), fqdn); err != nil {
+		t.Fatalf("DeleteManagedDomain(trailing dot): %v", err)
+	}
+	if len(state.records) != 0 {
+		t.Fatalf("record count after delete = %d, want 0", len(state.records))
+	}
+}
+
 func TestDNSMgrManagedFunnelDNSProviderLookupTreatsRecordNotFoundAsNotReady(t *testing.T) {
 	t.Parallel()
 

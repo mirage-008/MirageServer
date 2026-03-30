@@ -195,6 +195,10 @@ func buildManagedFunnelDomainTarget(cfg FunnelPlatformConfig) string {
 	return normalizeFunnelBaseDomain(cfg.ManagedBaseDomain)
 }
 
+func dnsMgrManagedTargetMatches(recordValue, expected string) bool {
+	return normalizeManagedFQDN(recordValue) == normalizeManagedFQDN(expected)
+}
+
 func (p *dnsMgrManagedFunnelDNSProvider) EnsureManagedDomain(ctx context.Context, fqdn string) error {
 	zone, err := p.resolveZoneForDomain(ctx, fqdn)
 	if err != nil {
@@ -225,12 +229,12 @@ func (p *dnsMgrManagedFunnelDNSProvider) EnsureManagedDomain(ctx context.Context
 
 	primary := cnameRecords[0]
 	for _, record := range cnameRecords {
-		if strings.EqualFold(strings.TrimSpace(record.Value), p.target) {
+		if dnsMgrManagedTargetMatches(record.Value, p.target) {
 			primary = record
 			break
 		}
 	}
-	if !strings.EqualFold(strings.TrimSpace(primary.Value), p.target) {
+	if !dnsMgrManagedTargetMatches(primary.Value, p.target) {
 		if err := p.updateRecord(ctx, zone, primary.RecordID, recordName, p.target); err != nil {
 			return err
 		}
@@ -272,7 +276,7 @@ func (p *dnsMgrManagedFunnelDNSProvider) DeleteManagedDomain(ctx context.Context
 		if !strings.EqualFold(strings.TrimSpace(record.Type), dnsMgrManagedRecordType) {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(record.Value), p.target) {
+		if !dnsMgrManagedTargetMatches(record.Value, p.target) {
 			continue
 		}
 		if err := p.deleteRecord(ctx, zone.ID, record.RecordID); err != nil {
@@ -316,7 +320,7 @@ func (p *dnsMgrManagedFunnelDNSProvider) LookupManagedDomain(ctx context.Context
 			hasConflictingType = true
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(record.Value), p.target) {
+		if !dnsMgrManagedTargetMatches(record.Value, p.target) {
 			if wrongTargetValue == "" {
 				wrongTargetValue = strings.TrimSpace(record.Value)
 			}
