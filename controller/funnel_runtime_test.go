@@ -582,6 +582,118 @@ func TestRequestManagedCertificateAllowsDNS01BeforeRouteActivation(t *testing.T)
 	}
 }
 
+func TestReloadRepairsLegacyManagedPortAndQueuesDNS01(t *testing.T) {
+	app := newFunnelTenantTestMirage(t)
+
+	sysCfg := &SysConfig{}
+	if err := app.db.First(sysCfg).Error; err != nil {
+		t.Fatalf("First(sysCfg): %v", err)
+	}
+	_, dnsServer := newDNSMgrTestServer(t)
+	defer dnsServer.Close()
+
+	httpPort := freeFunnelTestPort(t)
+	httpsPort := freeFunnelTestPort(t)
+	if httpPort == httpsPort {
+		httpsPort = freeFunnelTestPort(t)
+	}
+	sysCfg.FunnelCfg.ManagedDNSProvider = FunnelManagedDNSProviderDNSMgr
+	sysCfg.FunnelCfg.ManagedBaseDomain = defaultFunnelDNSMgrBaseDomain
+	sysCfg.FunnelCfg.ManagedDNSAPIBaseURL = dnsServer.URL
+	sysCfg.FunnelCfg.ManagedDNSUID = 1000
+	sysCfg.FunnelCfg.ManagedDNSAPIKey = "secret"
+	sysCfg.FunnelCfg.DirectBindPorts = FunnelPortList{httpPort, httpsPort}
+	if err := app.db.Save(sysCfg).Error; err != nil {
+		t.Fatalf("Save(sysCfg): %v", err)
+	}
+	app.cfg.FunnelCfg = sysCfg.FunnelCfg
+
+	owner, err := app.GetUser("owner@example.com", "tenant-org", "Mirage")
+	if err != nil {
+		t.Fatalf("GetUser(owner): %v", err)
+	}
+	machine := &Machine{}
+	if err := app.db.Where("hostname = ?", "tenant-machine").First(machine).Error; err != nil {
+		t.Fatalf("First(machine): %v", err)
+	}
+
+	service, domain, cert, err := app.createTenantFunnelService(owner, FunnelServiceCreateRequest{
+		MachineID:     machine.ID,
+		DomainMode:    "managed",
+		ListenProto:   FunnelListenProtoHTTPS,
+		BackendType:   FunnelBackendTypeHTTPProxy,
+		BackendScheme: "http",
+		BackendPort:   8080,
+	})
+	if err != nil {
+		t.Fatalf("createTenantFunnelService(): %v", err)
+	}
+
+	expectedPort, err := preferredFunnelDefaultListenPort(FunnelListenProtoHTTPS, &sysCfg.FunnelCfg, nil)
+	if err != nil {
+		t.Fatalf("preferredFunnelDefaultListenPort(): %v", err)
+	}
+
+	service.ListenPort = 443
+	service.ConfigStatus = FunnelServiceConfigStatusPending
+	service.EdgeStatus = FunnelServiceEdgeStatusPending
+	service.LastError = ""
+	if err := app.db.Save(service).Error; err != nil {
+		t.Fatalf("Save(service): %v", err)
+	}
+
+	domain.HTTPSPort = 443
+	domain.Status = FunnelDomainStatusPendingCert
+	domain.DNSStatus = FunnelDNSStatusReady
+	domain.LastError = "当前域名还没有进入证书签发列表"
+	if err := app.db.Save(domain).Error; err != nil {
+		t.Fatalf("Save(domain): %v", err)
+	}
+
+	cert.CertStatus = FunnelCertStatusPending
+	cert.ChallengeType = FunnelCertChallengeDNS01
+	cert.LastError = "当前域名还没有进入证书签发列表"
+	if err := app.db.Save(cert).Error; err != nil {
+		t.Fatalf("Save(cert): %v", err)
+	}
+
+	rt := newFunnelRuntime(app)
+	defer rt.shutdownAll()
+
+	triggered := make(chan string, 2)
+	rt.managedCertRequestFunc = func(ctx context.Context, host string) (funnelManagedCertRequestResult, error) {
+		triggered <- normalizeFunnelBaseDomain(host)
+		return funnelManagedCertRequestResult{ChallengeType: FunnelCertChallengeDNS01}, nil
+	}
+
+	rt.reload("test")
+
+	updatedService := &FunnelService{}
+	if err := app.db.First(updatedService, "id = ?", service.ID).Error; err != nil {
+		t.Fatalf("First(updatedService): %v", err)
+	}
+	if got := updatedService.ListenPort; got != expectedPort {
+		t.Fatalf("updatedService.ListenPort = %d, want %d", got, expectedPort)
+	}
+
+	updatedDomain := &FunnelDomain{}
+	if err := app.db.First(updatedDomain, "id = ?", domain.ID).Error; err != nil {
+		t.Fatalf("First(updatedDomain): %v", err)
+	}
+	if got := updatedDomain.HTTPSPort; got != expectedPort {
+		t.Fatalf("updatedDomain.HTTPSPort = %d, want %d", got, expectedPort)
+	}
+
+	select {
+	case got := <-triggered:
+		if got != normalizeFunnelBaseDomain(domain.Domain) {
+			t.Fatalf("certificate host = %q, want %q", got, normalizeFunnelBaseDomain(domain.Domain))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for auto queued certificate request")
+	}
+}
+
 func freeFunnelTestPort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

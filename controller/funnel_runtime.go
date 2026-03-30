@@ -30,6 +30,7 @@ import (
 
 const (
 	funnelRuntimeReloadInterval = 15 * time.Second
+	funnelRuntimeAutoCertRetry  = 1 * time.Minute
 	funnelServiceLogLimit       = 100
 	funnelEdgeUserPrefix        = "funnel-edge-"
 	funnelRuntimeStateDir       = "funnel-state"
@@ -156,6 +157,7 @@ type funnelRuntime struct {
 	tcpListeners map[funnelListenerKey]*funnelTCPListenerState
 	orgDialers   map[int64]funnelOrgDialer
 	serviceLogs  map[int64][]funnelLogEntry
+	autoCertSeen map[string]time.Time
 
 	certManager *autocert.Manager
 	getCertFunc func(*tls.ClientHelloInfo) (*tls.Certificate, error)
@@ -179,6 +181,7 @@ func newFunnelRuntime(app *Mirage) *funnelRuntime {
 		tcpListeners: make(map[funnelListenerKey]*funnelTCPListenerState),
 		orgDialers:   make(map[int64]funnelOrgDialer),
 		serviceLogs:  make(map[int64][]funnelLogEntry),
+		autoCertSeen: make(map[string]time.Time),
 	}
 	rt.resolveManagedDNSProvider = app.currentManagedFunnelDNSProvider
 	cacheDir := AbsolutePathFromConfigPath(filepath.Join(funnelRuntimeStateDir, "autocert"))
@@ -300,6 +303,8 @@ func (rt *funnelRuntime) reload(reason string) {
 	rt.snapshot = snapshot
 	rt.mu.Unlock()
 
+	rt.autoQueueManagedCertificates(snapshot)
+
 	if err := rt.updateServerEdgeStatus(cfg, len(listenerErrors) == 0); err != nil {
 		log.Error().Err(err).Msg("failed to update server-edge status")
 	}
@@ -337,8 +342,11 @@ func (rt *funnelRuntime) buildSnapshot() (*funnelRuntimeSnapshot, FunnelPlatform
 	}
 	domainByID := make(map[int64]*FunnelDomain, len(domains))
 	for i := range domains {
-		domain := domains[i]
-		domainByID[domain.ID] = &domain
+		domainByID[domains[i].ID] = &domains[i]
+	}
+
+	if err := rt.reconcileLegacyManagedDirectPorts(cfg, services, domainByID); err != nil {
+		return nil, FunnelPlatformConfig{}, err
 	}
 
 	var certs []FunnelCert
@@ -357,8 +365,7 @@ func (rt *funnelRuntime) buildSnapshot() (*funnelRuntimeSnapshot, FunnelPlatform
 	}
 	machineByID := make(map[int64]*Machine, len(machines))
 	for i := range machines {
-		machine := machines[i]
-		machineByID[machine.ID] = &machine
+		machineByID[machines[i].ID] = &machines[i]
 	}
 
 	allowedPorts := make(map[int]struct{}, len(cfg.DirectBindPorts))
@@ -634,6 +641,125 @@ func (rt *funnelRuntime) buildSnapshot() (*funnelRuntimeSnapshot, FunnelPlatform
 	}
 
 	return snapshot, cfg, nil
+}
+
+func (rt *funnelRuntime) reconcileLegacyManagedDirectPorts(cfg FunnelPlatformConfig, services []FunnelService, domainByID map[int64]*FunnelDomain) error {
+	if rt == nil || rt.app == nil || len(cfg.DirectBindPorts) == 0 {
+		return nil
+	}
+
+	allowedPorts := make(map[int]struct{}, len(cfg.DirectBindPorts))
+	for _, port := range cfg.DirectBindPorts {
+		allowedPorts[port] = struct{}{}
+	}
+
+	for i := range services {
+		service := &services[i]
+		domain := domainByID[service.DomainID]
+		if domain == nil || !service.Enabled {
+			continue
+		}
+		if domain.DomainType != FunnelDomainTypeManaged || domain.ListenerMode != FunnelListenerModeDirect || domain.EdgeMode != FunnelEdgeModeServer {
+			continue
+		}
+		if _, ok := allowedPorts[service.ListenPort]; ok {
+			continue
+		}
+
+		legacyPort, err := defaultFunnelListenPort(service.ListenProto, 0)
+		if err != nil || legacyPort <= 0 || service.ListenPort != legacyPort {
+			continue
+		}
+
+		preferredPort, err := preferredFunnelDefaultListenPort(service.ListenProto, &cfg, nil)
+		if err != nil || preferredPort <= 0 || preferredPort == service.ListenPort {
+			continue
+		}
+		if _, ok := allowedPorts[preferredPort]; !ok {
+			continue
+		}
+
+		oldPort := service.ListenPort
+		service.ListenPort = preferredPort
+		service.ConfigStatus = FunnelServiceConfigStatusPending
+		service.EdgeStatus = FunnelServiceEdgeStatusPending
+		service.LastError = ""
+
+		switch service.ListenProto {
+		case FunnelListenProtoHTTP, FunnelListenProtoWS:
+			if domain.HTTPPort == 0 || domain.HTTPPort == oldPort {
+				domain.HTTPPort = preferredPort
+			}
+		case FunnelListenProtoHTTPS, FunnelListenProtoWSS, FunnelListenProtoTLSTerminatedTCP:
+			if domain.HTTPSPort == 0 || domain.HTTPSPort == oldPort {
+				domain.HTTPSPort = preferredPort
+			}
+		}
+		if strings.Contains(domain.LastError, "当前域名还没有进入证书签发列表") {
+			domain.LastError = ""
+		}
+
+		if err := rt.app.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Save(domain).Error; err != nil {
+				return err
+			}
+			return tx.Save(service).Error
+		}); err != nil {
+			return err
+		}
+
+		log.Info().
+			Int64("service_id", service.ID).
+			Int64("domain_id", domain.ID).
+			Int("old_port", oldPort).
+			Int("new_port", preferredPort).
+			Msg("reconciled legacy managed funnel service to current direct bind port")
+	}
+
+	return nil
+}
+
+func (rt *funnelRuntime) autoQueueManagedCertificates(snapshot *funnelRuntimeSnapshot) {
+	if rt == nil || snapshot == nil || len(snapshot.TLSHosts) == 0 {
+		return
+	}
+
+	now := time.Now()
+	for host := range snapshot.TLSHosts {
+		host = normalizeFunnelBaseDomain(host)
+		if host == "" || !rt.dns01EligibleForHost(host) {
+			continue
+		}
+
+		domain := &FunnelDomain{}
+		if err := rt.app.db.Where("domain = ?", host).First(domain).Error; err != nil {
+			continue
+		}
+		if domain.DomainType != FunnelDomainTypeManaged || domain.DNSStatus != FunnelDNSStatusReady {
+			continue
+		}
+
+		cert := &FunnelCert{}
+		if err := rt.app.db.Where("domain_id = ?", domain.ID).First(cert).Error; err != nil {
+			continue
+		}
+		if cert.CertStatus == FunnelCertStatusReady {
+			continue
+		}
+
+		rt.mu.Lock()
+		lastAttempt := rt.autoCertSeen[host]
+		if !lastAttempt.IsZero() && now.Sub(lastAttempt) < funnelRuntimeAutoCertRetry {
+			rt.mu.Unlock()
+			continue
+		}
+		rt.autoCertSeen[host] = now
+		rt.mu.Unlock()
+
+		if err := rt.requestManagedCertificate(host); err != nil {
+			log.Debug().Err(err).Str("host", host).Msg("auto-queue managed certificate skipped")
+		}
+	}
 }
 
 func (rt *funnelRuntime) ensureOfficialIngressDNS() error {
