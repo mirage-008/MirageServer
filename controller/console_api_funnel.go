@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -606,11 +607,11 @@ func (h *Mirage) createTenantFunnelService(user *User, req FunnelServiceCreateRe
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	listenPort, err := defaultFunnelListenPort(listenProto, req.ListenPort)
+	mountPath := normalizeFunnelMountPath(req.MountPath)
+	funnelCfg, err := effectiveFunnelPlatformConfigFromDB(h.db, h.cfg.BaseDomain)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	mountPath := normalizeFunnelMountPath(req.MountPath)
 
 	var domain *FunnelDomain
 	switch strings.ToLower(strings.TrimSpace(req.DomainMode)) {
@@ -623,9 +624,12 @@ func (h *Mirage) createTenantFunnelService(user *User, req FunnelServiceCreateRe
 			return nil, nil, nil, err
 		}
 	case "managed":
-		funnelCfg, err := effectiveFunnelPlatformConfigFromDB(h.db, h.cfg.BaseDomain)
-		if err != nil {
-			return nil, nil, nil, err
+		listenPort := req.ListenPort
+		if listenPort <= 0 {
+			listenPort, err = preferredFunnelDefaultListenPort(listenProto, &funnelCfg, nil)
+			if err != nil {
+				return nil, nil, nil, err
+			}
 		}
 		managedDomainName := allocateManagedFunnelDomain(org, machine, funnelCfg)
 		if managedDomainName == "" {
@@ -637,6 +641,14 @@ func (h *Mirage) createTenantFunnelService(user *User, req FunnelServiceCreateRe
 		}
 	default:
 		return nil, nil, nil, fmt.Errorf("不支持的Funnel域名模式")
+	}
+
+	listenPort, err := preferredFunnelDefaultListenPort(listenProto, &funnelCfg, domain)
+	if req.ListenPort > 0 {
+		listenPort, err = defaultFunnelListenPort(listenProto, req.ListenPort)
+	}
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	backendTailnetIP := req.BackendTailnet
@@ -689,6 +701,10 @@ func (h *Mirage) createTenantFunnelService(user *User, req FunnelServiceCreateRe
 }
 
 func (h *Mirage) createManagedFunnelDomain(user *User, domainName string, listenPort int, edgeMode, listenerMode string) (*FunnelDomain, error) {
+	domainName = normalizeFunnelBaseDomain(domainName)
+	if domainName == "" {
+		return nil, fmt.Errorf("未指定托管 Funnel 域名")
+	}
 	if strings.TrimSpace(edgeMode) == "" {
 		edgeMode = FunnelEdgeModeServer
 	}
@@ -1081,6 +1097,50 @@ func defaultFunnelListenPort(proto string, listenPort int) (int, error) {
 	}
 }
 
+func preferredFunnelDefaultListenPort(proto string, cfg *FunnelPlatformConfig, domain *FunnelDomain) (int, error) {
+	if domain != nil {
+		switch proto {
+		case FunnelListenProtoHTTP, FunnelListenProtoWS:
+			if domain.HTTPPort > 0 {
+				return domain.HTTPPort, nil
+			}
+		case FunnelListenProtoHTTPS, FunnelListenProtoWSS, FunnelListenProtoTLSTerminatedTCP:
+			if domain.HTTPSPort > 0 {
+				return domain.HTTPSPort, nil
+			}
+		}
+	}
+
+	if cfg != nil && len(cfg.DirectBindPorts) > 0 {
+		ports := append([]int(nil), cfg.DirectBindPorts...)
+		sort.Ints(ports)
+		switch proto {
+		case FunnelListenProtoHTTP, FunnelListenProtoWS:
+			if containsInt(ports, 80) {
+				return 80, nil
+			}
+			for _, port := range ports {
+				if port != 443 {
+					return port, nil
+				}
+			}
+			return ports[0], nil
+		case FunnelListenProtoHTTPS, FunnelListenProtoWSS, FunnelListenProtoTLSTerminatedTCP:
+			if containsInt(ports, 443) {
+				return 443, nil
+			}
+			for i := len(ports) - 1; i >= 0; i-- {
+				if ports[i] != 80 {
+					return ports[i], nil
+				}
+			}
+			return ports[len(ports)-1], nil
+		}
+	}
+
+	return defaultFunnelListenPort(proto, 0)
+}
+
 func normalizeFunnelServiceBackend(backendType, backendScheme string, backendPort int) (string, int, error) {
 	backendType = strings.ToLower(strings.TrimSpace(backendType))
 	switch backendType {
@@ -1136,7 +1196,11 @@ func allocateManagedFunnelDomain(org *Organization, machine *Machine, cfg Funnel
 	if org == nil || machine == nil {
 		return ""
 	}
-	return fmt.Sprintf("machine-%d-%s.%s", machine.ID, org.StableID, base)
+	orgLabel := normalizeFunnelDNSLabel(org.StableID)
+	if orgLabel == "" {
+		orgLabel = fmt.Sprintf("org%d", org.ID)
+	}
+	return normalizeFunnelBaseDomain(fmt.Sprintf("machine-%d-%s.%s", machine.ID, orgLabel, base))
 }
 
 func allocateManagedFunnelDomainForOrg(db *gorm.DB, org *Organization, cfg FunnelPlatformConfig) (string, error) {

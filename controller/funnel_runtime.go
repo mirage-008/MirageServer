@@ -1617,7 +1617,16 @@ func (rt *funnelRuntime) requestManagedCertificate(host string) error {
 		return fmt.Errorf("Funnel 运行时尚未完成加载，请稍后重试")
 	}
 	if !allowed {
-		return fmt.Errorf("当前域名还没有进入证书签发列表")
+		if fallbackAllowed, reason := rt.dns01ManagedCertificateFallbackAllowed(host); fallbackAllowed {
+			log.Info().
+				Str("host", host).
+				Msg("allowing DNS-01 certificate issuance before runtime route becomes active")
+		} else {
+			if strings.TrimSpace(reason) == "" {
+				reason = "当前域名还没有进入证书签发列表"
+			}
+			return fmt.Errorf("%s", reason)
+		}
 	}
 
 	challengeType := FunnelCertChallengeHTTP01
@@ -1651,6 +1660,40 @@ func (rt *funnelRuntime) requestManagedCertificate(host string) error {
 	}()
 
 	return nil
+}
+
+func (rt *funnelRuntime) dns01ManagedCertificateFallbackAllowed(host string) (bool, string) {
+	if rt == nil || rt.app == nil {
+		return false, "Funnel 运行时未就绪"
+	}
+	if !rt.dns01EligibleForHost(host) {
+		return false, "当前域名还没有进入证书签发列表"
+	}
+
+	domain := &FunnelDomain{}
+	if err := rt.app.db.Where("domain = ?", normalizeFunnelBaseDomain(host)).First(domain).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, "未找到对应的 Funnel 域名记录"
+		}
+		return false, "读取 Funnel 域名记录失败"
+	}
+
+	var count int64
+	if err := rt.app.db.Model(&FunnelService{}).
+		Where("domain_id = ? AND enabled = ?", domain.ID, true).
+		Where("listen_proto IN ?", []string{
+			FunnelListenProtoHTTPS,
+			FunnelListenProtoWSS,
+			FunnelListenProtoTLSTerminatedTCP,
+		}).
+		Count(&count).Error; err != nil {
+		return false, "读取 Funnel 服务配置失败"
+	}
+	if count == 0 {
+		return false, "当前域名还没有关联任何需要证书的公开服务"
+	}
+
+	return true, ""
 }
 
 func (rt *funnelRuntime) noteIssuedCertificate(host string, cert *tls.Certificate, challengeType, certificateRef, privateKeyRef string) {

@@ -497,6 +497,91 @@ func TestFunnelRuntimePrewiresOfficialIngressDNSForWireIntent(t *testing.T) {
 	}
 }
 
+func TestRequestManagedCertificateAllowsDNS01BeforeRouteActivation(t *testing.T) {
+	app := newFunnelTenantTestMirage(t)
+
+	sysCfg := &SysConfig{}
+	if err := app.db.First(sysCfg).Error; err != nil {
+		t.Fatalf("First(sysCfg): %v", err)
+	}
+	_, dnsServer := newDNSMgrTestServer(t)
+	defer dnsServer.Close()
+
+	sysCfg.FunnelCfg.ManagedDNSProvider = FunnelManagedDNSProviderDNSMgr
+	sysCfg.FunnelCfg.ManagedBaseDomain = defaultFunnelDNSMgrBaseDomain
+	sysCfg.FunnelCfg.ManagedDNSAPIBaseURL = dnsServer.URL
+	sysCfg.FunnelCfg.ManagedDNSUID = 1000
+	sysCfg.FunnelCfg.ManagedDNSAPIKey = "secret"
+	sysCfg.FunnelCfg.DirectBindPorts = FunnelPortList{880, 4443}
+	if err := app.db.Save(sysCfg).Error; err != nil {
+		t.Fatalf("Save(sysCfg): %v", err)
+	}
+	app.cfg.FunnelCfg = sysCfg.FunnelCfg
+
+	owner, err := app.GetUser("owner@example.com", "tenant-org", "Mirage")
+	if err != nil {
+		t.Fatalf("GetUser(owner): %v", err)
+	}
+	machine := &Machine{}
+	if err := app.db.Where("hostname = ?", "tenant-machine").First(machine).Error; err != nil {
+		t.Fatalf("First(machine): %v", err)
+	}
+
+	service, domain, _, err := app.createTenantFunnelService(owner, FunnelServiceCreateRequest{
+		MachineID:     machine.ID,
+		DomainMode:    "managed",
+		ListenProto:   FunnelListenProtoHTTPS,
+		BackendType:   FunnelBackendTypeHTTPProxy,
+		BackendScheme: "http",
+		BackendPort:   8080,
+	})
+	if err != nil {
+		t.Fatalf("createTenantFunnelService(): %v", err)
+	}
+	if got, want := service.ListenPort, 4443; got != want {
+		t.Fatalf("service.ListenPort = %d, want %d", got, want)
+	}
+	if got, want := domain.HTTPSPort, 4443; got != want {
+		t.Fatalf("domain.HTTPSPort = %d, want %d", got, want)
+	}
+
+	service.ListenPort = 443
+	if err := app.db.Save(service).Error; err != nil {
+		t.Fatalf("Save(service): %v", err)
+	}
+
+	rt := newFunnelRuntime(app)
+	snapshot, _, err := rt.buildSnapshot()
+	if err != nil {
+		t.Fatalf("buildSnapshot(): %v", err)
+	}
+	rt.snapshot = snapshot
+	if !rt.dns01EligibleForHost(domain.Domain) {
+		t.Fatalf("dns01EligibleForHost(%q) = false", domain.Domain)
+	}
+	if ok, reason := rt.dns01ManagedCertificateFallbackAllowed(domain.Domain); !ok {
+		t.Fatalf("dns01ManagedCertificateFallbackAllowed(%q) = false: %s", domain.Domain, reason)
+	}
+	triggered := make(chan string, 1)
+	rt.managedCertRequestFunc = func(ctx context.Context, host string) (funnelManagedCertRequestResult, error) {
+		triggered <- host
+		return funnelManagedCertRequestResult{ChallengeType: FunnelCertChallengeDNS01}, nil
+	}
+
+	if err := rt.requestManagedCertificate(domain.Domain); err != nil {
+		t.Fatalf("requestManagedCertificate(): %v", err)
+	}
+
+	select {
+	case got := <-triggered:
+		if got != domain.Domain {
+			t.Fatalf("certificate host = %q, want %q", got, domain.Domain)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for certificate request")
+	}
+}
+
 func freeFunnelTestPort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
