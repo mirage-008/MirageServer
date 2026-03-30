@@ -25,9 +25,9 @@ This is the only direction that keeps Mirage compatible with official upstream c
 - flow-log collection, query, retention, export, and audit-plane features
 - share/invite and other Mirage product workflows
 
-### `tailscale`
+### `mirage`
 
-`/home/hao/A-1/tailscale` is the active Mirage client repository. It owns:
+`/home/hao/A-1/mirage` is the active Mirage client repository. It owns:
 
 - CLI and daemon behavior
 - Windows GUI and Linux GUI
@@ -91,7 +91,7 @@ The baseline is explicitly not:
 If this baseline is followed consistently:
 
 - `MirageServer` can keep official-client compatibility without repeated structural regressions
-- `/home/hao/A-1/tailscale` can keep rebasing against upstream with lower merge pressure
+- `/home/hao/A-1/mirage` can keep rebasing against upstream with lower merge pressure
 - Mirage-specific features such as managed edge, self-hosted flow logs, and product UX stay additive instead of forking the protocol model
 
 ## Immediate Execution Consequence

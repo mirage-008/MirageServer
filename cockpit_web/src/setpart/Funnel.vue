@@ -24,11 +24,13 @@ const managedDnsUid = ref("");
 const managedDnsApiKey = ref("");
 const managedDnsSkipTlsVerify = ref(false);
 const effectiveIngressTargets = ref([]);
+const platformSummary = ref({});
 const edges = ref([]);
 const domains = ref([]);
 
 const configLoading = ref(false);
 const domainsLoading = ref(false);
+const pageRefreshing = ref(false);
 const saveConfigText = ref("保存");
 const verifyingDomainID = ref("");
 const renewingDomainID = ref("");
@@ -72,6 +74,77 @@ function unwrapData(response) {
   return response["data"] || null;
 }
 
+function requestErrorMessage(error, fallback) {
+  const responseStatus = error?.response?.data?.status;
+  if (typeof responseStatus == "string" && responseStatus.trim() != "") {
+    return normalizeRequestErrorMessage(responseStatus, fallback);
+  }
+  if (typeof error?.message == "string" && error.message.trim() != "") {
+    return normalizeRequestErrorMessage(error.message, fallback);
+  }
+  return normalizeRequestErrorMessage(String(error || ""), fallback);
+}
+
+function showRequestError(error, fallback) {
+  toastMsg.value = requestErrorMessage(error, fallback);
+  toastShow.value = true;
+}
+
+function isInternalErrorDetail(value) {
+  const text = String(value || "").toLowerCase();
+  if (text == "") {
+    return false;
+  }
+  return [
+    "json:",
+    "sql:",
+    "sqlite",
+    "gorm",
+    "decode failed",
+    "unmarshal",
+    "marshal",
+    "dnsmgr",
+    "record not found",
+    "unexpected eof",
+    "stream closed",
+    "x509",
+    "tls:",
+    "lookup ",
+    "dial ",
+    "http2:",
+    "cannot ",
+  ].some(function (keyword) {
+    return text.includes(keyword);
+  });
+}
+
+function normalizeRequestErrorMessage(value, fallback) {
+  let message = String(value || "")
+    .replace(/^error-/, "")
+    .replace(/^Error:\s*/, "")
+    .replace(/Funnel/g, "")
+    .trim();
+  if (message == "") {
+    return fallback;
+  }
+  const parts = message.split(/[:：]/);
+  if (parts.length > 1) {
+    const prefix = parts.shift()?.trim() || fallback;
+    const detail = parts.join("：").trim();
+    if (detail == "") {
+      return prefix;
+    }
+    if (isInternalErrorDetail(detail)) {
+      return prefix;
+    }
+    return `${prefix}：${detail}`;
+  }
+  if (isInternalErrorDetail(message)) {
+    return fallback;
+  }
+  return message;
+}
+
 function applyConfigPayload(payload) {
   const config = payload?.config || payload || {};
   managedBaseDomain.value = config["managedBaseDomain"] || "";
@@ -93,6 +166,8 @@ function applyConfigPayload(payload) {
   } else {
     effectiveIngressTargets.value = [];
   }
+
+  platformSummary.value = payload?.platformSummary || {};
 }
 
 function edgeListFromPayload(payload) {
@@ -127,8 +202,7 @@ function loadConfig() {
       applyConfigPayload(payload);
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "获取平台配置失败");
     })
     .finally(function () {
       configLoading.value = false;
@@ -146,8 +220,7 @@ function loadEdges() {
       edges.value = edgeListFromPayload(payload);
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "获取入口节点失败");
     });
 }
 
@@ -163,8 +236,7 @@ function loadDomains() {
       domains.value = domainListFromPayload(payload);
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "获取域名状态失败");
     })
     .finally(function () {
       domainsLoading.value = false;
@@ -203,8 +275,7 @@ function saveConfig() {
     })
     .catch(function (error) {
       saveConfigText.value = "保存";
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "保存平台配置失败");
     });
 }
 
@@ -229,8 +300,7 @@ function verifyDomain(domain) {
       loadDomains().then().catch();
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "域名验证失败");
     })
     .finally(function () {
       verifyingDomainID.value = "";
@@ -256,8 +326,7 @@ function renewCert(domain) {
       loadDomains().then().catch();
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "证书续期请求失败");
     })
     .finally(function () {
       renewingDomainID.value = "";
@@ -287,6 +356,33 @@ function edgeCapabilities(edge) {
   return result;
 }
 
+function refreshPage() {
+  pageRefreshing.value = true;
+  Promise.all([loadConfig(), loadEdges(), loadDomains()]).finally(function () {
+    pageRefreshing.value = false;
+  });
+}
+
+function summaryTone(status) {
+  switch (status) {
+    case "ready":
+      return "inline-flex items-center align-middle justify-center font-medium border border-emerald-200 bg-emerald-50 text-emerald-700 rounded-full px-2 py-1 leading-none text-xs";
+    case "pending":
+      return "inline-flex items-center align-middle justify-center font-medium border border-amber-200 bg-amber-50 text-amber-700 rounded-full px-2 py-1 leading-none text-xs";
+    case "error":
+      return "inline-flex items-center align-middle justify-center font-medium border border-rose-200 bg-rose-50 text-rose-700 rounded-full px-2 py-1 leading-none text-xs";
+    default:
+      return "inline-flex items-center align-middle justify-center font-medium border border-stone-200 bg-stone-100 text-stone-700 rounded-full px-2 py-1 leading-none text-xs";
+  }
+}
+
+function joinSummaryPorts(value) {
+  if (!Array.isArray(value) || value.length == 0) {
+    return "-";
+  }
+  return value.join(", ");
+}
+
 const hasIngressTargets = computed(() => {
   return effectiveIngressTargets.value.length > 0;
 });
@@ -304,22 +400,54 @@ onMounted(() => {
 
 <template>
   <div class="flex-1">
-    <div class="text-3xl font-semibold tracking-tight leading-tight mb-2 flex items-center">
-      <h1 class="mr-2" tabindex="-1">公网入口</h1>
+    <div class="flex items-center justify-between gap-4">
+      <div class="text-3xl font-semibold tracking-tight leading-tight mb-2 flex items-center">
+        <h1 class="mr-2" tabindex="-1">公网入口</h1>
+      </div>
+      <button
+        @click="refreshPage"
+        :disabled="pageRefreshing"
+        class="btn h-9 min-h-fit border-stone-300 bg-white hover:bg-stone-100 text-stone-700"
+      >
+        {{ pageRefreshing ? "刷新中..." : "刷新" }}
+      </button>
     </div>
     <div class="text-gray-600 mt-3">
-      <p>配置 Mirage Funnel 的平台级域名、监听模式和入口节点清单。</p>
+      <p>配置 Funnel 的平台入口、域名托管和边缘节点。</p>
       <p class="text-sm text-gray-400 mt-1">
         托管免费域名会按固定后缀 <code class="bg-gray-200 text-xs rounded px-1">.mirage.mm.md</code> 自动写入 DNS。
       </p>
     </div>
 
     <div class="mt-6 space-y-8">
+      <section class="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
+        <header class="max-w-2xl">
+          <h3 class="text-xl font-semibold tracking-tight">当前状态</h3>
+        </header>
+        <div class="mt-4 flex items-start gap-4">
+          <span :class="summaryTone(platformSummary.status)">
+            {{ platformSummary.label || "未检查" }}
+          </span>
+          <div class="min-w-0 flex-1">
+            <div class="text-gray-700">{{ platformSummary.reason || "还没有状态信息。" }}</div>
+            <div class="text-sm text-gray-500 mt-2">
+              下一步：{{ platformSummary.nextAction || "先把入口配置补齐。" }}
+            </div>
+            <div class="text-xs text-gray-400 mt-3">
+              Serve: {{ platformSummary.officialServeAvailable ? "可用" : "不可用" }}
+              / Funnel: {{ platformSummary.officialFunnelAvailable ? "可用" : "不可用" }}
+              / 公开端口: {{ joinSummaryPorts(platformSummary.publicPorts) }}
+              / 入口目标: {{ platformSummary.ingressTargetCount || 0 }}
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section>
         <header class="max-w-2xl">
           <h3 class="text-xl font-semibold tracking-tight">平台设置</h3>
         </header>
-        <p class="mt-3 text-gray-600">设置托管域名后缀、默认入口模式和监听地址。</p>
+        <p class="mt-3 text-gray-600">这里决定托管域名、监听地址和默认入口模式。</p>
         <div class="mt-4 grid gap-5 lg:grid-cols-2">
           <div>
             <p class="text-gray-600">托管基础域名</p>
@@ -457,7 +585,7 @@ onMounted(() => {
         </div>
 
         <div class="mt-5">
-          <p class="text-gray-600">生效中的入口目标</p>
+          <p class="text-gray-600">当前入口地址</p>
           <div v-if="hasIngressTargets" class="mt-2 flex flex-wrap gap-2">
             <span
               v-for="target in effectiveIngressTargets"
@@ -467,7 +595,7 @@ onMounted(() => {
               {{ typeof target == "string" ? target : target?.label || JSON.stringify(target) }}
             </span>
           </div>
-          <p v-else class="mt-2 text-sm text-gray-400">当前还没有可展示的入口目标。</p>
+          <p v-else class="mt-2 text-sm text-gray-400">当前还没有可用的入口地址。</p>
         </div>
       </section>
 
@@ -475,7 +603,7 @@ onMounted(() => {
         <header class="max-w-2xl">
           <h3 class="text-xl font-semibold tracking-tight">入口节点</h3>
         </header>
-        <p class="mt-3 text-gray-600">这里展示当前已知的 server-edge / remote-edge 执行目标。</p>
+        <p class="mt-3 text-gray-600">查看当前接流量的入口节点和能力。</p>
         <div class="mt-4 overflow-x-auto border border-stone-200 rounded-xl">
           <table class="table w-full">
             <thead>
@@ -536,7 +664,7 @@ onMounted(() => {
           <h3 class="text-xl font-semibold tracking-tight">域名与证书操作</h3>
         </header>
         <p class="mt-3 text-gray-600">
-          现在托管域名验证会实际检查 DNS 记录状态；证书续期仍然保留 deferred 流程。
+          在这里检查 DNS 状态，或重新触发证书续期。
         </p>
         <div class="mt-4 overflow-x-auto border border-stone-200 rounded-xl">
           <table class="table w-full">

@@ -42,14 +42,14 @@ func machineCanUseOfficialServe(machine *Machine, ipPrefixes []netip.Prefix, cfg
 	if machine == nil || !officialServeAvailable(cfg) {
 		return false
 	}
-	return len(officialCertDomainsForMachine(machine, ipPrefixes)) > 0
+	return len(officialCertDomainsForMachine(machine, ipPrefixes, cfg)) > 0
 }
 
 func machineCanUseOfficialFunnel(machine *Machine, ipPrefixes []netip.Prefix, cfg FunnelPlatformConfig) bool {
 	if machine == nil || !officialFunnelAvailable(cfg) {
 		return false
 	}
-	return len(officialCertDomainsForMachine(machine, ipPrefixes)) > 0
+	return len(officialCertDomainsForMachine(machine, ipPrefixes, cfg)) > 0
 }
 
 func officialFunnelPortCapability(cfg FunnelPlatformConfig) (tailcfg.NodeCapability, bool) {
@@ -85,31 +85,43 @@ func machineHasOfficialFunnelIngress(machine *Machine) bool {
 	return machine.GetHostInfo().IngressEnabled
 }
 
-func officialFunnelDomainForMachine(machine *Machine, ipPrefixes []netip.Prefix) string {
+func officialFunnelBaseDomainForMachine(machine *Machine, ipPrefixes []netip.Prefix, cfg FunnelPlatformConfig) string {
 	if machine == nil {
 		return ""
 	}
-	baseDomain := strings.TrimSuffix(normalizeManagedFQDN(machine.User.Organization.MagicDnsDomain), ".")
+	baseDomain := strings.TrimSuffix(normalizeManagedFQDN(cfg.ManagedBaseDomain), ".")
+	if baseDomain != "" {
+		return baseDomain
+	}
+	baseDomain = strings.TrimSuffix(normalizeManagedFQDN(machine.User.Organization.MagicDnsDomain), ".")
 	if baseDomain == "" && machine.User.Organization.EnableMagic {
 		_, baseDomain = machine.User.GetDNSConfig(ipPrefixes)
 		baseDomain = strings.TrimSuffix(baseDomain, ".")
 	}
+	return baseDomain
+}
+
+func officialFunnelDomainForMachine(machine *Machine, ipPrefixes []netip.Prefix, cfg FunnelPlatformConfig) string {
+	if machine == nil {
+		return ""
+	}
+	baseDomain := officialFunnelBaseDomainForMachine(machine, ipPrefixes, cfg)
 	if baseDomain != "" {
 		return normalizeFunnelBaseDomain(machine.GivenName + "." + baseDomain)
 	}
 	return normalizeFunnelBaseDomain(machine.GivenName)
 }
 
-func officialCertDomainsForMachine(machine *Machine, ipPrefixes []netip.Prefix) []string {
-	domain := strings.TrimSuffix(officialFunnelDomainForMachine(machine, ipPrefixes), ".")
+func officialCertDomainsForMachine(machine *Machine, ipPrefixes []netip.Prefix, cfg FunnelPlatformConfig) []string {
+	domain := strings.TrimSuffix(officialFunnelDomainForMachine(machine, ipPrefixes, cfg), ".")
 	if domain == "" || !strings.Contains(domain, ".") {
 		return nil
 	}
 	return []string{domain}
 }
 
-func officialACMEChallengeNameForMachine(machine *Machine, ipPrefixes []netip.Prefix) string {
-	domains := officialCertDomainsForMachine(machine, ipPrefixes)
+func officialACMEChallengeNameForMachine(machine *Machine, ipPrefixes []netip.Prefix, cfg FunnelPlatformConfig) string {
+	domains := officialCertDomainsForMachine(machine, ipPrefixes, cfg)
 	if len(domains) == 0 {
 		return ""
 	}

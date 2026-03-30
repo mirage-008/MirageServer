@@ -272,6 +272,7 @@ func (h *Mirage) generateMapResponse(
 	//cgao6: use User's DNSconfig instead
 	dnsConfig := getMapResponseDNSConfig(
 		h.cfg.IPPrefixes, //
+		h.cfg.FunnelCfg,
 		//		h.cfg.DNSConfig,
 		//		h.cfg.BaseDomain,
 		*machine,

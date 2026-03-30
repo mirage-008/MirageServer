@@ -160,7 +160,7 @@ type funnelRuntime struct {
 	getCertFunc func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
 	resolveManagedDNSProvider func() (managedFunnelDNSProvider, error)
-	newOrgDialer func(ctx context.Context, orgID int64) (funnelOrgDialer, error)
+	newOrgDialer              func(ctx context.Context, orgID int64) (funnelOrgDialer, error)
 
 	wg sync.WaitGroup
 }
@@ -207,6 +207,7 @@ func (h *Mirage) currentFunnelRuntime() *funnelRuntime {
 }
 
 func (h *Mirage) requestFunnelRuntimeReload() {
+	h.setLastStateChangeToNow()
 	if rt := h.currentFunnelRuntime(); rt != nil {
 		rt.requestReload("api")
 	}
@@ -658,7 +659,7 @@ func (rt *funnelRuntime) ensureOfficialIngressDNS() error {
 		if !machineNeedsOfficialFunnelWiring(machine) {
 			continue
 		}
-		domain := strings.TrimSuffix(officialFunnelDomainForMachine(machine, rt.app.cfg.IPPrefixes), ".")
+		domain := strings.TrimSuffix(officialFunnelDomainForMachine(machine, rt.app.cfg.IPPrefixes, rt.app.cfg.FunnelCfg), ".")
 		if domain == "" || !strings.Contains(domain, ".") {
 			continue
 		}
@@ -731,7 +732,7 @@ func (rt *funnelRuntime) appendOfficialIngressRoutes(snapshot *funnelRuntimeSnap
 		if !ok {
 			continue
 		}
-		domain := officialFunnelDomainForMachine(&machine, rt.app.cfg.IPPrefixes)
+		domain := officialFunnelDomainForMachine(&machine, rt.app.cfg.IPPrefixes, rt.app.cfg.FunnelCfg)
 		if domain == "" {
 			continue
 		}

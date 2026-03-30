@@ -616,6 +616,7 @@ func funnelDomainToMap(domain *FunnelDomain) map[string]any {
 	if domain == nil {
 		return nil
 	}
+	summary := funnelDomainSummary(domain)
 	return map[string]any{
 		"id":                  strconv.FormatInt(domain.ID, 10),
 		"stableId":            domain.StableID,
@@ -637,6 +638,10 @@ func funnelDomainToMap(domain *FunnelDomain) map[string]any {
 		"certId":              nullableInt64ToString(domain.CertID),
 		"lastError":           domain.LastError,
 		"lastDnsError":        domain.LastDNSError,
+		"summaryStatus":       summary["status"],
+		"summaryLabel":        summary["label"],
+		"summaryReason":       summary["reason"],
+		"nextAction":          summary["nextAction"],
 		"createdAt":           domain.CreatedAt,
 		"updatedAt":           domain.UpdatedAt,
 	}
@@ -805,6 +810,7 @@ func (c *Cockpit) funnelConfigEnvelope(sysCfg *SysConfig) (map[string]any, error
 	return map[string]any{
 		"config":                  cfg,
 		"effectiveIngressTargets": effectiveFunnelIngressTargets(cfg),
+		"platformSummary":         funnelPlatformSummary(cfg),
 	}, nil
 }
 
@@ -926,12 +932,350 @@ func funnelEdgesResponse(edges []FunnelEdge) []map[string]any {
 }
 
 func funnelServiceStatusResponse(service *FunnelService, domain *FunnelDomain, cert *FunnelCert, edge *FunnelEdge) map[string]any {
+	summary := funnelServiceSummary(service, domain, cert, edge)
 	return map[string]any{
-		"service":     funnelServiceToMap(service),
-		"domain":      funnelDomainToMap(domain),
-		"cert":        funnelCertToMap(cert),
-		"currentEdge": funnelEdgeToMap(edge),
-		"lastError":   service.LastError,
+		"service":        funnelServiceToMap(service),
+		"domain":         funnelDomainToMap(domain),
+		"cert":           funnelCertToMap(cert),
+		"currentEdge":    funnelEdgeToMap(edge),
+		"lastError":      service.LastError,
+		"summaryStatus":  summary["status"],
+		"summaryLabel":   summary["label"],
+		"summaryReason":  summary["reason"],
+		"nextAction":     summary["nextAction"],
+		"publicEndpoint": summary["publicEndpoint"],
+	}
+}
+
+func funnelDomainSummary(domain *FunnelDomain) map[string]any {
+	if domain == nil {
+		return map[string]any{
+			"status":     "pending",
+			"label":      "未创建",
+			"reason":     "还没有域名记录",
+			"nextAction": "先创建域名",
+		}
+	}
+
+	switch strings.TrimSpace(domain.Status) {
+	case FunnelDomainStatusDisabled:
+		return map[string]any{
+			"status":     "disabled",
+			"label":      "已停用",
+			"reason":     "这个域名当前没有参与发布",
+			"nextAction": "恢复相关服务后再使用",
+		}
+	case FunnelDomainStatusError:
+		reason := strings.TrimSpace(domain.LastDNSError)
+		if reason == "" {
+			reason = strings.TrimSpace(domain.LastError)
+		}
+		if reason == "" {
+			reason = "域名状态异常"
+		}
+		return map[string]any{
+			"status":     "error",
+			"label":      "异常",
+			"reason":     reason,
+			"nextAction": "修正后重新验证",
+		}
+	}
+
+	if !funnelDomainDNSReady(domain) {
+		reason := strings.TrimSpace(domain.LastDNSError)
+		if reason == "" {
+			reason = "等待 DNS 生效"
+		}
+		nextAction := "确认解析生效后再验证"
+		if domain.DomainType == FunnelDomainTypeManaged {
+			nextAction = "检查托管 DNS 记录后再验证"
+		}
+		status := "pending"
+		label := "待验证"
+		if strings.EqualFold(strings.TrimSpace(domain.DNSStatus), FunnelDNSStatusError) {
+			status = "error"
+			label = "DNS 异常"
+		}
+		return map[string]any{
+			"status":     status,
+			"label":      label,
+			"reason":     reason,
+			"nextAction": nextAction,
+		}
+	}
+
+	if strings.TrimSpace(domain.Status) == FunnelDomainStatusPendingCert {
+		return map[string]any{
+			"status":     "pending",
+			"label":      "待证书",
+			"reason":     "DNS 已就绪，等待证书签发",
+			"nextAction": "稍后刷新，必要时手动续期",
+		}
+	}
+
+	return map[string]any{
+		"status":     "ready",
+		"label":      "已就绪",
+		"reason":     "域名已经可以发布服务",
+		"nextAction": "现在可以绑定服务",
+	}
+}
+
+func funnelServiceSummary(service *FunnelService, domain *FunnelDomain, cert *FunnelCert, edge *FunnelEdge) map[string]any {
+	if service == nil {
+		return map[string]any{
+			"status":     "pending",
+			"label":      "未创建",
+			"reason":     "还没有服务记录",
+			"nextAction": "先创建服务",
+		}
+	}
+
+	if !service.Enabled || strings.TrimSpace(service.ConfigStatus) == FunnelServiceConfigStatusDisabled {
+		return map[string]any{
+			"status":         "disabled",
+			"label":          "已停用",
+			"reason":         "这个服务当前没有对外发布",
+			"nextAction":     "启用后即可对外访问",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	}
+
+	domainSummary := funnelDomainSummary(domain)
+	switch strings.TrimSpace(domain.Status) {
+	case FunnelDomainStatusDisabled:
+		return map[string]any{
+			"status":         "disabled",
+			"label":          "域名停用",
+			"reason":         "绑定域名当前没有参与发布",
+			"nextAction":     "恢复域名后再启用服务",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	case FunnelDomainStatusError:
+		return map[string]any{
+			"status":         "error",
+			"label":          domainSummary["label"],
+			"reason":         domainSummary["reason"],
+			"nextAction":     domainSummary["nextAction"],
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	}
+
+	if !funnelDomainDNSReady(domain) {
+		return map[string]any{
+			"status":         domainSummary["status"],
+			"label":          domainSummary["label"],
+			"reason":         domainSummary["reason"],
+			"nextAction":     domainSummary["nextAction"],
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	}
+
+	if cert != nil {
+		switch strings.TrimSpace(cert.CertStatus) {
+		case FunnelCertStatusError, FunnelCertStatusExpired:
+			reason := strings.TrimSpace(cert.LastError)
+			if reason == "" {
+				reason = "证书签发状态异常"
+			}
+			return map[string]any{
+				"status":         "error",
+				"label":          "证书异常",
+				"reason":         reason,
+				"nextAction":     "修正证书问题后重新续期",
+				"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+			}
+		case FunnelCertStatusPending:
+			if requiresFunnelCert(service) {
+				return map[string]any{
+					"status":         "pending",
+					"label":          "待证书",
+					"reason":         "域名已就绪，等待证书签发",
+					"nextAction":     "稍后刷新，必要时手动续期",
+					"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+				}
+			}
+		}
+	} else if requiresFunnelCert(service) {
+		return map[string]any{
+			"status":         "pending",
+			"label":          "待证书",
+			"reason":         "当前还没有可用证书记录",
+			"nextAction":     "稍后刷新，必要时补发证书",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	}
+
+	switch strings.TrimSpace(service.EdgeStatus) {
+	case FunnelServiceEdgeStatusUnavailable:
+		reason := strings.TrimSpace(service.LastError)
+		if reason == "" {
+			reason = "当前入口节点不可用"
+		}
+		return map[string]any{
+			"status":         "error",
+			"label":          "入口异常",
+			"reason":         reason,
+			"nextAction":     "检查入口节点状态和协议能力",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	case FunnelServiceEdgeStatusPending:
+		reason := strings.TrimSpace(service.LastError)
+		if reason == "" {
+			reason = "等待入口节点应用配置"
+		}
+		return map[string]any{
+			"status":         "pending",
+			"label":          "待下发",
+			"reason":         reason,
+			"nextAction":     "稍后刷新，检查 edge 同步状态",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	}
+
+	switch strings.TrimSpace(service.BackendStatus) {
+	case FunnelServiceBackendStatusError:
+		reason := strings.TrimSpace(service.LastError)
+		if reason == "" {
+			reason = "后端当前不可用"
+		}
+		return map[string]any{
+			"status":         "error",
+			"label":          "后端异常",
+			"reason":         reason,
+			"nextAction":     "检查设备在线状态和端口连通性",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	case FunnelServiceBackendStatusDegraded:
+		reason := strings.TrimSpace(service.LastError)
+		if reason == "" {
+			reason = "后端状态降级"
+		}
+		return map[string]any{
+			"status":         "pending",
+			"label":          "后端降级",
+			"reason":         reason,
+			"nextAction":     "检查设备状态和服务日志",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	}
+
+	switch strings.TrimSpace(service.ConfigStatus) {
+	case FunnelServiceConfigStatusError, FunnelServiceConfigStatusDegraded:
+		reason := strings.TrimSpace(service.LastError)
+		if reason == "" {
+			reason = "公网服务配置异常"
+		}
+		return map[string]any{
+			"status":         "error",
+			"label":          "配置异常",
+			"reason":         reason,
+			"nextAction":     "检查域名、入口模式和后端设置",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	case FunnelServiceConfigStatusPending, FunnelServiceConfigStatusApplying:
+		reason := strings.TrimSpace(service.LastError)
+		if reason == "" {
+			reason = "等待服务配置生效"
+		}
+		return map[string]any{
+			"status":         "pending",
+			"label":          "配置中",
+			"reason":         reason,
+			"nextAction":     "稍后刷新，确认入口和后端已就绪",
+			"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+		}
+	}
+
+	reason := "公网服务已可访问"
+	if edge != nil && edge.EdgeType == FunnelEdgeTypeNavi {
+		reason = "公网服务已切到 remote-edge"
+	}
+	return map[string]any{
+		"status":         "ready",
+		"label":          "已可用",
+		"reason":         reason,
+		"nextAction":     "现在可以直接访问",
+		"publicEndpoint": funnelServicePublicEndpoint(service, domain),
+	}
+}
+
+func funnelServicePublicEndpoint(service *FunnelService, domain *FunnelDomain) string {
+	if service == nil || domain == nil {
+		return ""
+	}
+	host := strings.TrimSpace(domain.Domain)
+	if host == "" {
+		return ""
+	}
+	mountPath := normalizeFunnelMountPath(service.MountPath)
+	switch strings.TrimSpace(service.ListenProto) {
+	case FunnelListenProtoHTTP:
+		if service.ListenPort > 0 && service.ListenPort != 80 {
+			host = fmt.Sprintf("%s:%d", host, service.ListenPort)
+		}
+		return "http://" + host + mountPath
+	case FunnelListenProtoHTTPS:
+		if service.ListenPort > 0 && service.ListenPort != 443 {
+			host = fmt.Sprintf("%s:%d", host, service.ListenPort)
+		}
+		return "https://" + host + mountPath
+	case FunnelListenProtoWS:
+		if service.ListenPort > 0 && service.ListenPort != 80 {
+			host = fmt.Sprintf("%s:%d", host, service.ListenPort)
+		}
+		return "ws://" + host + mountPath
+	case FunnelListenProtoWSS:
+		if service.ListenPort > 0 && service.ListenPort != 443 {
+			host = fmt.Sprintf("%s:%d", host, service.ListenPort)
+		}
+		return "wss://" + host + mountPath
+	case FunnelListenProtoTCP, FunnelListenProtoTLSTerminatedTCP:
+		if service.ListenPort > 0 {
+			return fmt.Sprintf("%s:%d", host, service.ListenPort)
+		}
+		return host
+	default:
+		return host
+	}
+}
+
+func requiresFunnelCert(service *FunnelService) bool {
+	if service == nil {
+		return false
+	}
+	switch strings.TrimSpace(service.ListenProto) {
+	case FunnelListenProtoHTTPS, FunnelListenProtoWSS, FunnelListenProtoTLSTerminatedTCP:
+		return true
+	default:
+		return false
+	}
+}
+
+func funnelPlatformSummary(cfg FunnelPlatformConfig) map[string]any {
+	targets := effectiveFunnelIngressTargets(cfg)
+	ports := officialFunnelPorts(cfg)
+	if len(targets) == 0 {
+		return map[string]any{
+			"status":                  "pending",
+			"label":                   "未完成",
+			"reason":                  "还没有可用的公网入口地址",
+			"nextAction":              "先补齐公网地址和监听端口",
+			"officialServeAvailable":  false,
+			"officialFunnelAvailable": false,
+			"publicPorts":             ports,
+			"ingressTargetCount":      0,
+		}
+	}
+	return map[string]any{
+		"status":                  "ready",
+		"label":                   "已可用",
+		"reason":                  "平台入口已就绪，可以向客户端开放 Funnel 能力",
+		"nextAction":              "现在可以开始测试客户端 Funnel",
+		"officialServeAvailable":  officialServeAvailable(cfg),
+		"officialFunnelAvailable": officialFunnelAvailable(cfg),
+		"publicPorts":             ports,
+		"ingressTargetCount":      len(targets),
 	}
 }
 

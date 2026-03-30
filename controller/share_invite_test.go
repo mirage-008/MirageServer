@@ -1205,6 +1205,69 @@ func TestListExternalSharedUsersByOrgIDDeduplicatesSourceUsers(t *testing.T) {
 	}
 }
 
+func TestConsoleSharedMachineUsesMasqueradedDisplayAddresses(t *testing.T) {
+	t.Parallel()
+
+	app := newShareInviteTestMirage(t)
+	sourceUser := createTestUser(t, app, "source@example.com", "Source", "source-org", "Mirage")
+	targetUser := createTestUser(t, app, "target@example.com", "Target", "target-org", "Mirage")
+
+	sourceMachine := createTestMachine(t, app, sourceUser, "shared-source", "100.64.0.10", "fd7a:115c:a1e0::10")
+	targetMachine := createTestMachine(t, app, targetUser, "target-owned", "100.64.0.20", "fd7a:115c:a1e0::20")
+
+	share, err := app.CreateMachineShare(sourceMachine, sourceUser, targetUser.Name)
+	if err != nil {
+		t.Fatalf("CreateMachineShare(): %v", err)
+	}
+	if _, err := app.AcceptMachineShareByToken(share.ShareToken, targetUser); err != nil {
+		t.Fatalf("AcceptMachineShareByToken(): %v", err)
+	}
+
+	visibleMachines, err := app.ListVisibleMachinesByUserID(targetUser.ID)
+	if err != nil {
+		t.Fatalf("ListVisibleMachinesByUserID(target user): %v", err)
+	}
+
+	var visibleSharedMachine *Machine
+	for i := range visibleMachines {
+		if visibleMachines[i].ID == sourceMachine.ID {
+			visibleSharedMachine = &visibleMachines[i]
+			break
+		}
+	}
+	if visibleSharedMachine == nil {
+		t.Fatalf("expected shared machine to be visible to target user, got %+v", visibleMachines)
+	}
+
+	sharedDisplayAddresses := preferredMachineAddressesForConsoleUser(targetUser, *visibleSharedMachine)
+	if len(sharedDisplayAddresses) == 0 {
+		t.Fatalf("expected shared machine display addresses, got none")
+	}
+	for _, rawAddr := range sourceMachine.IPAddresses {
+		for _, displayAddr := range sharedDisplayAddresses {
+			if displayAddr == rawAddr.String() {
+				t.Fatalf("expected console display address to hide shared machine real IP %s, got %v", rawAddr, sharedDisplayAddresses)
+			}
+		}
+	}
+
+	resolvedSharedMachine, err := app.getVisibleMachineByConsoleAddress(targetUser, mustAddr(t, sharedDisplayAddresses[0]))
+	if err != nil {
+		t.Fatalf("getVisibleMachineByConsoleAddress(shared): %v", err)
+	}
+	if resolvedSharedMachine.ID != sourceMachine.ID {
+		t.Fatalf("expected shared machine lookup by display address to resolve source machine %d, got %d", sourceMachine.ID, resolvedSharedMachine.ID)
+	}
+
+	ownedDisplayAddresses := preferredMachineAddressesForConsoleUser(targetUser, *targetMachine)
+	if len(ownedDisplayAddresses) == 0 {
+		t.Fatalf("expected owned machine display addresses, got none")
+	}
+	if ownedDisplayAddresses[0] != targetMachine.IPAddresses[0].String() {
+		t.Fatalf("expected owned machine to keep real primary address %s, got %v", targetMachine.IPAddresses[0], ownedDisplayAddresses)
+	}
+}
+
 func TestListExternalSharedUsersByTargetUserIDDeduplicatesSourceUsers(t *testing.T) {
 	t.Parallel()
 

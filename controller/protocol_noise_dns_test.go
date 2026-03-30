@@ -69,7 +69,7 @@ func TestNoiseSetDNSHandlerUpsertsTXTRecord(t *testing.T) {
 		t.Fatalf("UnmarshalText(node key): %v", err)
 	}
 
-	expectedName := officialACMEChallengeNameForMachine(machine, app.cfg.IPPrefixes)
+	expectedName := officialACMEChallengeNameForMachine(machine, app.cfg.IPPrefixes, app.cfg.FunnelCfg)
 	reqBody, err := json.Marshal(tailcfg.SetDNSRequest{
 		NodeKey: nodeKey,
 		Name:    expectedName,

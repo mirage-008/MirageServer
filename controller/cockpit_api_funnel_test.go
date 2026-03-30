@@ -128,6 +128,13 @@ func TestCockpitFunnelAuthzAndConfig(t *testing.T) {
 	if len(targets) == 0 {
 		t.Fatal("expected ingress targets")
 	}
+	summary := data["platformSummary"].(map[string]any)
+	if summary["status"] != "ready" {
+		t.Fatalf("platformSummary.status = %#v", summary["status"])
+	}
+	if summary["officialFunnelAvailable"] != true {
+		t.Fatalf("officialFunnelAvailable = %#v", summary["officialFunnelAvailable"])
+	}
 
 	postBody, _ := json.Marshal(FunnelPlatformConfigRequest{
 		ManagedBaseDomain:       "",

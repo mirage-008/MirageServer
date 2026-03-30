@@ -38,6 +38,7 @@ const serviceForm = ref({
 
 const domainSubmitting = ref(false);
 const serviceSubmitting = ref(false);
+const reloading = ref(false);
 const deletingDomainID = ref("");
 const verifyingDomainID = ref("");
 const togglingServiceID = ref("");
@@ -69,6 +70,11 @@ function normalizeServiceRecord(item) {
       currentEdge,
       currentEdgeName: currentEdge["hostname"] || currentEdge["stableId"] || "",
       lastError: item["lastError"] || service["lastError"] || service["last_error"] || "",
+      summaryStatus: item["summaryStatus"] || "",
+      summaryLabel: item["summaryLabel"] || "",
+      summaryReason: item["summaryReason"] || "",
+      nextAction: item["nextAction"] || "",
+      publicEndpoint: item["publicEndpoint"] || "",
     };
   }
   return item;
@@ -79,6 +85,77 @@ function unwrapData(response) {
     return null;
   }
   return response["data"] || null;
+}
+
+function requestErrorMessage(error, fallback) {
+  const responseStatus = error?.response?.data?.status;
+  if (typeof responseStatus == "string" && responseStatus.trim() != "") {
+    return normalizeRequestErrorMessage(responseStatus, fallback);
+  }
+  if (typeof error?.message == "string" && error.message.trim() != "") {
+    return normalizeRequestErrorMessage(error.message, fallback);
+  }
+  return normalizeRequestErrorMessage(String(error || ""), fallback);
+}
+
+function showRequestError(error, fallback) {
+  toastMsg.value = requestErrorMessage(error, fallback);
+  toastShow.value = true;
+}
+
+function isInternalErrorDetail(value) {
+  const text = String(value || "").toLowerCase();
+  if (text == "") {
+    return false;
+  }
+  return [
+    "json:",
+    "sql:",
+    "sqlite",
+    "gorm",
+    "decode failed",
+    "unmarshal",
+    "marshal",
+    "dnsmgr",
+    "record not found",
+    "unexpected eof",
+    "stream closed",
+    "x509",
+    "tls:",
+    "lookup ",
+    "dial ",
+    "http2:",
+    "cannot ",
+  ].some(function (keyword) {
+    return text.includes(keyword);
+  });
+}
+
+function normalizeRequestErrorMessage(value, fallback) {
+  let message = String(value || "")
+    .replace(/^error-/, "")
+    .replace(/^Error:\s*/, "")
+    .replace(/Funnel/g, "")
+    .trim();
+  if (message == "") {
+    return fallback;
+  }
+  const parts = message.split(/[:：]/);
+  if (parts.length > 1) {
+    const prefix = parts.shift()?.trim() || fallback;
+    const detail = parts.join("：").trim();
+    if (detail == "") {
+      return prefix;
+    }
+    if (isInternalErrorDetail(detail)) {
+      return prefix;
+    }
+    return `${prefix}：${detail}`;
+  }
+  if (isInternalErrorDetail(message)) {
+    return fallback;
+  }
+  return message;
 }
 
 function servicePayloadFromForm() {
@@ -116,8 +193,7 @@ function loadDomains() {
       domains.value = Array.isArray(payload["domains"]) ? payload["domains"] : [];
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "获取公网域名失败");
     });
 }
 
@@ -134,8 +210,7 @@ function loadServices() {
         : [];
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "获取公网服务失败");
     });
 }
 
@@ -153,8 +228,7 @@ function loadMachines() {
       }
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "获取设备列表失败");
     });
 }
 
@@ -162,6 +236,13 @@ function reloadAll() {
   loadDomains().then().catch();
   loadServices().then().catch();
   loadMachines().then().catch();
+}
+
+function refreshPage() {
+  reloading.value = true;
+  Promise.all([loadDomains(), loadServices(), loadMachines()]).finally(function () {
+    reloading.value = false;
+  });
 }
 
 function createDomain() {
@@ -193,8 +274,7 @@ function createDomain() {
       loadDomains().then().catch();
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "创建域名失败");
     })
     .finally(function () {
       domainSubmitting.value = false;
@@ -221,8 +301,7 @@ function verifyDomain(domain) {
       loadDomains().then().catch();
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "验证域名失败");
     })
     .finally(function () {
       verifyingDomainID.value = "";
@@ -242,8 +321,7 @@ function deleteDomain(domain) {
       loadDomains().then().catch();
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "删除域名失败");
     })
     .finally(function () {
       deletingDomainID.value = "";
@@ -283,8 +361,7 @@ function createService() {
       loadServices().then().catch();
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "创建服务失败");
     })
     .finally(function () {
       serviceSubmitting.value = false;
@@ -304,8 +381,7 @@ function setServiceEnabled(service, enabled) {
       loadServices().then().catch();
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "更新服务状态失败");
     })
     .finally(function () {
       togglingServiceID.value = "";
@@ -325,15 +401,29 @@ function deleteService(service) {
       loadServices().then().catch();
     })
     .catch(function (error) {
-      toastMsg.value = String(error);
-      toastShow.value = true;
+      showRequestError(error, "删除服务失败");
     })
     .finally(function () {
       deletingServiceID.value = "";
     });
 }
 
-function serviceStatusText(service) {
+function summaryTone(status) {
+  switch (status) {
+    case "ready":
+      return "inline-flex items-center align-middle justify-center font-medium border border-emerald-200 bg-emerald-50 text-emerald-700 rounded-full px-2 py-1 leading-none text-xs";
+    case "pending":
+      return "inline-flex items-center align-middle justify-center font-medium border border-amber-200 bg-amber-50 text-amber-700 rounded-full px-2 py-1 leading-none text-xs";
+    case "error":
+      return "inline-flex items-center align-middle justify-center font-medium border border-rose-200 bg-rose-50 text-rose-700 rounded-full px-2 py-1 leading-none text-xs";
+    case "disabled":
+      return "inline-flex items-center align-middle justify-center font-medium border border-stone-200 bg-stone-100 text-stone-700 rounded-full px-2 py-1 leading-none text-xs";
+    default:
+      return "inline-flex items-center align-middle justify-center font-medium border border-stone-200 bg-stone-100 text-stone-700 rounded-full px-2 py-1 leading-none text-xs";
+  }
+}
+
+function serviceRawStateText(service) {
   return [
     service["configStatus"] || service["config_status"] || "-",
     service["dnsStatus"] || service["dns_status"] || "-",
@@ -343,8 +433,40 @@ function serviceStatusText(service) {
   ].join(" / ");
 }
 
+function serviceSummaryLabel(service) {
+  return service["summaryLabel"] || service["configStatus"] || "-";
+}
+
+function serviceSummaryReason(service) {
+  return service["summaryReason"] || service["lastError"] || service["last_error"] || "-";
+}
+
+function serviceNextAction(service) {
+  return service["nextAction"] || service["lastError"] || service["last_error"] || "-";
+}
+
+function domainSummaryLabel(domain) {
+  return domain["summaryLabel"] || domain["status"] || "-";
+}
+
+function domainSummaryReason(domain) {
+  return domain["summaryReason"] || domain["lastDnsError"] || domain["last_dns_error"] || "等待域名验证完成";
+}
+
 function machineLabel(machine) {
   return machine["name"] || machine["hostname"] || machine["id"];
+}
+
+function domainTypeLabel(domain) {
+  return domain["domainType"] == "managed" ? "托管域名" : "自定义域名";
+}
+
+function listenerModeLabel(domain) {
+  return domain["listenerMode"] == "behind_proxy" ? "前置代理" : "直接监听";
+}
+
+function edgeModeLabel(domain) {
+  return domain["edgeMode"] == "remote_edge" ? "Remote Edge" : "MirageServer";
 }
 
 onMounted(() => {
@@ -359,10 +481,19 @@ onMounted(() => {
         <div class="flex items-center">
           <h1 class="text-3xl font-semibold tracking-tight leading-tight mb-2">公网服务</h1>
         </div>
-        <div
-          class="inline-flex items-center align-middle justify-center font-medium border border-stone-200 bg-stone-200 text-gray-600 rounded-full px-2 py-1 leading-none text-sm ml-4 min-w-fit h-7"
-        >
-          {{ services.length }} 个服务
+        <div class="ml-auto flex items-center gap-3">
+          <div
+            class="inline-flex items-center align-middle justify-center font-medium border border-stone-200 bg-stone-200 text-gray-600 rounded-full px-2 py-1 leading-none text-sm min-w-fit h-7"
+          >
+            {{ services.length }} 个服务
+          </div>
+          <button
+            @click="refreshPage"
+            :disabled="reloading"
+            class="btn h-9 min-h-fit border-stone-300 bg-white hover:bg-stone-100 text-stone-700"
+          >
+            {{ reloading ? "刷新中..." : "刷新" }}
+          </button>
         </div>
       </header>
 
@@ -370,7 +501,7 @@ onMounted(() => {
         <div class="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
           <header>
             <h2 class="text-xl font-semibold tracking-tight">公共域名</h2>
-            <p class="mt-2 text-sm text-gray-500">这里可以先创建免费托管域名，也可以录入自定义域名。已有域名随后都能绑定到公网服务。</p>
+            <p class="mt-2 text-sm text-gray-500">先准备域名，再绑定服务。免费域名会自动分配，自定义域名需要先完成解析。</p>
           </header>
 
           <div class="mt-5 space-y-4">
@@ -440,7 +571,7 @@ onMounted(() => {
                 <tr>
                   <th>域名</th>
                   <th>状态</th>
-                  <th>验证信息</th>
+                <th>说明</th>
                   <th class="text-right">操作</th>
                 </tr>
               </thead>
@@ -449,18 +580,31 @@ onMounted(() => {
                   <td>
                     <div class="font-semibold text-gray-900">{{ domain.domain }}</div>
                     <div class="text-xs text-gray-400 font-mono">{{ domain.stableId || "-" }}</div>
-                    <div v-if="domain.lastDnsError || domain.last_dns_error" class="text-xs text-orange-700 mt-1">
-                      {{ domain.lastDnsError || domain.last_dns_error }}
-                    </div>
                   </td>
                   <td>
-                    <div>{{ domain.status || "-" }}</div>
-                    <div class="text-xs text-gray-400">DNS: {{ domain.dnsStatus || domain.dns_status || "-" }}</div>
+                    <span :class="summaryTone(domain.summaryStatus)">
+                      {{ domainSummaryLabel(domain) }}
+                    </span>
+                    <div class="text-xs text-gray-500 mt-2">{{ domainSummaryReason(domain) }}</div>
+                    <div class="text-xs text-gray-400 mt-1">
+                      域名: {{ domain.status || "-" }} / DNS: {{ domain.dnsStatus || domain.dns_status || "-" }}
+                    </div>
                   </td>
-                  <td class="text-xs font-mono text-gray-500">
-                    <div v-if="domain.validationMethod">{{ domain.validationMethod }}</div>
-                    <div v-if="domain.validationTarget">{{ domain.validationTarget }}</div>
-                    <div v-if="domain.validationToken">{{ domain.validationToken }}</div>
+                  <td class="text-xs text-gray-500">
+                    <div class="flex flex-wrap gap-1">
+                      <span class="inline-flex items-center rounded-full border border-stone-200 bg-stone-100 px-2 py-1 text-[11px] text-stone-700">
+                        {{ domainTypeLabel(domain) }}
+                      </span>
+                      <span class="inline-flex items-center rounded-full border border-stone-200 bg-stone-100 px-2 py-1 text-[11px] text-stone-700">
+                        {{ listenerModeLabel(domain) }}
+                      </span>
+                      <span class="inline-flex items-center rounded-full border border-stone-200 bg-stone-100 px-2 py-1 text-[11px] text-stone-700">
+                        {{ edgeModeLabel(domain) }}
+                      </span>
+                    </div>
+                    <div v-if="domain.validationMethod" class="mt-2 font-mono">{{ domain.validationMethod }}</div>
+                    <div v-if="domain.validationTarget" class="mt-1 font-mono">{{ domain.validationTarget }}</div>
+                    <div v-if="domain.validationToken" class="mt-1 break-all font-mono">{{ domain.validationToken }}</div>
                   </td>
                   <td>
                     <div class="flex justify-end gap-2">
@@ -492,7 +636,7 @@ onMounted(() => {
         <div class="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
           <header>
             <h2 class="text-xl font-semibold tracking-tight">公共服务</h2>
-            <p class="mt-2 text-sm text-gray-500">把组织内设备上的服务发布到新托管域名，或绑定到已经分配/录入的现有域名。</p>
+            <p class="mt-2 text-sm text-gray-500">把设备上的端口发布到公网。先选设备和域名，再填写协议和后端端口。</p>
           </header>
 
           <div class="mt-5 space-y-4">
@@ -515,7 +659,7 @@ onMounted(() => {
                   v-model="serviceForm.domainMode"
                   class="mt-2 py-2 px-3 w-full border border-stone-200 hover:border-stone-400 rounded-md bg-white"
                 >
-                  <option value="managed">自动分配托管域名</option>
+                  <option value="managed">新建托管域名</option>
                   <option value="existing">使用已有域名</option>
                 </select>
               </div>
@@ -616,7 +760,7 @@ onMounted(() => {
       <section class="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm">
         <header>
           <h2 class="text-xl font-semibold tracking-tight">已发布服务</h2>
-          <p class="mt-2 text-sm text-gray-500">这里展示控制面投影状态，便于区分配置已保存、DNS 未就绪、证书待签发、边缘待应用等阶段。</p>
+          <p class="mt-2 text-sm text-gray-500">查看当前发布状态。出问题时会直接告诉你原因和处理办法。</p>
         </header>
         <div class="mt-5 overflow-x-auto border border-stone-200 rounded-xl">
           <table class="table w-full">
@@ -626,7 +770,7 @@ onMounted(() => {
                 <th>域名</th>
                 <th>后端</th>
                 <th>状态</th>
-                <th>错误</th>
+                <th>下一步</th>
                 <th class="text-right">操作</th>
               </tr>
             </thead>
@@ -645,8 +789,15 @@ onMounted(() => {
                 <td class="font-mono text-xs">
                   {{ service.backendScheme || service.backendType }}://{{ service.backendTailnetIp || service.backendTailnetIP || "-" }}:{{ service.backendPort }}
                 </td>
-                <td class="text-sm">{{ serviceStatusText(service) }}</td>
-                <td class="text-sm text-orange-700">{{ service.lastError || service.last_error || "-" }}</td>
+                <td class="text-sm">
+                  <span :class="summaryTone(service.summaryStatus)">
+                    {{ serviceSummaryLabel(service) }}
+                  </span>
+                  <div class="text-xs text-gray-500 mt-2">{{ serviceSummaryReason(service) }}</div>
+                  <div v-if="service.publicEndpoint" class="text-xs font-mono text-gray-400 mt-1">{{ service.publicEndpoint }}</div>
+                  <div class="text-xs text-gray-400 mt-1">{{ serviceRawStateText(service) }}</div>
+                </td>
+                <td class="text-sm text-stone-600">{{ serviceNextAction(service) }}</td>
                 <td>
                   <div class="flex justify-end gap-2">
                     <button

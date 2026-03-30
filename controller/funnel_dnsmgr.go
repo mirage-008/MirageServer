@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"crypto/tls"
@@ -111,6 +112,41 @@ type dnsMgrRecordItem struct {
 	Status   string `json:"Status"`
 	TTL      int    `json:"TTL"`
 	Remark   string `json:"Remark"`
+}
+
+type dnsMgrRecordItemWire struct {
+	RecordID json.RawMessage `json:"RecordId"`
+	Domain   string          `json:"Domain"`
+	Name     string          `json:"Name"`
+	Type     string          `json:"Type"`
+	Value    string          `json:"Value"`
+	Line     string          `json:"Line"`
+	Status   string          `json:"Status"`
+	TTL      int             `json:"TTL"`
+	Remark   string          `json:"Remark"`
+}
+
+func (item *dnsMgrRecordItem) UnmarshalJSON(data []byte) error {
+	var wire dnsMgrRecordItemWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	recordID, err := decodeDNSMgrScalarString(wire.RecordID)
+	if err != nil {
+		return fmt.Errorf("decode RecordId: %w", err)
+	}
+	*item = dnsMgrRecordItem{
+		RecordID: recordID,
+		Domain:   wire.Domain,
+		Name:     wire.Name,
+		Type:     wire.Type,
+		Value:    wire.Value,
+		Line:     wire.Line,
+		Status:   wire.Status,
+		TTL:      wire.TTL,
+		Remark:   wire.Remark,
+	}
+	return nil
 }
 
 type dnsMgrMutationResponse struct {
@@ -486,6 +522,27 @@ func (p *dnsMgrManagedFunnelDNSProvider) postForm(ctx context.Context, endpoint 
 func dnsMgrAPISign(uid int64, timestamp int64, apiKey string) string {
 	sum := md5.Sum([]byte(strconv.FormatInt(uid, 10) + strconv.FormatInt(timestamp, 10) + apiKey))
 	return hex.EncodeToString(sum[:])
+}
+
+func decodeDNSMgrScalarString(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		return text, nil
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var number json.Number
+	if err := decoder.Decode(&number); err == nil {
+		return number.String(), nil
+	}
+
+	return "", fmt.Errorf("unsupported scalar %s", string(trimmed))
 }
 
 func dnsMgrRecordNameForDomain(fqdn, zone string) (string, error) {

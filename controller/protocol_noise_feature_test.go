@@ -121,6 +121,7 @@ func TestNoiseQueryFeatureHandlerReturnsInstructionsWhenNodeHasNoPublicDomain(t 
 	if err := app.db.Save(org).Error; err != nil {
 		t.Fatalf("Save(organization): %v", err)
 	}
+	app.cfg.FunnelCfg.ManagedBaseDomain = ""
 
 	machineKey, nodeKey := mustNoiseTestKeys(t, machine)
 	for _, feature := range []string{"serve", "funnel"} {

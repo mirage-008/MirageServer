@@ -237,6 +237,23 @@ func TestDNSMgrManagedFunnelDNSProviderEnsureAndDelete(t *testing.T) {
 	}
 }
 
+func TestDNSMgrRecordItemAcceptsNumericRecordID(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{"RecordId":123456,"Domain":"mirage.mm.md","Name":"demo","Type":"CNAME","Value":"mirage.mm.md","Line":"默认","Status":"1","TTL":60,"Remark":"Mirage Funnel managed"}`)
+
+	var item dnsMgrRecordItem
+	if err := json.Unmarshal(raw, &item); err != nil {
+		t.Fatalf("json.Unmarshal(): %v", err)
+	}
+	if item.RecordID != "123456" {
+		t.Fatalf("RecordID = %q, want %q", item.RecordID, "123456")
+	}
+	if item.Name != "demo" {
+		t.Fatalf("Name = %q", item.Name)
+	}
+}
+
 func TestDNSMgrRecordNameForDomain(t *testing.T) {
 	t.Parallel()
 

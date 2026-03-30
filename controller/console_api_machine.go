@@ -109,14 +109,63 @@ func IsUpdateAvailable(cur, latest string) bool {
 }
 
 func preferredMachineAddresses(addresses MachineAddresses) []string {
+	return preferredDisplayAddresses([]netip.Addr(addresses))
+}
+
+func preferredDisplayAddresses(addresses []netip.Addr) []string {
 	switch {
 	case len(addresses) >= 2 && addresses[0].Is4():
 		return []string{addresses[0].String(), addresses[1].String()}
 	case len(addresses) >= 2 && addresses[1].Is4():
 		return []string{addresses[1].String(), addresses[0].String()}
 	default:
-		return addresses.ToStringSlice()
+		res := make([]string, 0, len(addresses))
+		for _, addr := range addresses {
+			res = append(res, addr.String())
+		}
+		return res
 	}
+}
+
+func preferredMachineAddressesForConsoleUser(user *User, machine Machine) []string {
+	if user == nil || machine.User.OrganizationID == user.OrganizationID {
+		return preferredMachineAddresses(machine.IPAddresses)
+	}
+
+	machine.Shared = true
+	return preferredDisplayAddresses(sharedPeerDisplayAddressesForUser(user, machine))
+}
+
+func (h *Mirage) getVisibleMachineByConsoleAddress(user *User, addr netip.Addr) (*Machine, error) {
+	if user == nil {
+		return nil, ErrMachineNotFound
+	}
+
+	if machine := h.GetMachineByIP(addr); machine != nil {
+		visible, err := h.IsMachineVisibleToUser(machine, user.ID)
+		if err != nil {
+			return nil, err
+		}
+		if visible {
+			return machine, nil
+		}
+	}
+
+	visibleMachines, err := h.ListVisibleMachinesByUserID(user.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, machine := range visibleMachines {
+		for _, displayAddr := range preferredMachineAddressesForConsoleUser(user, machine) {
+			if displayAddr != addr.String() {
+				continue
+			}
+			return h.GetMachineByID(machine.ID)
+		}
+	}
+
+	return nil, ErrMachineNotFound
 }
 
 // 控制台获取设备信息列表的API
@@ -257,7 +306,7 @@ func (h *Mirage) ConsoleMachinesAPI(
 		if !tmpMachine.NeverExpires {
 			tmpMachine.ExpiryDesc = convExpiryToStr(time.Until(expires))
 		}
-		tmpMachine.Addresses = preferredMachineAddresses(machine.IPAddresses)
+		tmpMachine.Addresses = preferredMachineAddressesForConsoleUser(user, machine)
 		mlist = append(mlist, tmpMachine)
 	}
 
@@ -406,8 +455,8 @@ func (m *Mirage) ConsoleMachineDebugAPI(
 		m.doAPIResponse(w, "用户请求IP解析失败", nil)
 		return
 	}
-	targetMachine := m.GetMachineByIP(targetMIP)
-	if targetMachine == nil {
+	targetMachine, err := m.getVisibleMachineByConsoleAddress(user, targetMIP)
+	if err != nil || targetMachine == nil {
 		m.doAPIResponse(w, "组织内无此设备", nil)
 		return
 	}

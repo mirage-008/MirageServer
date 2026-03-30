@@ -99,7 +99,7 @@ func validateSetDNSRequestForMachine(h *Mirage, machine *Machine, req *tailcfg.S
 		return fmt.Errorf("missing dns value")
 	}
 
-	expectedName := officialACMEChallengeNameForMachine(machine, h.cfg.IPPrefixes)
+	expectedName := officialACMEChallengeNameForMachine(machine, h.cfg.IPPrefixes, h.cfg.FunnelCfg)
 	if expectedName == "" {
 		return fmt.Errorf("machine is not eligible for funnel cert dns challenges")
 	}

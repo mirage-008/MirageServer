@@ -684,7 +684,7 @@ func TestOfficialClientFunnelSmoke(t *testing.T) {
 
 	domain := strings.TrimSuffix(status.Self.DNSName, ".")
 	if machine != nil {
-		if resolved := officialFunnelDomainForMachine(machine, server.app.cfg.IPPrefixes); resolved != "" {
+		if resolved := officialFunnelDomainForMachine(machine, server.app.cfg.IPPrefixes, server.app.cfg.FunnelCfg); resolved != "" {
 			domain = resolved
 		}
 	}

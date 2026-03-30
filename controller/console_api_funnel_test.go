@@ -503,6 +503,12 @@ func TestConsoleFunnelManagedServiceUsesRemoteEdgeDefault(t *testing.T) {
 	if serviceMap["edgeStatus"] != FunnelServiceEdgeStatusApplied {
 		t.Fatalf("edgeStatus = %#v", serviceMap["edgeStatus"])
 	}
+	if got := status["summaryStatus"]; got != "pending" {
+		t.Fatalf("summaryStatus = %#v", got)
+	}
+	if got := status["publicEndpoint"]; got == "" {
+		t.Fatalf("publicEndpoint = %#v", got)
+	}
 }
 
 func TestConsoleFunnelRemoteEdgeStaleStatusStaysPending(t *testing.T) {
@@ -575,6 +581,12 @@ func TestConsoleFunnelRemoteEdgeStaleStatusStaysPending(t *testing.T) {
 	}
 	if serviceMap["lastError"] != "当前remote-edge尚未完成最近一次同步" {
 		t.Fatalf("lastError = %#v", serviceMap["lastError"])
+	}
+	if got := status["summaryStatus"]; got != "pending" {
+		t.Fatalf("summaryStatus = %#v", got)
+	}
+	if got := status["nextAction"]; got == "" {
+		t.Fatalf("nextAction = %#v", got)
 	}
 }
 
@@ -742,6 +754,12 @@ func TestManagedFunnelDomainDNSFailureBlocksServiceReady(t *testing.T) {
 	}
 	if serviceMap["lastError"] != "托管 DNS 记录当前已暂停" {
 		t.Fatalf("lastError = %#v", serviceMap["lastError"])
+	}
+	if got := status["summaryStatus"]; got != "error" {
+		t.Fatalf("summaryStatus = %#v", got)
+	}
+	if got := status["summaryReason"]; got != "托管 DNS 记录当前已暂停" {
+		t.Fatalf("summaryReason = %#v", got)
 	}
 }
 

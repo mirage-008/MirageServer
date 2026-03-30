@@ -386,7 +386,7 @@ func TestFunnelRuntimeProxiesOfficialIngressHTTP(t *testing.T) {
 	if err := app.db.Preload("User").Preload("User.Organization").Where("hostname = ?", "tenant-machine").First(machine).Error; err != nil {
 		t.Fatalf("First(machine): %v", err)
 	}
-	domain := officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes)
+	domain := officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes, app.cfg.FunnelCfg)
 	peerAPIPort, stopPeerAPI := startFunnelPeerAPIServer(t, net.JoinHostPort(domain, strconv.Itoa(listenPort)), true)
 	defer stopPeerAPI()
 
@@ -491,7 +491,7 @@ func TestFunnelRuntimePrewiresOfficialIngressDNSForWireIntent(t *testing.T) {
 		t.Fatalf("expected no active official ingress routes for wire-only funnel intent")
 	}
 
-	wantDomain := strings.TrimSuffix(officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes), ".")
+	wantDomain := strings.TrimSuffix(officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes, app.cfg.FunnelCfg), ".")
 	if len(fakeDNS.ensured) != 1 || fakeDNS.ensured[0] != wantDomain {
 		t.Fatalf("ensured domains = %#v, want [%q]", fakeDNS.ensured, wantDomain)
 	}

@@ -183,6 +183,7 @@ func addNextDNSMetadata(resolvers []*dnstype.Resolver, machine Machine) {
 
 func getMapResponseDNSConfig(
 	ipPrefixes []netip.Prefix, //
+	funnelCfg FunnelPlatformConfig,
 	//	dnsConfigOrig *tailcfg.DNSConfig,
 	//	baseDomain string,
 	machine Machine,
@@ -217,7 +218,7 @@ func getMapResponseDNSConfig(
 		dnsConfig = dnsConfigOrig
 	}*/
 
-	if certDomains := officialCertDomainsForMachine(&machine, ipPrefixes); len(certDomains) > 0 {
+	if certDomains := officialCertDomainsForMachine(&machine, ipPrefixes, funnelCfg); len(certDomains) > 0 {
 		dnsConfig.CertDomains = appendUniqueStrings(dnsConfig.CertDomains, certDomains...)
 	}
 

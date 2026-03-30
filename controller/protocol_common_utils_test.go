@@ -85,7 +85,7 @@ func TestGenerateMapResponseAddsOfficialFunnelCapsAndIngressGrant(t *testing.T) 
 		t.Fatal("expected ingress cap grant in packet filter")
 	}
 
-	wantCertDomain := officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes)
+	wantCertDomain := officialFunnelDomainForMachine(machine, app.cfg.IPPrefixes, app.cfg.FunnelCfg)
 	if len(resp.DNSConfig.CertDomains) != 1 || resp.DNSConfig.CertDomains[0] != wantCertDomain {
 		t.Fatalf("cert domains = %#v, want [%q]", resp.DNSConfig.CertDomains, wantCertDomain)
 	}
@@ -128,7 +128,7 @@ func TestGenerateMapResponseAddsOfficialFunnelCertDomainWithoutMagicSearch(t *te
 		t.Fatalf("generateMapResponse(): %v", err)
 	}
 
-	wantCertDomain := "tenant-machine.tenant.example.test"
+	wantCertDomain := "tenant-machine.funnel.example.test"
 	if len(resp.DNSConfig.CertDomains) != 1 || resp.DNSConfig.CertDomains[0] != wantCertDomain {
 		t.Fatalf("cert domains = %#v, want [%q]", resp.DNSConfig.CertDomains, wantCertDomain)
 	}
@@ -156,6 +156,7 @@ func TestGenerateMapResponseSkipsOfficialFunnelCapsWithoutPublicDomain(t *testin
 	if err := app.db.Save(&machine.User.Organization).Error; err != nil {
 		t.Fatalf("Save(organization): %v", err)
 	}
+	app.cfg.FunnelCfg.ManagedBaseDomain = ""
 
 	resp, err := app.generateMapResponse(tailcfg.MapRequest{
 		Hostinfo: &tailcfg.Hostinfo{

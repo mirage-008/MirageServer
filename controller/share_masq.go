@@ -113,6 +113,23 @@ func sharedPeerDisplayAddresses(viewer *Machine, peer Machine) []netip.Addr {
 	return display
 }
 
+func sharedPeerDisplayAddressesForUser(viewer *User, peer Machine) []netip.Addr {
+	if viewer == nil {
+		return peer.IPAddresses
+	}
+
+	display := make([]netip.Addr, 0, len(peer.IPAddresses))
+	for _, addr := range peer.IPAddresses {
+		displayAddr := addr
+		if peer.Shared || peer.ShareeNode {
+			displayAddr = sharedPeerMasqAddr(peer.ID, viewer.ID, addr.Is6())
+		}
+		display = append(display, displayAddr)
+	}
+
+	return display
+}
+
 func applySharedPeerMasquerade(viewer *Machine, peer Machine, node *tailcfg.Node) {
 	if viewer == nil || node == nil || (!peer.Shared && !peer.ShareeNode) {
 		return
