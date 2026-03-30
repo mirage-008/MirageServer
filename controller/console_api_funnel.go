@@ -39,6 +39,40 @@ type FunnelServiceCreateRequest struct {
 	BackendTailnet string `json:"backendTailnetIp"`
 }
 
+func (req *FunnelServiceCreateRequest) UnmarshalJSON(data []byte) error {
+	type rawFunnelServiceCreateRequest struct {
+		MachineID      FunnelFlexibleID `json:"machineId"`
+		DomainID       FunnelFlexibleID `json:"domainId"`
+		DomainMode     string           `json:"domainMode"`
+		ListenProto    string           `json:"listenProto"`
+		ListenPort     int              `json:"listenPort"`
+		MountPath      string           `json:"mountPath"`
+		BackendType    string           `json:"backendType"`
+		BackendScheme  string           `json:"backendScheme"`
+		BackendPort    int              `json:"backendPort"`
+		Enabled        *bool            `json:"enabled"`
+		BackendTailnet string           `json:"backendTailnetIp"`
+	}
+
+	raw := rawFunnelServiceCreateRequest{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	req.MachineID = raw.MachineID.Int64()
+	req.DomainID = raw.DomainID.Int64()
+	req.DomainMode = raw.DomainMode
+	req.ListenProto = raw.ListenProto
+	req.ListenPort = raw.ListenPort
+	req.MountPath = raw.MountPath
+	req.BackendType = raw.BackendType
+	req.BackendScheme = raw.BackendScheme
+	req.BackendPort = raw.BackendPort
+	req.Enabled = raw.Enabled
+	req.BackendTailnet = raw.BackendTailnet
+	return nil
+}
+
 type FunnelServicePatchRequest struct {
 	MountPath     *string `json:"mountPath"`
 	BackendScheme *string `json:"backendScheme"`

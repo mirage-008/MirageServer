@@ -239,7 +239,7 @@ func TestConsoleFunnelManagedServiceAndStatus(t *testing.T) {
 	app.controlCodeCache.Set("tenant-test-auth", ControlCacheItem{uid: tailcfg.UserID(owner.ID)}, time.Hour)
 
 	rec := serveTenantFunnel(t, app, http.MethodPost, "/admin/api/funnel/services", "tenant-test-auth", []byte(`{
-		"machineId":`+strconv.FormatInt(machine.ID, 10)+`,
+		"machineId":"`+strconv.FormatInt(machine.ID, 10)+`",
 		"domainMode":"managed",
 		"listenProto":"https",
 		"listenPort":443,

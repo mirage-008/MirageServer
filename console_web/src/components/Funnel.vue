@@ -160,7 +160,7 @@ function normalizeRequestErrorMessage(value, fallback) {
 
 function servicePayloadFromForm() {
   const payload = {
-    machineId: Number(serviceForm.value.machineId),
+    machineId: String(serviceForm.value.machineId || ""),
     domainMode: serviceForm.value.domainMode,
     listenProto: serviceForm.value.listenProto,
     backendType: serviceForm.value.backendType,
@@ -171,7 +171,7 @@ function servicePayloadFromForm() {
 
   if (serviceForm.value.domainMode == "existing") {
     payload["domainMode"] = "existing";
-    payload["domainId"] = Number(serviceForm.value.domainId);
+    payload["domainId"] = String(serviceForm.value.domainId || "");
   }
   if (serviceForm.value.listenPort !== "") {
     payload["listenPort"] = Number(serviceForm.value.listenPort);
