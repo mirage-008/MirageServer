@@ -12,45 +12,47 @@ import (
 )
 
 type machineData struct {
-	Address                []string `json:"addresses"`
-	AllowedIPs             []string `json:"allowedIPs"`
-	ExtraIPs               []string `json:"extraIPs"`
-	AdvertisedIPs          []string `json:"advertisedIPs"`
-	HasSubnets             bool     `json:"hasSubnets"`
-	AdvertisedExitNode     bool     `json:"advertisedExitNode"`
-	AllowedExitNode        bool     `json:"allowedExitNode"`
-	HasExitNode            bool     `json:"hasExitNode"` //未实现
-	AllowedTags            []string `json:"allowedTags"` //未实现
-	InvalidTags            []string `json:"invalidTags"` //未实现
-	HasTags                bool     `json:"hasTags"`     //？？？移除？
-	Endpoints              []string `json:"endpoints"`
-	IpnVersion             string   `json:"ipnVersion"` //未实现
-	Os                     string   `json:"os"`         //未实现
-	Name                   string   `json:"name"`       //未实现
-	Fqdn                   string   `json:"fqdn"`       //未实现
-	Domain                 string   `json:"domain"`     //未实现
-	Created                string   `json:"created"`    //未实现
-	Hostname               string   `json:"hostname"`   //未实现
-	MachineKey             string   `json:"machineKey"` //未实现
-	NodeKey                string   `json:"nodeKey"`    //未实现
-	Id                     string   `json:"id"`         //未实现
-	StableId               string   `json:"stableId"`   //未实现
-	User                   string   `json:"user"`       //未实现
-	Creator                string   `json:"creator"`    //未实现
-	Expires                string   `json:"expires"`
-	NeverExpires           bool     `json:"neverExpires"`
-	Authorized             bool     `json:"authorized"`             //未实现
-	IsExternal             bool     `json:"isExternal"`             // ？？？        //未实现
-	BrokenIPForwarding     bool     `json:"brokenIPForwarding"`     //未实现
-	IsEphemeral            bool     `json:"isEphemeral"`            //未实现
-	AvailableUpdateVersion string   `json:"availableUpdateVersion"` //未实现
-	LastSeen               string   `json:"lastSeen"`               //未实现
-	ConnectedToControl     bool     `json:"connectedToControl"`     //未实现
-	AutomaticNameMode      bool     `json:"automaticNameMode"`
-	TailnetLockKey         string   `json:"tailnetLockKey"`     //未实现
-	ShareID                string   `json:"shareID"`            //未实现
-	AcceptedShareCount     int      `json:"acceptedShareCount"` //未实现
-	ParsedLinuxVersion     string   `json:"parsedLinuxVersion"` //未实现
+	Address                []string             `json:"addresses"`
+	AllowedIPs             []string             `json:"allowedIPs"`
+	ExtraIPs               []string             `json:"extraIPs"`
+	AdvertisedIPs          []string             `json:"advertisedIPs"`
+	AdvertisedRouteDetails []machineRouteDetail `json:"advertisedRouteDetails"`
+	HasSubnets             bool                 `json:"hasSubnets"`
+	AdvertisedExitNode     bool                 `json:"advertisedExitNode"`
+	AllowedExitNode        bool                 `json:"allowedExitNode"`
+	HasExitNode            bool                 `json:"hasExitNode"` //未实现
+	AllowedTags            []string             `json:"allowedTags"` //未实现
+	InvalidTags            []string             `json:"invalidTags"` //未实现
+	HasTags                bool                 `json:"hasTags"`     //？？？移除？
+	Endpoints              []string             `json:"endpoints"`
+	IpnVersion             string               `json:"ipnVersion"` //未实现
+	Os                     string               `json:"os"`         //未实现
+	Name                   string               `json:"name"`       //未实现
+	Fqdn                   string               `json:"fqdn"`       //未实现
+	Domain                 string               `json:"domain"`     //未实现
+	Created                string               `json:"created"`    //未实现
+	Hostname               string               `json:"hostname"`   //未实现
+	MachineKey             string               `json:"machineKey"` //未实现
+	NodeKey                string               `json:"nodeKey"`    //未实现
+	Id                     string               `json:"id"`         //未实现
+	StableId               string               `json:"stableId"`   //未实现
+	User                   string               `json:"user"`       //未实现
+	Creator                string               `json:"creator"`    //未实现
+	Expires                string               `json:"expires"`
+	NeverExpires           bool                 `json:"neverExpires"`
+	Authorized             bool                 `json:"authorized"`             //未实现
+	IsExternal             bool                 `json:"isExternal"`             // ？？？        //未实现
+	BrokenIPForwarding     bool                 `json:"brokenIPForwarding"`     //未实现
+	IsEphemeral            bool                 `json:"isEphemeral"`            //未实现
+	AvailableUpdateVersion string               `json:"availableUpdateVersion"` //未实现
+	LastSeen               string               `json:"lastSeen"`               //未实现
+	ConnectedToControl     bool                 `json:"connectedToControl"`     //未实现
+	AutomaticNameMode      bool                 `json:"automaticNameMode"`
+	TailnetLockKey         string               `json:"tailnetLockKey"`     //未实现
+	ShareID                string               `json:"shareID"`            //未实现
+	AcceptedShareCount     int                  `json:"acceptedShareCount"` //未实现
+	ParsedLinuxVersion     string               `json:"parsedLinuxVersion"` //未实现
+	ViaRoutePreview        *viaRoutePreview     `json:"viaRoutePreview,omitempty"`
 }
 
 type machineItem struct {
@@ -77,15 +79,16 @@ type machineItem struct {
 	ActiveShares       []*machineShareResponse `json:"activeShares"`
 	NeverExpires       bool                    `json:"neverExpires"` //done
 
-	AllowedIPs         []string `json:"allowedIPs"`
-	ExtraIPs           []string `json:"extraIPs"`
-	AdvertisedIPs      []string `json:"advertisedIPs"`
-	HasSubnets         bool     `json:"hasSubnets"`
-	AdvertisedExitNode bool     `json:"advertisedExitNode"`
-	AllowedExitNode    bool     `json:"allowedExitNode"`
-	AllowedTags        []string `json:"allowedTags"`
-	InvalidTags        []string `json:"invalidTags"`
-	HasTags            bool     `json:"hasTags"`
+	AllowedIPs             []string             `json:"allowedIPs"`
+	ExtraIPs               []string             `json:"extraIPs"`
+	AdvertisedIPs          []string             `json:"advertisedIPs"`
+	AdvertisedRouteDetails []machineRouteDetail `json:"advertisedRouteDetails"`
+	HasSubnets             bool                 `json:"hasSubnets"`
+	AdvertisedExitNode     bool                 `json:"advertisedExitNode"`
+	AllowedExitNode        bool                 `json:"allowedExitNode"`
+	AllowedTags            []string             `json:"allowedTags"`
+	InvalidTags            []string             `json:"invalidTags"`
+	HasTags                bool                 `json:"hasTags"`
 
 	Expires time.Time `json:"expires"`
 
@@ -295,6 +298,10 @@ func (h *Mirage) ConsoleMachinesAPI(
 				tmpMachine.HasSubnets = true
 				routeV := netip.Prefix(route.Prefix).String()
 				tmpMachine.AdvertisedIPs = append(tmpMachine.AdvertisedIPs, routeV)
+				tmpMachine.AdvertisedRouteDetails = append(
+					tmpMachine.AdvertisedRouteDetails,
+					buildMachineRouteDetail(netip.Prefix(route.Prefix), route.Enabled),
+				)
 				if route.Enabled {
 					tmpMachine.AllowedIPs = append(tmpMachine.AllowedIPs, routeV)
 				} else {
@@ -566,6 +573,35 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 	}
 
 	switch reqState {
+	case "preview-via-route":
+		prefixStr := parseRequestString(reqData, "prefix", "route", "cidr")
+		if prefixStr == "" {
+			h.doAPIResponse(writer, "缺少待生成的 IPv4 子网前缀", nil)
+			return
+		}
+		prefix, err := netip.ParsePrefix(prefixStr)
+		if err != nil {
+			h.doAPIResponse(writer, "待生成前缀格式无效", nil)
+			return
+		}
+		siteID64, ok := parseRequestInt64(reqData, "siteID", "siteId")
+		if !ok {
+			h.doAPIResponse(writer, "缺少 site ID", nil)
+			return
+		}
+		if siteID64 < 0 || siteID64 > int64(^uint32(0)) {
+			h.doAPIResponse(writer, "site ID 超出范围", nil)
+			return
+		}
+		preview, err := buildViaRoutePreview(prefix, uint32(siteID64))
+		if err != nil {
+			h.doAPIResponse(writer, err.Error(), nil)
+			return
+		}
+		h.doAPIResponse(writer, "", machineData{
+			ViaRoutePreview: preview,
+		})
+		return
 	case "accept_share", "accept-share":
 		shareToken := parseRequestString(reqData, "shareToken", "token")
 		share, err := h.AcceptMachineShareByToken(shareToken, user)
@@ -701,6 +737,10 @@ func (h *Mirage) ConsoleMachinesUpdateAPI(
 				resData.HasSubnets = true
 				routeV := netip.Prefix(route.Prefix).String()
 				resData.AdvertisedIPs = append(resData.AdvertisedIPs, routeV)
+				resData.AdvertisedRouteDetails = append(
+					resData.AdvertisedRouteDetails,
+					buildMachineRouteDetail(netip.Prefix(route.Prefix), route.Enabled),
+				)
 				if route.Enabled {
 					resData.AllowedIPs = append(resData.AllowedIPs, routeV)
 				} else {

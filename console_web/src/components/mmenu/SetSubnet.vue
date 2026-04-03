@@ -18,6 +18,24 @@ const hasAllowedSubnet = computed(() => {
 const hasExtraSubnet = computed(() => {
   return props.currentMachine.extraIPs && props.currentMachine.extraIPs.length > 0;
 });
+const viaPreviewPrefix = ref("");
+const viaPreviewSiteID = ref("1");
+const viaPreview = ref(null);
+
+const advertisedRouteDetails = computed(() => {
+  if (
+    props.currentMachine.advertisedRouteDetails &&
+    props.currentMachine.advertisedRouteDetails.length > 0
+  ) {
+    return props.currentMachine.advertisedRouteDetails;
+  }
+  return (props.currentMachine.advertisedIPs || []).map((prefix) => ({
+    prefix,
+    enabled: isAllowedRoute(prefix),
+    isVia: false,
+    displayLabel: prefix,
+  }));
+});
 
 function isAllowedRoute(routeCIDR) {
   if (!props.currentMachine.allowedIPs || props.currentMachine.allowedIPs.length == 0) {
@@ -32,6 +50,22 @@ function isAllowedRoute(routeCIDR) {
 }
 
 onMounted(() => {});
+
+watch(
+  () => props.currentMachine.id,
+  () => {
+    viaPreview.value = null;
+    viaPreviewPrefix.value = "";
+    viaPreviewSiteID.value = "1";
+  }
+);
+
+function routeDisplayHint(route) {
+  if (!route || !route.isVia) {
+    return "";
+  }
+  return `重叠站点: 原始网段 ${route.viaOriginalPrefix}，site ID ${route.viaSiteID}`;
+}
 
 function updateSubnet(type) {
   inputBlocking.value = true;
@@ -61,7 +95,8 @@ function updateSubnet(type) {
           response.data["data"]["advertisedIPs"],
           response.data["data"]["allowedIPs"],
           response.data["data"]["extraIPs"],
-          response.data["data"]["allowedExitNode"]
+          response.data["data"]["allowedExitNode"],
+          response.data["data"]["advertisedRouteDetails"] || []
         );
       } else {
         emit("update-fail", response.data["status"].substring(6));
@@ -71,6 +106,27 @@ function updateSubnet(type) {
       emit("update-fail", error);
     });
   inputBlocking.value = false;
+}
+
+function previewViaRoute() {
+  viaPreview.value = null;
+  axios
+    .post("/admin/api/machines", {
+      mid: props.id,
+      state: "preview-via-route",
+      prefix: viaPreviewPrefix.value,
+      siteID: viaPreviewSiteID.value,
+    })
+    .then(function (response) {
+      if (response.data["status"] == "success") {
+        viaPreview.value = response.data["data"]["viaRoutePreview"];
+      } else {
+        emit("update-fail", response.data["status"].substring(6));
+      }
+    })
+    .catch(function (error) {
+      emit("update-fail", error);
+    });
 }
 </script>
 
@@ -105,21 +161,24 @@ function updateSubnet(type) {
           </div>
           <div v-if="currentMachine.hasSubnets">
             <li
-              v-for="route in currentMachine.advertisedIPs"
+              v-for="route in advertisedRouteDetails"
               class="flex items-center py-2 border-t"
             >
               <div>
                 <input
                   @change="updateSubnet('Update')"
                   :disabled="inputBlocking"
-                  :checked="isAllowedRoute(route)"
-                  :id="route"
+                  :checked="isAllowedRoute(route.prefix)"
+                  :id="route.prefix"
                   type="checkbox"
                   class="toggle block mr-3"
                 />
               </div>
-              <div class="flex items-center">
-                <label :for="route">{{ route }}</label>
+              <div class="flex flex-col items-start">
+                <label :for="route.prefix">{{ route.displayLabel || route.prefix }}</label>
+                <span v-if="routeDisplayHint(route)" class="text-xs text-gray-500 mt-0.5">
+                  {{ routeDisplayHint(route) }}
+                </span>
               </div>
             </li>
           </div>
@@ -141,6 +200,53 @@ function updateSubnet(type) {
             >
               全部启用
             </button>
+          </div>
+        </div>
+      </div>
+      <div class="mt-8">
+        <h3 class="font-semibold text-gray-800 mb-2">重叠子网（4via6）辅助</h3>
+        <p class="text-gray-700 mb-3">
+          对齐 Tailscale 官方 4via6 语义。不同站点如果都用了相同的 IPv4 子网，请为每个站点分配不同
+          site ID；同一站点做双机高可用时，两台设备使用相同 site ID。
+        </p>
+        <div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_9rem_auto]">
+          <input
+            v-model.trim="viaPreviewPrefix"
+            type="text"
+            autocomplete="off"
+            placeholder="例如 192.168.1.0/24"
+            class="input w-full border focus:outline-blue-500/60 hover:border border-stone-200 hover:border-stone-400 rounded-md h-9 min-h-fit"
+          />
+          <input
+            v-model.trim="viaPreviewSiteID"
+            type="number"
+            min="1"
+            autocomplete="off"
+            placeholder="site ID"
+            class="input w-full border focus:outline-blue-500/60 hover:border border-stone-200 hover:border-stone-400 rounded-md h-9 min-h-fit"
+          />
+          <button
+            @click="previewViaRoute"
+            class="btn border border-stone-300 hover:border-stone-300 bg-base-200 hover:bg-base-300 text-black h-9 min-h-fit"
+            type="button"
+          >
+            生成 4via6
+          </button>
+        </div>
+        <div v-if="viaPreview" class="mt-4 rounded-md border bg-stone-50 border-stone-200 p-4 text-sm">
+          <div class="mb-1">
+            <span class="font-medium">原始网段：</span>{{ viaPreview.originalPrefix }}
+          </div>
+          <div class="mb-1">
+            <span class="font-medium">site ID：</span>{{ viaPreview.siteID }}
+          </div>
+          <div class="mb-1">
+            <span class="font-medium">应广告的 4via6 前缀：</span>
+            <span class="font-mono break-all">{{ viaPreview.viaPrefix }}</span>
+          </div>
+          <div>
+            <span class="font-medium">设备配置命令：</span>
+            <span class="font-mono break-all">{{ viaPreview.command }}</span>
           </div>
         </div>
       </div>

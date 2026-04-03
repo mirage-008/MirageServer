@@ -118,6 +118,13 @@ function saveExitNodeApprovers() {
       exitNodeInputBlocking.value = false;
     });
 }
+
+function routeHint(route) {
+  if (!route || !route.isVia) {
+    return "";
+  }
+  return `重叠站点: 原始网段 ${route.viaOriginalPrefix}，site ID ${route.viaSiteID}`;
+}
 </script>
 
 <template>
@@ -173,7 +180,12 @@ function saveExitNodeApprovers() {
               class="group flex border-stone-200 hover:bg-gray-50 pl-8 pr-4 lg:px-4 lg:cursor-auto border-b-0"
             >
               <td class="w-48 shrink-0 py-2">
-                <code class="text-sm">{{ route.route }}</code>
+                <div class="flex flex-col items-start">
+                  <code class="text-sm">{{ route.displayLabel || route.route }}</code>
+                  <span v-if="routeHint(route)" class="text-xs text-gray-500 mt-0.5">
+                    {{ routeHint(route) }}
+                  </span>
+                </div>
               </td>
               <td class="flex-1 shrink-0 py-2 min-w-0">
                 <span v-for="approver in route.approvers" :key="approver">

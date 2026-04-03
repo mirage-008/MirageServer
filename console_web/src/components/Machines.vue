@@ -496,11 +496,12 @@ function isInvalidTag(tag) {
   return true;
 }
 
-function subnetUpdateDone(newAllIPs, newAllowedIPs, newExtraIPs, newEnExitNode) {
+function subnetUpdateDone(newAllIPs, newAllowedIPs, newExtraIPs, newEnExitNode, newRouteDetails) {
   MList.value[currentMID.value]["advertisedIPs"] = newAllIPs;
   MList.value[currentMID.value]["allowedIPs"] = newAllowedIPs;
   MList.value[currentMID.value]["extraIPs"] = newExtraIPs;
   MList.value[currentMID.value]["allowedExitNode"] = newEnExitNode;
+  MList.value[currentMID.value]["advertisedRouteDetails"] = newRouteDetails || [];
   nextTick(() => {
     toastMsg.value = "已更新子网转发设置！";
     toastShow.value = true;
@@ -509,6 +510,24 @@ function subnetUpdateDone(newAllIPs, newAllowedIPs, newExtraIPs, newEnExitNode) 
 function subnetUpdateFail(msg) {
   toastMsg.value = "更新子网转发设置失败！";
   toastShow.value = true;
+}
+
+function routeLabel(machine, routePrefix) {
+  const details = machine["advertisedRouteDetails"] || [];
+  const matched = details.find((route) => route.prefix === routePrefix);
+  if (matched && matched.displayLabel) {
+    return matched.displayLabel;
+  }
+  return routePrefix;
+}
+
+function routeHint(machine, routePrefix) {
+  const details = machine["advertisedRouteDetails"] || [];
+  const matched = details.find((route) => route.prefix === routePrefix);
+  if (matched && matched.isVia) {
+    return `重叠站点: 原始网段 ${matched.viaOriginalPrefix}，site ID ${matched.viaSiteID}`;
+  }
+  return "";
 }
 
 //客户端操作动作部分
@@ -946,11 +965,17 @@ function copyMIPv6() {
                     </div>
                   </li>
                   <li v-for="allowedIP in m.allowedIPs">
-                    <span>{{ allowedIP }} </span>
+                    <span>{{ routeLabel(m, allowedIP) }} </span>
+                    <span v-if="routeHint(m, allowedIP)" class="text-xs text-gray-500 ml-1">
+                      {{ routeHint(m, allowedIP) }}
+                    </span>
                   </li>
                   <template v-for="extraIP in m.extraIPs">
                     <li class="tooltip text-gray-400" data-tip="这条子网转发未启用">
-                      <span>{{ extraIP }} </span>
+                      <span>{{ routeLabel(m, extraIP) }} </span>
+                      <span v-if="routeHint(m, extraIP)" class="text-xs text-gray-500 ml-1">
+                        {{ routeHint(m, extraIP) }}
+                      </span>
                     </li>
                     <br />
                   </template>

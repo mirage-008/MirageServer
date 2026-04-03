@@ -478,6 +478,7 @@ func (h *Mirage) initRouter(router *mux.Router) {
 	console_router.HandleFunc("/api/acls/rules", h.CAPIPostRules).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/acls/ssh", h.CAPIPostSSH).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/acls/auto-approvers/routes", h.CAPIPostAutoApproverRoutes).Methods(http.MethodPost)
+	console_router.HandleFunc("/api/acls/auto-approvers/routes/preview-via", h.CAPIPreviewAutoApproverRouteVia).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/acls/auto-approvers/exit-node", h.CAPIPostAutoApproverExitNode).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/dns", h.CAPIPostDNS).Methods(http.MethodPost)
 	console_router.HandleFunc("/api/tcd", h.CAPIPostTCD).Methods(http.MethodPost)

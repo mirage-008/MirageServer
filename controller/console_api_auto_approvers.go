@@ -16,8 +16,12 @@ type AutoApproversData struct {
 }
 
 type AutoApproverRoute struct {
-	Route     string   `json:"route"`
-	Approvers []string `json:"approvers"`
+	Route             string   `json:"route"`
+	Approvers         []string `json:"approvers"`
+	IsVia             bool     `json:"isVia"`
+	ViaSiteID         uint32   `json:"viaSiteID,omitempty"`
+	ViaOriginalPrefix string   `json:"viaOriginalPrefix,omitempty"`
+	DisplayLabel      string   `json:"displayLabel"`
 }
 
 type SetAutoApproverRouteREQ struct {
@@ -25,6 +29,11 @@ type SetAutoApproverRouteREQ struct {
 	Route         string   `json:"route"`
 	PreviousRoute string   `json:"previousRoute"`
 	Approvers     []string `json:"approvers"`
+}
+
+type PreviewAutoApproverRouteREQ struct {
+	Prefix string `json:"prefix"`
+	SiteID uint32 `json:"siteID"`
 }
 
 type SetAutoApproverExitNodeREQ struct {
@@ -204,9 +213,26 @@ func (h *Mirage) validateAutoApproverAliasesForOrg(org *Organization, aliases []
 }
 
 func autoApproverRouteData(route string, approvers []string) AutoApproverRoute {
+	display := AutoApproverRoute{
+		Route:        route,
+		Approvers:    cloneStringSlice(approvers),
+		DisplayLabel: route,
+	}
+	if prefix, err := netip.ParsePrefix(route); err == nil {
+		detail := buildMachineRouteDetail(prefix, false)
+		display.IsVia = detail.IsVia
+		display.ViaSiteID = detail.ViaSiteID
+		display.ViaOriginalPrefix = detail.ViaOriginalPrefix
+		display.DisplayLabel = detail.DisplayLabel
+	}
+
 	return AutoApproverRoute{
-		Route:     route,
-		Approvers: cloneStringSlice(approvers),
+		Route:             display.Route,
+		Approvers:         display.Approvers,
+		IsVia:             display.IsVia,
+		ViaSiteID:         display.ViaSiteID,
+		ViaOriginalPrefix: display.ViaOriginalPrefix,
+		DisplayLabel:      display.DisplayLabel,
 	}
 }
 
@@ -348,6 +374,41 @@ func (h *Mirage) CAPIPostAutoApproverRoutes(
 	h.setOrgLastStateChangeToNow(user.OrganizationID)
 
 	h.doAPIResponse(w, "", autoApproverRouteData(normalizedRoute, normalizedApprovers))
+}
+
+func (h *Mirage) CAPIPreviewAutoApproverRouteVia(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	user, err := h.verifyTokenIDandGetUser(w, r)
+	if err != nil || user.CheckEmpty() {
+		h.doAPIResponse(w, "用户信息核对失败:"+err.Error(), nil)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		h.doAPIResponse(w, "用户请求解析失败:"+err.Error(), nil)
+		return
+	}
+
+	reqData := PreviewAutoApproverRouteREQ{}
+	if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+		h.doAPIResponse(w, "用户请求解析失败:"+err.Error(), nil)
+		return
+	}
+
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(reqData.Prefix))
+	if err != nil {
+		h.doAPIResponse(w, "待生成前缀格式无效", nil)
+		return
+	}
+
+	preview, err := buildViaRoutePreview(prefix, reqData.SiteID)
+	if err != nil {
+		h.doAPIResponse(w, err.Error(), nil)
+		return
+	}
+
+	h.doAPIResponse(w, "", preview)
 }
 
 func (h *Mirage) CAPIPostAutoApproverExitNode(

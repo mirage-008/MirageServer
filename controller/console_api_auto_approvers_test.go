@@ -164,3 +164,21 @@ func TestRemoveAutoApproverAlias(t *testing.T) {
 		t.Fatalf("unexpected aliases when nothing removed: got %#v want %#v", got, aliases)
 	}
 }
+
+func TestAutoApproverRouteDataViaDisplay(t *testing.T) {
+	t.Parallel()
+
+	route := autoApproverRouteData("fd7a:115c:a1e0:b1a:0:7:c0a8:100/120", []string{"alice"})
+	if !route.IsVia {
+		t.Fatal("expected 4via6 route to be marked as via")
+	}
+	if route.ViaSiteID != 7 {
+		t.Fatalf("ViaSiteID = %d, want 7", route.ViaSiteID)
+	}
+	if route.ViaOriginalPrefix != "192.168.1.0/24" {
+		t.Fatalf("ViaOriginalPrefix = %q, want 192.168.1.0/24", route.ViaOriginalPrefix)
+	}
+	if route.DisplayLabel == route.Route {
+		t.Fatalf("DisplayLabel should be enriched for via routes, got %q", route.DisplayLabel)
+	}
+}

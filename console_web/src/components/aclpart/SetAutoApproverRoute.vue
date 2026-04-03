@@ -24,6 +24,9 @@ watch(toastShow, () => {
 const inputBlocking = ref(false);
 const route = ref("");
 const approversText = ref("");
+const viaPreviewPrefix = ref("");
+const viaPreviewSiteID = ref("1");
+const viaPreview = ref(null);
 const routeOccupied = ref(false);
 const wrongRoute = ref(false);
 const wrongApprovers = ref(false);
@@ -55,6 +58,9 @@ onMounted(() => {
     route.value = "";
     approversText.value = "";
   }
+  viaPreviewPrefix.value = "";
+  viaPreviewSiteID.value = "1";
+  viaPreview.value = null;
 });
 
 function parseApproverLines(text) {
@@ -112,6 +118,36 @@ function saveRoute() {
       inputBlocking.value = false;
     });
 }
+
+function previewViaRoute() {
+  viaPreview.value = null;
+  axios
+    .post("/admin/api/acls/auto-approvers/routes/preview-via", {
+      prefix: viaPreviewPrefix.value,
+      siteID: Number(viaPreviewSiteID.value),
+    })
+    .then(function (response) {
+      if (response.data["status"] == "success") {
+        viaPreview.value = response.data["data"];
+      } else {
+        toastMsg.value = "生成 4via6 前缀失败:" + response.data["status"].substring(6);
+        toastShow.value = true;
+      }
+    })
+    .catch(function (error) {
+      toastMsg.value = "生成 4via6 前缀失败:" + error;
+      toastShow.value = true;
+    });
+}
+
+function applyViaPreview() {
+  if (!viaPreview.value || !viaPreview.value.viaPrefix) {
+    return;
+  }
+  route.value = viaPreview.value.viaPrefix;
+  wrongRoute.value = false;
+  routeOccupied.value = false;
+}
 </script>
 
 <template>
@@ -162,7 +198,58 @@ function saveRoute() {
           <ul class="list-disc list-inside space-y-1">
             <li>审批人支持用户、<code>group:xxx</code>、<code>tag:xxx</code> 以及部分 <code>autogroup:*</code> 别名</li>
             <li>路由前缀会在保存时自动规范化，例如 <code>10.0.0.7/24</code> 会变成 <code>10.0.0.0/24</code></li>
+            <li>如果多个站点用了相同 IPv4 子网，请填写对应的 4via6 前缀；同一站点做双机高可用时使用相同 site ID</li>
           </ul>
+        </div>
+
+        <div class="rounded-md border border-stone-200 bg-stone-50 p-4 mt-6 text-sm text-gray-600">
+          <div class="font-medium text-gray-700 mb-2">4via6 辅助生成</div>
+          <p class="mb-3">
+            如果你是在给重叠 IPv4 子网配置自动审批，先在这里生成 4via6 前缀，再带入上面的“路由前缀”。
+          </p>
+          <div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_9rem_auto]">
+            <input
+              v-model.trim="viaPreviewPrefix"
+              class="input w-full border focus:outline-blue-500/60 hover:border border-stone-200 hover:border-stone-400 rounded-md h-9 min-h-fit"
+              type="text"
+              placeholder="例如 192.168.1.0/24"
+            />
+            <input
+              v-model.trim="viaPreviewSiteID"
+              class="input w-full border focus:outline-blue-500/60 hover:border border-stone-200 hover:border-stone-400 rounded-md h-9 min-h-fit"
+              type="number"
+              min="1"
+              placeholder="site ID"
+            />
+            <button
+              @click="previewViaRoute"
+              class="btn border border-stone-300 hover:border-stone-300 bg-base-200 hover:bg-base-300 text-black h-9 min-h-fit"
+              type="button"
+            >
+              生成 4via6
+            </button>
+          </div>
+          <div v-if="viaPreview" class="mt-4 rounded-md border border-stone-200 bg-white p-4">
+            <div class="mb-1">
+              <span class="font-medium">原始网段：</span>{{ viaPreview.originalPrefix }}
+            </div>
+            <div class="mb-1">
+              <span class="font-medium">site ID：</span>{{ viaPreview.siteID }}
+            </div>
+            <div class="mb-3">
+              <span class="font-medium">4via6 前缀：</span>
+              <span class="font-mono break-all">{{ viaPreview.viaPrefix }}</span>
+            </div>
+            <div class="flex justify-end">
+              <button
+                @click="applyViaPreview"
+                class="btn border border-stone-300 hover:border-stone-300 bg-base-200 hover:bg-base-300 text-black h-9 min-h-fit"
+                type="button"
+              >
+                带入路由前缀
+              </button>
+            </div>
+          </div>
         </div>
 
         <footer class="flex mt-10 justify-end space-x-4">
