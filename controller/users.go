@@ -338,6 +338,10 @@ func (h *Mirage) ListUsersInOrgs(orgID []int64) ([]User, error) {
 
 // GetUser fetches a user by name.
 func (h *Mirage) GetUser(name, orgName, provider string) (*User, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, ErrUserNotFound
+	}
+
 	org, err := h.GetOrgnaizationRecordByName(orgName, provider)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -346,10 +350,7 @@ func (h *Mirage) GetUser(name, orgName, provider string) (*User, error) {
 		return nil, err
 	}
 	user := User{}
-	err = h.db.Where(&User{
-		Name:           name,
-		OrganizationID: org.ID,
-	}).Take(&user).Error
+	err = h.db.Where("name = ? AND organization_id = ?", name, org.ID).Take(&user).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrUserNotFound
 	}
