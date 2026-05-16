@@ -47,7 +47,7 @@ const (
 // Machine is a Mirage client.
 type Machine struct {
 	ID          int64  `gorm:"primary_key;unique;not null"`
-	MachineKey  string `gorm:"type:varchar(64);"`
+	MachineKey  string `gorm:"type:varchar(64);unique_index"`
 	NodeKey     string
 	DiscoKey    string
 	IPAddresses MachineAddresses
