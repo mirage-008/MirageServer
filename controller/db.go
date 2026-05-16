@@ -52,7 +52,39 @@ func (dp *DataPool) InitCockpitDB() error {
 		return err
 	}
 
+	if err = dp.migrateLegacyCockpitAdminCredential(); err != nil {
+		return err
+	}
+
 	return dp.initFlowLogTables()
+}
+
+func (dp *DataPool) migrateLegacyCockpitAdminCredential() error {
+	var sysAdminCount int64
+	if err := dp.db.Model(&SysAdmin{}).Count(&sysAdminCount).Error; err != nil {
+		return err
+	}
+	if sysAdminCount > 0 {
+		return nil
+	}
+
+	if !dp.db.Migrator().HasColumn(&SysConfig{}, "admin_credential") {
+		return nil
+	}
+
+	var legacyCredential AdminCredential
+	err := dp.db.Table("sys_configs").
+		Where("admin_credential IS NOT NULL AND admin_credential != ''").
+		Limit(1).
+		Scan(&legacyCredential).Error
+	if err != nil {
+		return err
+	}
+	if legacyCredential.CredentialID == nil {
+		return nil
+	}
+
+	return dp.db.Create(&SysAdmin{AdminCredential: legacyCredential}).Error
 }
 
 func (dp *DataPool) InitMirageDB() error {
