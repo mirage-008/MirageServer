@@ -84,7 +84,7 @@ func (h *Mirage) handleRegisterCommon(
 ) {
 	now := time.Now().UTC()
 	// 这一步目前考虑不使用MachineKey
-	machine, _ := h.GetMachineByNodeKey(registerRequest.NodeKey)
+	machine, _ := h.GetMachineByAnyKey(machineKey, registerRequest.NodeKey, registerRequest.OldNodeKey)
 
 	// 机器已存在，意味着：
 	// - 正常使用(NodeKey一致、未过期、未设置要求过期)
