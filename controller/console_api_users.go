@@ -319,6 +319,15 @@ func (h *Mirage) CAPIPostUsers(
 			h.doAPIResponse(w, "目标用户ID解析失败", nil)
 			return
 		}
+		targetUser, err := h.GetUserByID(tailcfg.UserID(targetUID))
+		if err != nil {
+			h.doAPIResponse(w, "目标用户信息获取失败:"+err.Error(), nil)
+			return
+		}
+		if targetUser.OrganizationID != user.OrganizationID {
+			h.doAPIResponse(w, "目标用户不属于当前组织", nil)
+			return
+		}
 		if err := h.TransferOwner(tailcfg.UserID(user.ID), tailcfg.UserID(targetUID)); err != nil {
 			h.doAPIResponse(w, "修改用户角色失败:"+err.Error(), nil)
 			return
@@ -335,6 +344,10 @@ func (h *Mirage) CAPIPostUsers(
 		targetUser, err := h.GetUserByID(tailcfg.UserID(targetUID))
 		if err != nil {
 			h.doAPIResponse(w, "目标用户信息获取失败:"+err.Error(), nil)
+			return
+		}
+		if targetUser.OrganizationID != user.OrganizationID {
+			h.doAPIResponse(w, "目标用户不属于当前组织", nil)
 			return
 		}
 		if targetUser.Role == RoleOwner {
